@@ -52,12 +52,17 @@ export function acquireLock(dbPath: string): () => void {
 
   if (existsSync(lockPath)) {
     const pid = Number(readFileSync(lockPath, 'utf8').trim());
+    // pid 0 targets our own process group and never throws, so an empty or
+    // truncated lock file must be treated as stale rather than "alive".
+    const plausible = Number.isInteger(pid) && pid > 0;
     let alive = false;
-    try {
-      process.kill(pid, 0);
-      alive = true;
-    } catch {
-      alive = false;
+    if (plausible) {
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
     }
     if (alive) {
       throw new Error(`a teamshare server is already running for ${dbPath} (pid ${pid})`);
@@ -114,6 +119,9 @@ export async function main(argv: string[]): Promise<void> {
     const db = openDb(args.dbPath);
     const removed = removeMember(db, args.email);
     db.close();
+    if (!removed) {
+      process.exitCode = 1;
+    }
     process.stdout.write(removed ? `Removed ${args.email}\n` : `No member ${args.email}\n`);
     return;
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, cpSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, cpSync, symlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +44,20 @@ describe('acquireLock', () => {
     const release = acquireLock(dbPath);
     expect(() => acquireLock(dbPath)).toThrow(/already running/i);
     release();
+    expect(() => acquireLock(dbPath)).not.toThrow();
+  });
+
+  it('reclaims a stale lock left by a crashed process', () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    mkdirSync(dirname(dbPath), { recursive: true });
+    writeFileSync(`${dbPath}.lock`, '');            // truncated: pid parses as 0
+    expect(() => acquireLock(dbPath)).not.toThrow();
+  });
+
+  it('reclaims a lock whose pid is no longer running', () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    mkdirSync(dirname(dbPath), { recursive: true });
+    writeFileSync(`${dbPath}.lock`, '2147483646');  // implausibly high, not running
     expect(() => acquireLock(dbPath)).not.toThrow();
   });
 });
