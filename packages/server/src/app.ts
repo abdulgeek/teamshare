@@ -2,6 +2,7 @@ import express from 'express';
 import type { Db } from './db.js';
 import { authenticate, touchMember } from './http.js';
 import { getUnread } from './unread.js';
+import { registerMcpRoute } from './mcp.js';
 
 export interface AppOptions {
   db: Db;
@@ -32,6 +33,8 @@ export function createApp(opts: AppOptions): express.Express {
     touchMember(db, auth.identity, nowIso);
     res.json(getUnread(db, auth.identity.email, nowIso, expiryDays));
   });
+
+  registerMcpRoute(app, opts);
 
   return app;
 }
