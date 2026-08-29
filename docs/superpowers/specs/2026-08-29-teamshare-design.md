@@ -37,14 +37,20 @@ Claude-specific adapter. Future agents get their own thin adapters; the server
 never changes.
 
 ```
-┌──────────────────────────┐   MCP stdio    ┌────────┐  MCP Streamable HTTP  ┌──────────────────────┐
-│ Claude Code + plugin      │ ─────────────► │ bridge │ ────────────────────► │  teamshare-server    │
-│  · SessionStart hook ─────┼── GET /unread (plain HTTP, same headers) ─────► │  · MCP tools         │
-│  · /teamshare-setup       │                └────────┘                       │  · SQLite (1 file)   │
-│  · /share + skill         │                                                 │  · team token auth   │
-└──────────────────────────┘                                                 └──────────────────────┘
+┌──────────────────────────┐                                                 ┌──────────────────────┐
+│ Claude Code + plugin      │  MCP Streamable HTTP (headers via              │  teamshare-server    │
+│  · .mcp.json (type:http) ─┼───  headersHelper reading ~/.teamshare.json) ─► │  · MCP tools         │
+│  · SessionStart hook ─────┼───  GET /unread (plain HTTP, same headers) ───► │  · SQLite (1 file)   │
+│  · /teamshare-setup       │                                                 │  · team token auth   │
+│  · /share + skill         │                                                 └──────────────────────┘
+└──────────────────────────┘
         (tomorrow: Cursor adapter, Codex adapter → same server, same tools)
 ```
+
+**No bridge process.** Claude Code's plugin `.mcp.json` supports `type: "http"`
+with a `headersHelper` command, verified live against Claude Code 2.1.251
+(§3.4). Both the hook and the MCP connection read the same
+`~/.teamshare.json`, so there is one config source and no second process.
 
 ### 3.1 `teamshare-server`
 
@@ -99,24 +105,28 @@ A single self-hosted TypeScript/Node process.
   reads `git config user.name`/`user.email`, echoes the resolved identity for
   a one-glance confirm, and writes the file. Missing git identity → setup
   fails with instructions to set it.
-- **MCP connection via bundled bridge:** a plugin `.mcp.json` is static and
-  cannot read `~/.teamshare.json`, so the plugin registers a **stdio→HTTP
-  bridge** (`${CLAUDE_PLUGIN_ROOT}/bridge.js`, the standard `mcp-remote`
-  pattern): at startup it reads the config file and proxies MCP stdio to
-  `POST /mcp`, attaching the `Authorization` and identity headers to every
-  request. No env vars, no shell-profile edits; config changes take effect on
-  next session.
-- **SessionStart hook** (registered for `startup`, `resume`, and `clear`
-  sources only; on `compact` it exits 0 immediately — re-injecting mid-session
-  would re-ask about shares the user already declined):
+- **MCP connection via `headersHelper`:** the plugin's `.mcp.json` declares
+  the remote server directly — `type: "http"`, the URL, and
+  `"headersHelper": "${CLAUDE_PLUGIN_ROOT}/headers.sh"`. Claude Code runs that
+  command and merges its JSON stdout (`{header: value}`) into the request
+  headers. `headers.sh` reads `~/.teamshare.json` and emits the
+  `Authorization` and identity headers, lowercasing the email. No bridge
+  process, no env vars, no shell-profile edits, no `mcp-remote` dependency;
+  config changes take effect on the next session. With no config file the
+  helper emits `{}` and the server cleanly rejects with 401.
+- **SessionStart hook** (registered in `hooks/hooks.json` with
+  `"matcher": "startup|resume|clear"`, so `compact` and `fork` never fire it —
+  re-injecting mid-session would re-ask about shares the user already
+  declined. The hook also defensively re-checks the STDIN payload's `source`
+  field, whose exact name is verified in §3.4):
   1. Reads `~/.teamshare.json`; absent → exit 0 silently (not set up).
   2. Calls `GET /unread` with a **1.5 s abort**. Network error/timeout →
      exit 0 silently (a down server never blocks or noises up a session).
      **401 is different:** print one line — `teamshare: token rejected — run
      /teamshare-setup` — so misconfiguration is visible, not silent.
-  3. If unread shares exist, prints the digest to stdout (SessionStart stdout
-     becomes context Claude sees — this is the documented mechanism, not
-     `additionalContext`). The printed block contains:
+  3. If unread shares exist, prints the digest to stdout (for SessionStart,
+     plain stdout on exit 0 becomes context Claude sees). The printed block
+     contains:
      - Each entry's **id**, sender, created_at, priority, and WHAT line —
        the id is required downstream by `read_share`/`acknowledge`.
      - Share-derived text wrapped in untrusted-data delimiters per §8.
@@ -133,6 +143,27 @@ A single self-hosted TypeScript/Node process.
   the engineer's message into the strict format in §5 — commit-message
   register, no preamble, no hedging, no filler — and to show the formatted
   share to the user for a quick confirm before sending.
+
+### 3.4 Verified platform facts
+
+Every item below was verified hands-on before planning — on Claude Code
+2.1.251 and Node v20.19.5, by building a throwaway plugin and running it, and
+by reading the shipped SDK type definitions. Several contradict what the
+public docs imply, so implementers must not "correct" them back.
+
+| Fact | Verified behavior |
+|---|---|
+| Plugin manifest | `.claude-plugin/plugin.json`; `claude plugin validate <dir>` is the authority. Each `userConfig` entry **requires** a `title` field. |
+| Remote MCP from a plugin | `.mcp.json` with `type: "http"` + `headersHelper` works; `${CLAUDE_PLUGIN_ROOT}` expands there. No bridge, no `mcp-remote`. |
+| `headersHelper` | Runs the command, parses stdout as a JSON string→string map, merges it over static `headers`. Emitting `{}` sends no auth headers (server then 401s). Needs Claude Code ≥ 2.1.238 and persisted workspace trust. |
+| SessionStart STDIN | Field is **`source`** — *not* `session_source`. Payload: `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `source`. |
+| Hook context injection | Plain stdout on **exit 0** becomes context. Exit 2 suppresses it. |
+| Hook env | Only `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` are exported. `CLAUDE_PLUGIN_OPTION_*` is **not** available, so `userConfig` cannot feed the hook — hence one shared `~/.teamshare.json`. |
+| Hook matcher | `hooks/hooks.json` → `hooks.SessionStart[].matcher` accepts `"startup|resume|clear"`. |
+| MCP tool validation | `registerTool(name, {title, description, inputSchema}, handler)` where `inputSchema` is a **zod raw shape** (zod v4 works). Constraint violations (`.max()`, enums, missing required) **are** enforced, returned as `isError: true` results — **not** thrown. Tests must assert on `result.isError`. Unknown extra fields are silently stripped. |
+| Stateless HTTP transport | `new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })`, a fresh `McpServer` + transport per request, then `transport.handleRequest(req, res, parsedBody)`. |
+| `instructions` | A real `ServerOptions` field; the client reads it via `getInstructions()`. |
+| better-sqlite3 | v13 requires Node ≥ 22 and **segfaults** on Node 20. Pin **`^12.11.1`** (supports Node 20–24). |
 
 ## 4. MCP tools (the agent-agnostic surface)
 
@@ -309,9 +340,12 @@ session start (Slack, email), share targeting (subsets of the team).
 teamshare/
   packages/
     server/     # teamshare-server: MCP + HTTP + SQLite + CLI
-    plugin/     # Claude Code plugin: bridge.js, hooks/, commands/, skills/, .mcp.json
+    plugin/     # Claude Code plugin:
+                #   .claude-plugin/plugin.json, .mcp.json, headers.sh,
+                #   hooks/, commands/, skills/
   docs/superpowers/specs/2026-08-29-teamshare-design.md
 ```
 
-TypeScript throughout; pnpm workspaces; official MCP SDK; better-sqlite3;
-vitest.
+TypeScript throughout; pnpm workspaces; `@modelcontextprotocol/sdk` ^1.30.0;
+`better-sqlite3` **^12.11.1** (v13 segfaults on Node 20); zod ^4; vitest ^4.
+Node ≥ 20.
