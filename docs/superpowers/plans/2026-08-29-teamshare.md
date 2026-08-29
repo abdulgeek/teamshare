@@ -2620,24 +2620,8 @@ Connect this machine to the team's teamshare server by writing `~/.teamshare.jso
    git config --global user.email "you@example.com"
    ```
 
-3. Verify the server accepts these credentials before writing anything:
-
-   ```bash
-   curl -s -o /dev/null -w '%{http_code}' \
-     -H "Authorization: Bearer <TOKEN>" \
-     -H "X-Teamshare-Email: <EMAIL>" \
-     -H "X-Teamshare-Name: <NAME>" \
-     "<URL>/unread"
-   ```
-
-   - `200` → good, continue.
-   - `401` → the token is wrong. Ask for it again; do not write the file.
-   - `400` → identity headers are malformed. Re-check the git identity.
-   - anything else / no response → the server is unreachable. Report the URL
-     tried and stop.
-
-4. Write `~/.teamshare.json` with exactly these four keys — the email
-   lowercased, and the URL with no trailing slash:
+3. Write the candidate config to a **temp** file `~/.teamshare.json.new` with
+   exactly these four keys — email lowercased, URL with no trailing slash:
 
    ```json
    {
@@ -2648,14 +2632,41 @@ Connect this machine to the team's teamshare server by writing `~/.teamshare.jso
    }
    ```
 
+4. Verify the credentials by reading that temp file — never put the token on a
+   command line, where it would land in the permission UI and the transcript:
+
+   ```bash
+   node -e '
+   const fs=require("node:fs"),os=require("node:os"),path=require("node:path");
+   const p=path.join(os.homedir(),".teamshare.json.new");
+   const c=JSON.parse(fs.readFileSync(p,"utf8"));
+   const base=String(c.url).replace(/[/]+$/,"");
+   fetch(base+"/unread",{headers:{Authorization:"Bearer "+c.token,"X-Teamshare-Email":String(c.email).trim().toLowerCase(),"X-Teamshare-Name":String(c.name).trim()}})
+     .then(r=>{console.log("STATUS "+r.status);})
+     .catch(e=>{console.log("UNREACHABLE "+e.message);});
+   '
+   ```
+
+   - `STATUS 200` → promote: move `~/.teamshare.json.new` to `~/.teamshare.json`.
+   - `STATUS 401` → the token is wrong. Delete the temp file, ask again.
+   - `STATUS 400` → identity headers malformed. Delete the temp file, re-check
+     `git config user.name` / `user.email`.
+   - any other `STATUS <code>` → the server answered but not as expected (wrong
+     path, a proxy, a 5xx). Delete the temp file, report the actual code.
+   - `UNREACHABLE ...` → genuine network failure. Delete the temp file, report
+     the URL tried.
+
 5. Confirm to the user: the URL, the identity that will appear on their shares,
    and that the MCP connection picks this up on the **next** session (the
    current session's connection was configured at startup).
 
 ## Rules
 
-- Never print the token back to the user or into the transcript.
-- Never write the file before the `200` check passes.
+- Never print the token back to the user or into the transcript, and never
+  pass it as a shell argument — read it from the config file instead.
+- The temp file may be written before verification, but `~/.teamshare.json`
+  itself is only created or overwritten after a `STATUS 200`, and the temp file
+  is deleted on every failure branch (a leftover `.new` holds a live token).
 - If `~/.teamshare.json` already exists, show the current URL and identity and
   confirm before overwriting.
 ````
