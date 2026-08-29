@@ -302,6 +302,98 @@ function seedFatShape(raw: Database.Database, token: string): void {
     .run('shr_fat_a', 'member2@team.com', 'viewed', T0);
 }
 
+// A v3-shaped database: today's real production shape post multi-team
+// migration (teams table; team_id on members/shares/receipts; no
+// member_tokens yet). Built by hand, rather than via createV2Db + openDb,
+// because openDb always carries a file all the way to CURRENT_SCHEMA_VERSION
+// in one call — there is no way to stop it at exactly v3 that way once a
+// 3->4 migration exists. Fault-injecting the 3->4 step needs a genuine v3
+// starting point.
+function createV3Db(dbPath: string): Database.Database {
+  const raw = new Database(dbPath);
+  raw.exec(`
+    CREATE TABLE config (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    CREATE TABLE teams (
+      id               TEXT PRIMARY KEY,
+      name             TEXT NOT NULL,
+      token_hash       TEXT NOT NULL UNIQUE,
+      signup_note      TEXT,
+      created_at       TEXT NOT NULL,
+      created_by_email TEXT
+    );
+    CREATE TABLE members (
+      team_id    TEXT NOT NULL,
+      email      TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      first_seen TEXT NOT NULL,
+      last_seen  TEXT NOT NULL,
+      PRIMARY KEY (team_id, email)
+    );
+    CREATE TABLE shares (
+      id           TEXT NOT NULL,
+      team_id      TEXT NOT NULL,
+      sender_email TEXT NOT NULL,
+      what         TEXT NOT NULL,
+      why          TEXT,
+      action       TEXT,
+      tags         TEXT NOT NULL DEFAULT '[]',
+      priority     TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      stale_at     TEXT,
+      PRIMARY KEY (id),
+      UNIQUE (team_id, id)
+    );
+    CREATE TABLE receipts (
+      team_id      TEXT NOT NULL,
+      share_id     TEXT NOT NULL,
+      member_email TEXT NOT NULL,
+      status       TEXT NOT NULL,
+      at           TEXT NOT NULL,
+      PRIMARY KEY (team_id, share_id, member_email),
+      FOREIGN KEY (team_id, share_id) REFERENCES shares (team_id, id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_shares_team_created ON shares (team_id, created_at);
+    CREATE INDEX idx_receipts_team_share ON receipts (team_id, share_id);
+  `);
+  raw.prepare(`INSERT INTO config (key, value) VALUES ('schema_version', '3')`).run();
+  return raw;
+}
+
+// Seeds a genuine v3 fixture: one team (with its admin token), two members,
+// two shares (one stale), one receipt — the v3 analogue of seedFatShape.
+function seedV3FatShape(raw: Database.Database, teamId: string, tokenHash: string): void {
+  raw
+    .prepare(
+      `INSERT INTO teams (id, name, token_hash, signup_note, created_at, created_by_email)
+       VALUES (?, 'v3 team', ?, NULL, ?, NULL)`,
+    )
+    .run(teamId, tokenHash, T0);
+  raw
+    .prepare(`INSERT INTO members (team_id, email, name, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)`)
+    .run(teamId, 'member0@team.com', 'Member 0', T0, T0);
+  raw
+    .prepare(`INSERT INTO members (team_id, email, name, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)`)
+    .run(teamId, 'member1@team.com', 'Member 1', T0, T0);
+  raw
+    .prepare(
+      `INSERT INTO shares (id, team_id, sender_email, what, why, action, tags, priority, created_at, stale_at)
+       VALUES (?, ?, ?, ?, NULL, NULL, '[]', 'fyi', ?, NULL)`,
+    )
+    .run('shr_v3fat_a', teamId, 'member0@team.com', 'v3 fat fixture share a', T0);
+  raw
+    .prepare(
+      `INSERT INTO shares (id, team_id, sender_email, what, why, action, tags, priority, created_at, stale_at)
+       VALUES (?, ?, ?, ?, NULL, NULL, '[]', 'fyi', ?, ?)`,
+    )
+    .run('shr_v3fat_stale', teamId, 'member1@team.com', 'v3 fat fixture stale share', T0, T0);
+  raw
+    .prepare(`INSERT INTO receipts (team_id, share_id, member_email, status, at) VALUES (?, ?, ?, ?, ?)`)
+    .run(teamId, 'shr_v3fat_a', 'member1@team.com', 'viewed', T0);
+}
+
 describe('schema migration', () => {
   let dir: string;
 
@@ -331,7 +423,7 @@ describe('schema migration', () => {
           | undefined;
         const teams = opened.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
         const members = opened.prepare('SELECT COUNT(*) AS n FROM members').get() as { n: number };
-        expect(version?.value).toBe('3');
+        expect(version?.value).toBe('4');
         expect(teams.n).toBe(1);
         expect(members.n).toBe(6);
       } finally {
@@ -397,7 +489,7 @@ describe('schema migration', () => {
           const recoveredVersion = recovered
             .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
             .get() as { value: string };
-          expect(recoveredVersion.value).toBe('3');
+          expect(recoveredVersion.value).toBe('4');
           const teams = recovered.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
           expect(teams.n).toBe(1);
           const members = recovered.prepare('SELECT COUNT(*) AS n FROM members').get() as { n: number };
@@ -406,6 +498,88 @@ describe('schema migration', () => {
           recovered.close();
         }
       });
+    }
+  });
+
+  // The 3->4 migration (member_tokens): a plain CREATE, not a rebuild, so
+  // fault injection here proves something different from the 2->3 block
+  // above — that a fresh v3 database (already past the multi-team rebuild)
+  // reaches v4 cleanly, and that a fault leaves NO trace of the new table
+  // rather than a partially-created one.
+  describe('fault injection: the 3->4 migration (member_tokens) is atomic', () => {
+    const subSteps = ['3->4:member_tokens-table', '3->4:index', '3->4:version'];
+
+    for (const label of subSteps) {
+      it(`rolls back completely when the migration throws at "${label}"`, () => {
+        const dbPath = join(dir, `fault34-${label.replace(/[^a-z0-9]/gi, '_')}.db`);
+        const raw = createV3Db(dbPath);
+        seedV3FatShape(raw, 'tm_v3faultinject', hashToken('ts_v3faultinject'));
+        raw.close();
+
+        const probeDb = new Database(dbPath);
+        probeDb.pragma('foreign_keys = ON');
+        expect(() => {
+          migrateSchema(probeDb, '2026-08-29T00:00:00.000Z', (l) => {
+            if (l === label) throw new Error(`injected fault at ${label}`);
+          });
+        }).toThrow(`injected fault at ${label}`);
+
+        const version = probeDb.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as
+          | { value: string }
+          | undefined;
+        expect(version?.value).toBe('3');
+        // Existing v3 data is completely untouched by the failed 3->4 step.
+        const shareCount = probeDb.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
+        expect(shareCount.n).toBe(2);
+        const tableExists = probeDb
+          .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='member_tokens'`)
+          .all();
+        // member_tokens may or may not exist depending on which sub-step
+        // failed, but if it does, it must be empty — a fault must never
+        // leave a half-created (or worse, populated) credentials table.
+        if (tableExists.length > 0) {
+          const tokenCount = probeDb.prepare('SELECT COUNT(*) AS n FROM member_tokens').get() as { n: number };
+          expect(tokenCount.n).toBe(0);
+        }
+        probeDb.close();
+
+        const recovered = openDb(dbPath);
+        try {
+          const recoveredVersion = recovered
+            .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
+            .get() as { value: string };
+          expect(recoveredVersion.value).toBe('4');
+          const shares = recovered.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
+          expect(shares.n).toBe(2);
+        } finally {
+          recovered.close();
+        }
+      });
+    }
+  });
+
+  // Migration mints nothing: member_tokens must be an empty table
+  // immediately after migrating a real, populated (non-empty) database —
+  // there is no channel to deliver a token to existing members, so
+  // pre-populating one would either write a live credential into a log
+  // somewhere or hand a token to a stale/departed row. Every existing
+  // member must 401 and wait for an explicit invite.
+  it('mints nothing: member_tokens is empty immediately after migrating a populated database', () => {
+    const dbPath = join(dir, 'mints-nothing.db');
+    const raw = createV2Db(dbPath);
+    seedFatShape(raw, 'ts_mintsnothing');
+    raw.close();
+
+    const opened = openDb(dbPath);
+    try {
+      const count = opened.prepare('SELECT COUNT(*) AS n FROM member_tokens').get() as { n: number };
+      expect(count.n).toBe(0);
+      // The historical members rows are untouched — they remain the
+      // migration's own progress bar (see listRoster / GET /members).
+      const members = opened.prepare('SELECT COUNT(*) AS n FROM members').get() as { n: number };
+      expect(members.n).toBe(6);
+    } finally {
+      opened.close();
     }
   });
 
@@ -421,7 +595,7 @@ describe('schema migration', () => {
     const migrated = openDb(dbPath);
     const fresh = openDb(':memory:');
     try {
-      for (const table of ['teams', 'members', 'shares', 'receipts', 'config']) {
+      for (const table of ['teams', 'members', 'shares', 'receipts', 'config', 'member_tokens']) {
         expect(migrated.prepare(`PRAGMA table_info(${table})`).all()).toEqual(
           fresh.prepare(`PRAGMA table_info(${table})`).all(),
         );
@@ -452,11 +626,17 @@ describe('schema migration', () => {
   // Property 4: drive the real app after migrating, rather than asserting on
   // raw SELECTs — so a broken upsertMember ON CONFLICT, or a broken route,
   // cannot slip through.
-  it('serves the real app after migrating: authenticated GET /unread, then create/read/receipt/retract', async () => {
+  // §Migration cutover (2026-08-30 invites design): the legacy team token
+  // is admin-only after migration and 401s on /unread — that is the
+  // deliberate, one-time break. It still works as an admin credential
+  // (POST /invites), which is how the pre-existing members get real access:
+  // this test exercises the whole post-migration lifecycle, not just the
+  // schema shape.
+  it('serves the real app after migrating: the legacy token 401s on /unread but invites members, who then create/read/receipt/retract', async () => {
     const dbPath = join(dir, 'live.db');
-    const TOKEN = 'ts_liveappmigrationtoken';
+    const ADMIN_TOKEN = 'ts_liveappmigrationtoken';
     const raw = createV2Db(dbPath);
-    seedProductionShape(raw, TOKEN);
+    seedProductionShape(raw, ADMIN_TOKEN);
     raw.close();
 
     const liveDb = openDb(dbPath);
@@ -468,21 +648,43 @@ describe('schema migration', () => {
     const addr = server.address();
     const base = typeof addr === 'object' && addr ? `http://127.0.0.1:${addr.port}` : '';
 
-    const headers = (email: string, name: string) => ({
-      Authorization: `Bearer ${TOKEN}`,
-      'X-Teamshare-Email': email,
-      'X-Teamshare-Name': name,
-    });
-
     try {
-      const unreadRes = await fetch(`${base}/unread`, { headers: headers('member0@team.com', 'Member 0') });
+      // The legacy (now admin) token 401s on /unread — the exact cutover
+      // break the design doc requires.
+      const legacyUnread = await fetch(`${base}/unread`, {
+        headers: {
+          Authorization: `Bearer ${ADMIN_TOKEN}`,
+          'X-Teamshare-Email': 'member0@team.com',
+          'X-Teamshare-Name': 'Member 0',
+        },
+      });
+      expect(legacyUnread.status).toBe(401);
+
+      // ...but it still works as an admin credential: this is the remedy
+      // the 401 body points to — invite each pre-existing member a real,
+      // personal token.
+      async function invite(email: string, name: string): Promise<string> {
+        const res = await fetch(`${base}/invites`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, name }),
+        });
+        expect(res.status).toBe(201);
+        return (await res.json()).token as string;
+      }
+
+      const member0Token = await invite('member0@team.com', 'Member 0');
+      const member1Token = await invite('member1@team.com', 'Member 1');
+      const member2Token = await invite('member2@team.com', 'Member 2');
+
+      const unreadRes = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${member0Token}` } });
       expect(unreadRes.status).toBe(200);
       expect((await unreadRes.json()).total).toBe(0);
 
-      async function connect(email: string, name: string) {
+      async function connect(memberToken: string) {
         const client = new Client({ name: 'migration-test', version: '1.0.0' });
         const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
-          requestInit: { headers: headers(email, name) },
+          requestInit: { headers: { Authorization: `Bearer ${memberToken}` } },
         });
         await client.connect(transport);
         return client;
@@ -494,7 +696,7 @@ describe('schema migration', () => {
           .join('\n');
       }
 
-      const author = await connect('member0@team.com', 'Member 0');
+      const author = await connect(member0Token);
       const created = await author.callTool({
         name: 'share',
         arguments: { what: 'post-migration share', priority: 'blocking' },
@@ -502,21 +704,21 @@ describe('schema migration', () => {
       const id = JSON.parse(textOf(created)).id as string;
       await author.close();
 
-      const reader = await connect('member1@team.com', 'Member 1');
+      const reader = await connect(member1Token);
       const digest = textOf(await reader.callTool({ name: 'unread', arguments: {} }));
       expect(digest).toContain('post-migration share');
       const readBack = textOf(await reader.callTool({ name: 'read_share', arguments: { id } }));
       expect(readBack).toContain('post-migration share');
       await reader.close();
 
-      const author2 = await connect('member0@team.com', 'Member 0');
+      const author2 = await connect(member0Token);
       const receiptsSummary = textOf(await author2.callTool({ name: 'receipts', arguments: { id } }));
       expect(receiptsSummary).toContain('viewed');
       const retracted = await author2.callTool({ name: 'retract', arguments: { id } });
       expect(retracted.isError).toBeFalsy();
       await author2.close();
 
-      const verifier = await connect('member2@team.com', 'Member 2');
+      const verifier = await connect(member2Token);
       const afterRetract = await verifier.callTool({ name: 'read_share', arguments: { id } });
       expect(afterRetract.isError).toBe(true);
       await verifier.close();
@@ -548,7 +750,7 @@ describe('schema migration', () => {
       const version = opened.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as {
         value: string;
       };
-      expect(version.value).toBe('3');
+      expect(version.value).toBe('4');
       const teams = opened.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
       expect(teams.n).toBe(0);
     } finally {
@@ -577,7 +779,7 @@ describe('schema migration', () => {
       const version = opened.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as {
         value: string;
       };
-      expect(version.value).toBe('3');
+      expect(version.value).toBe('4');
       const cols = opened.prepare('PRAGMA table_info(shares)').all() as { name: string }[];
       expect(cols.some((c) => c.name === 'stale_at')).toBe(true);
       expect(cols.some((c) => c.name === 'team_id')).toBe(true);

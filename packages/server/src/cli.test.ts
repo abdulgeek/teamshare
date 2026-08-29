@@ -10,7 +10,7 @@ import Database from 'better-sqlite3';
 import { parseArgs, acquireLock, formatServeBanner, formatServeStartupBanner, runDoctor, main } from './cli.js';
 import {
   openDb, hasToken, getOrCreateToken, createTeam, findTeamByName, listTeams,
-  getOrCreateSignupSecret, hashToken, makeTeamScope, upsertMember,
+  getOrCreateSignupSecret, hashToken, makeTeamScope, upsertMember, createMemberToken,
 } from './db.js';
 import { createApp } from './app.js';
 
@@ -470,15 +470,18 @@ describe('rotate-token / remove-member across a multi-team server', () => {
       const addr = server.address() as AddressInfo;
       const base = `http://127.0.0.1:${addr.port}`;
 
-      // Team A's old token is dead...
-      const oldA = await fetch(`${base}/unread`, {
-        headers: { Authorization: 'Bearer ts_a2', 'X-Teamshare-Email': 'a@a.com', 'X-Teamshare-Name': 'A' },
+      // Team A's old admin token is dead — checked against an
+      // admin-authenticated route (/teams/rotate), since /unread never
+      // accepted an admin token in the first place, rotated or not.
+      const oldA = await fetch(`${base}/teams/rotate`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ts_a2' },
       });
       expect(oldA.status).toBe(401);
 
-      // ...but Team B's token still works, untouched.
-      const b = await fetch(`${base}/unread`, {
-        headers: { Authorization: 'Bearer ts_b2', 'X-Teamshare-Email': 'b@b.com', 'X-Teamshare-Name': 'B' },
+      // ...but Team B's admin token still works, untouched.
+      const b = await fetch(`${base}/members`, {
+        headers: { Authorization: 'Bearer ts_b2' },
       });
       expect(b.status).toBe(200);
 
@@ -622,10 +625,19 @@ describe('rotate-token on a migrated database genuinely invalidates the old toke
         'X-Teamshare-Name': 'A',
       });
 
+      // The old admin token: 401 on /unread (true regardless of rotation —
+      // an admin token never worked there) AND on /teams/rotate (true only
+      // because rotation genuinely invalidated it), which is the check that
+      // actually proves rotation did something.
       const oldRes = await fetch(`${base}/unread`, { headers: headers(oldToken) });
       expect(oldRes.status).toBe(401);
+      const oldRotateAttempt = await fetch(`${base}/teams/rotate`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${oldToken}` },
+      });
+      expect(oldRotateAttempt.status).toBe(401);
 
-      const newRes = await fetch(`${base}/unread`, { headers: headers(newToken) });
+      const newRes = await fetch(`${base}/members`, { headers: { Authorization: `Bearer ${newToken}` } });
       expect(newRes.status).toBe(200);
 
       await new Promise<void>((r) => server.close(() => r()));
@@ -744,6 +756,225 @@ describe('create-team (break-glass CLI, local database only)', () => {
     } finally {
       db.close();
     }
+  });
+});
+
+// §Identity comes from the token. Local-database break-glass path, the same
+// shape as rotate-token/remove-member/create-team above.
+describe('invite / revoke / roster (local database)', () => {
+  it('invite mints a working personal token, printed once with a send-privately warning and join instructions', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Only Team', hashToken('ts_invite_only'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['invite', 'sam@team.com', 'Sam', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    const out = chunks.join('');
+    expect(out).toContain('sam@team.com');
+    expect(out.toLowerCase()).toContain('shown once');
+    expect(out.toLowerCase()).toContain('send this token privately');
+    expect(out).toContain('/plugin install teamshare');
+
+    const match = out.match(/Personal token for[^:]*:\s*\n\s*\n\s*(\S+)/);
+    expect(match).toBeTruthy();
+    const token = match![1];
+
+    const verifyDb = openDb(dbPath);
+    try {
+      const app = createApp({ db: verifyDb, expiryDays: 14 });
+      const server = app.listen(0);
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const addr = server.address() as AddressInfo;
+      const base = `http://127.0.0.1:${addr.port}`;
+
+      const res = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${token}` } });
+      expect(res.status).toBe(200);
+
+      await new Promise<void>((r) => server.close(() => r()));
+    } finally {
+      verifyDb.close();
+    }
+  });
+
+  it('invite defaults the name to the email when omitted', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Only Team', hashToken('ts_invite_noname'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['invite', 'noname@team.com', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(chunks.join('')).toContain('Invited: noname@team.com <noname@team.com>');
+  });
+
+  it('errors without minting anything when no email is given', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['invite', '--db', dbPath]);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(chunks.join('')).toContain('email');
+  });
+
+  it('rejects a malformed email without minting a token', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Only Team', hashToken('ts_invite_bademail'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['invite', 'not-an-email', '--db', dbPath]);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(chunks.join('').toLowerCase()).toContain('email');
+  });
+
+  it('revoke kills every live token for an email; a different email is untouched', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    const teamId = createTeam(db, 'Only Team', hashToken('ts_revoke_only'), '2026-01-01T00:00:00Z');
+    const scope = makeTeamScope(db, teamId);
+    const samToken = createMemberToken(scope, 'sam@team.com', 'Sam', '2026-01-01T00:00:00Z');
+    const samToken2 = createMemberToken(scope, 'sam@team.com', 'Sam (laptop)', '2026-01-01T00:00:00Z');
+    const priyaToken = createMemberToken(scope, 'priya@team.com', 'Priya', '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['revoke', 'sam@team.com', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(chunks.join('')).toContain('Revoked 2 live token(s)');
+
+    const verifyDb = openDb(dbPath);
+    try {
+      const app = createApp({ db: verifyDb, expiryDays: 14 });
+      const server = app.listen(0);
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const addr = server.address() as AddressInfo;
+      const base = `http://127.0.0.1:${addr.port}`;
+
+      const sam1 = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${samToken}` } });
+      const sam2 = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${samToken2}` } });
+      expect(sam1.status).toBe(401);
+      expect(sam2.status).toBe(401);
+
+      const priya = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${priyaToken}` } });
+      expect(priya.status).toBe(200);
+
+      await new Promise<void>((r) => server.close(() => r()));
+    } finally {
+      verifyDb.close();
+    }
+  });
+
+  it('revoke reports 0 for an email with no live tokens, without erroring', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Only Team', hashToken('ts_revoke_nobody'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['revoke', 'nobody@team.com', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(chunks.join('').toLowerCase()).toContain('nothing to revoke');
+  });
+
+  it('roster lists a pre-migration member with no token as "invited, not yet active" and an invited-and-connected member as "active"', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    const teamId = createTeam(db, 'Only Team', hashToken('ts_roster_only'), '2026-01-01T00:00:00Z');
+    const scope = makeTeamScope(db, teamId);
+    upsertMember(scope, 'legacy@team.com', 'Legacy', '2026-01-01T00:00:00Z');
+    createMemberToken(scope, 'sam@team.com', 'Sam', '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['roster', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    const out = chunks.join('');
+    expect(out).toContain('Only Team');
+    expect(out).toContain('legacy@team.com');
+    expect(out).toContain('invited, not yet active');
+    expect(out).toContain('sam@team.com');
+    expect(out).toContain('active');
+  });
+
+  it('invite/revoke/roster require --team on a multi-team server and operate on the named one', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Team A', hashToken('ts_invite_multi_a'), '2026-01-01T00:00:00Z');
+    createTeam(db, 'Team B', hashToken('ts_invite_multi_b'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const errChunks: string[] = [];
+    const originalErr = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { errChunks.push(String(chunk)); return true; };
+    try {
+      await main(['invite', 'sam@team.com', '--db', dbPath]);
+    } finally {
+      process.stderr.write = originalErr;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(errChunks.join('')).toContain('multiple teams');
+
+    const outChunks: string[] = [];
+    const originalOut = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { outChunks.push(String(chunk)); return true; };
+    try {
+      await main(['invite', 'sam@team.com', '--team', 'Team A', '--db', dbPath]);
+    } finally {
+      process.stdout.write = originalOut;
+    }
+    expect(outChunks.join('')).toContain('"Team A"');
   });
 });
 
@@ -888,9 +1119,12 @@ describe('doctor', () => {
   it('names the team a token belongs to, against a real server with a real team', async () => {
     writeGitConfig('Priya', 'priya@team.com');
     const realDb = openDb(':memory:');
-    const teamId = createTeam(realDb, 'Rocket Squad', hashToken('ts_rocket_team'), '2026-01-01T00:00:00Z');
+    const teamId = createTeam(realDb, 'Rocket Squad', hashToken('ts_rocket_admin'), '2026-01-01T00:00:00Z');
     const scope = makeTeamScope(realDb, teamId);
-    upsertMember(scope, 'priya@team.com', 'Priya', '2026-01-01T00:00:00Z');
+    // doctor checks /unread, which now needs a real personal member token —
+    // the admin (team) token used to work here but no longer grants data
+    // access at all.
+    const memberToken = createMemberToken(scope, 'priya@team.com', 'Priya', '2026-01-01T00:00:00Z');
     const realApp = createApp({ db: realDb, expiryDays: 14 });
     const realServer = realApp.listen(0);
     await new Promise<void>((resolve) => realServer.once('listening', resolve));
@@ -898,7 +1132,7 @@ describe('doctor', () => {
     const realBase = `http://127.0.0.1:${addr.port}`;
 
     try {
-      const { exitCode, output } = await runDoctor(realBase, 'ts_rocket_team');
+      const { exitCode, output } = await runDoctor(realBase, memberToken);
       expect(exitCode).toBe(0);
       expect(output).toContain('connected to team: Rocket Squad');
     } finally {

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { openDb, createTeam, hashToken, findTeamByName, type Db } from './db.js';
+import { openDb, createTeam, hashToken, findTeamByName, makeTeamScope, createMemberToken, type Db } from './db.js';
 import { createApp } from './app.js';
 import {
   resolveSecretSource,
@@ -16,14 +16,22 @@ import {
   createTeamOverHttp,
   rotateTeamOverHttp,
   verifyTeam,
+  inviteMemberOverHttp,
+  revokeMemberOverHttp,
+  getRosterOverHttp,
   formatJoinInstructions,
   formatTokenOnceWarning,
   formatCreateOutput,
   formatRotateOutput,
+  formatMemberTokenOnceWarning,
+  formatInviteOutput,
+  formatRevokeOutput,
+  formatRosterOutput,
   parseTeamArgv,
   runTeamCli,
   SIGNUP_SECRET_ENV,
   TEAM_TOKEN_ENV,
+  ADMIN_TOKEN_ENV,
 } from './team.js';
 
 const NOW = '2026-08-29T00:00:00.000Z';
@@ -74,6 +82,25 @@ describe('parseTeamArgv', () => {
     // No field anywhere in the parsed result holds the trailing extra value —
     // there is simply no positional slot for a secret to land in.
     expect(Object.values(parsed)).not.toContain('shhh-would-be-secret');
+  });
+
+  it('parses invite with a url, email, and optional name — never a secret positional', () => {
+    const withName = parseTeamArgv(['invite', 'https://ts.example.com', 'sam@team.com', 'Sam']);
+    expect(withName).toMatchObject({ cmd: 'invite', url: 'https://ts.example.com', email: 'sam@team.com', name: 'Sam' });
+
+    const withoutName = parseTeamArgv(['invite', 'https://ts.example.com', 'sam@team.com']);
+    expect(withoutName).toMatchObject({ cmd: 'invite', url: 'https://ts.example.com', email: 'sam@team.com' });
+    expect(withoutName.name).toBeUndefined();
+  });
+
+  it('parses revoke with a url and email', () => {
+    const parsed = parseTeamArgv(['revoke', 'https://ts.example.com', 'sam@team.com']);
+    expect(parsed).toMatchObject({ cmd: 'revoke', url: 'https://ts.example.com', email: 'sam@team.com' });
+  });
+
+  it('parses roster with just a url', () => {
+    const parsed = parseTeamArgv(['roster', 'https://ts.example.com']);
+    expect(parsed).toMatchObject({ cmd: 'roster', url: 'https://ts.example.com' });
   });
 });
 
@@ -247,13 +274,19 @@ describe('createTeamOverHttp / rotateTeamOverHttp / verifyTeam against a real lo
     expect(rotated.name).toBe('Existing Team');
     expect(rotated.token).not.toBe(oldToken);
 
-    const oldRes = await fetch(`${base}/unread`, {
-      headers: { Authorization: `Bearer ${oldToken}`, 'X-Teamshare-Email': identity.email, 'X-Teamshare-Name': identity.name },
+    // The old ADMIN token must genuinely stop working on another
+    // admin-authenticated route (POST /teams/rotate again), not merely
+    // "never worked on /unread" — an admin token never grants /unread
+    // access at all, with or without rotation, so that route can't prove
+    // anything about rotation specifically.
+    const oldRes = await fetch(`${base}/teams/rotate`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${oldToken}` },
     });
     expect(oldRes.status).toBe(401);
 
-    const newRes = await fetch(`${base}/unread`, {
-      headers: { Authorization: `Bearer ${rotated.token}`, 'X-Teamshare-Email': identity.email, 'X-Teamshare-Name': identity.name },
+    const newRes = await fetch(`${base}/members`, {
+      headers: { Authorization: `Bearer ${rotated.token}` },
     });
     expect(newRes.status).toBe(200);
   });
@@ -265,28 +298,25 @@ describe('createTeamOverHttp / rotateTeamOverHttp / verifyTeam against a real lo
     expect(result.status).toBe(401);
   });
 
-  it('verifyTeam reports both /health and /unread OK for a genuinely working token', async () => {
+  it('verifyTeam reports both /health and /members OK for a genuinely working admin token', async () => {
     const created = await createTeamOverHttp({ url: base, name: 'Verify Team', secret: SIGNUP_SECRET });
     if (!created.ok) throw new Error('unreachable');
     const verify = await verifyTeam({ url: base, token: created.token, identity });
     expect(verify.healthy).toBe(true);
     expect(verify.lines.some((l) => l.includes('[OK]') && l.includes('/health'))).toBe(true);
-    expect(verify.lines.some((l) => l.includes('[OK]') && l.includes('/unread'))).toBe(true);
+    expect(verify.lines.some((l) => l.includes('[OK]') && l.includes('/members'))).toBe(true);
   });
 
-  it('verifyTeam still checks /health but skips /unread (and says why) with no git identity', async () => {
+  it('verifyTeam checks /health and /members the same way with no git identity — neither leg needs one', async () => {
+    // Unlike the pre-invites /unread check, verifying an ADMIN token needs no
+    // per-user identity at all, so there is no "skip this leg" branch left —
+    // this is now the same check whether or not a git identity resolves.
     const created = await createTeamOverHttp({ url: base, name: 'No Identity Team', secret: SIGNUP_SECRET });
     if (!created.ok) throw new Error('unreachable');
     const verify = await verifyTeam({ url: base, token: created.token, identity: null });
+    expect(verify.healthy).toBe(true);
     expect(verify.lines.some((l) => l.includes('[OK]') && l.includes('/health'))).toBe(true);
-    expect(verify.lines.some((l) => l.toLowerCase().includes('skipped'))).toBe(true);
-    // Env-var form, never positional — the re-verify suggestion here carries
-    // a real token, and doctor now accepts TEAMSHARE_URL/TEAMSHARE_TOKEN so
-    // following this advice never puts it into shell history or `ps` output.
-    expect(
-      verify.lines.some((l) => l.includes(`TEAMSHARE_URL=${base} TEAMSHARE_TOKEN=${created.token} teamshare doctor`)),
-    ).toBe(true);
-    expect(verify.lines.some((l) => l.includes(`teamshare doctor ${base} ${created.token}`))).toBe(false);
+    expect(verify.lines.some((l) => l.includes('[OK]') && l.includes('/members'))).toBe(true);
   });
 
   it('verifyTeam reports [PROBLEM] when the token has already been invalidated', async () => {
@@ -295,7 +325,145 @@ describe('createTeamOverHttp / rotateTeamOverHttp / verifyTeam against a real lo
     await rotateTeamOverHttp({ url: base, token: created.token }); // invalidates created.token
     const verify = await verifyTeam({ url: base, token: created.token, identity });
     expect(verify.healthy).toBe(false);
-    expect(verify.lines.some((l) => l.includes('[PROBLEM]') && l.includes('/unread'))).toBe(true);
+    expect(verify.lines.some((l) => l.includes('[PROBLEM]') && l.includes('/members'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// inviteMemberOverHttp / revokeMemberOverHttp / getRosterOverHttp: the
+// standalone-script equivalents of POST /invites, POST /revoke, GET
+// /members — the day-to-day admin operations a lead can run with only the
+// admin token, no AWS/SSH access to the server box.
+// ---------------------------------------------------------------------------
+
+describe('inviteMemberOverHttp / revokeMemberOverHttp / getRosterOverHttp against a real local server', () => {
+  let db: Db;
+  let server: Server;
+  let base: string;
+  let adminToken: string;
+
+  beforeEach(async () => {
+    db = openDb(':memory:');
+    adminToken = 'ts_team_http_admin';
+    createTeam(db, 'HTTP Ops Team', hashToken(adminToken), NOW);
+    const app = createApp({ db, expiryDays: 14, now: () => NOW });
+    server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const addr = server.address();
+    if (typeof addr === 'object' && addr) base = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+    db.close();
+  });
+
+  it('invites a member, and the returned token genuinely works', async () => {
+    const invited = await inviteMemberOverHttp({ url: base, adminToken, email: 'sam@team.com', name: 'Sam' });
+    expect(invited.ok).toBe(true);
+    if (!invited.ok) throw new Error('unreachable');
+    expect(invited.email).toBe('sam@team.com');
+    expect(invited.name).toBe('Sam');
+
+    const check = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${invited.token}` } });
+    expect(check.status).toBe(200);
+  });
+
+  it('fails with 401 and mints nothing when the admin token is wrong', async () => {
+    const result = await inviteMemberOverHttp({ url: base, adminToken: 'ts_wrong', email: 'sam@team.com' });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.status).toBe(401);
+  });
+
+  it('revokes every live token for an email', async () => {
+    const invited = await inviteMemberOverHttp({ url: base, adminToken, email: 'sam@team.com' });
+    if (!invited.ok) throw new Error('unreachable');
+
+    const revoked = await revokeMemberOverHttp({ url: base, adminToken, email: 'sam@team.com' });
+    expect(revoked.ok).toBe(true);
+    if (!revoked.ok) throw new Error('unreachable');
+    expect(revoked.revoked).toBe(1);
+
+    const check = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${invited.token}` } });
+    expect(check.status).toBe(401);
+  });
+
+  it('fetches the roster, reflecting an invited member as active', async () => {
+    const invited = await inviteMemberOverHttp({ url: base, adminToken, email: 'sam@team.com', name: 'Sam' });
+    if (!invited.ok) throw new Error('unreachable');
+    await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${invited.token}` } }); // "connects" once
+
+    const roster = await getRosterOverHttp({ url: base, adminToken });
+    expect(roster.ok).toBe(true);
+    if (!roster.ok) throw new Error('unreachable');
+    expect(roster.team).toBe('HTTP Ops Team');
+    const sam = roster.members.find((m) => m.email === 'sam@team.com');
+    expect(sam?.status).toBe('active');
+  });
+
+  it('reports a network failure honestly instead of throwing, for all three operations', async () => {
+    const badUrl = 'http://127.0.0.1:1';
+    const invited = await inviteMemberOverHttp({ url: badUrl, adminToken, email: 'x@y.com', timeoutMs: 500 });
+    const revoked = await revokeMemberOverHttp({ url: badUrl, adminToken, email: 'x@y.com', timeoutMs: 500 });
+    const roster = await getRosterOverHttp({ url: badUrl, adminToken, timeoutMs: 500 });
+    for (const result of [invited, revoked, roster]) {
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('unreachable');
+      expect(result.status).toBe(0);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Output formatting for invite/revoke/roster.
+// ---------------------------------------------------------------------------
+
+describe('formatMemberTokenOnceWarning / formatInviteOutput / formatRevokeOutput / formatRosterOutput', () => {
+  it('formatMemberTokenOnceWarning names the email, says shown once, and includes the token', () => {
+    const text = formatMemberTokenOnceWarning('sam@team.com', 'tsm_abc123');
+    expect(text).toContain('sam@team.com');
+    expect(text.toLowerCase()).toContain('shown once');
+    expect(text).toContain('tsm_abc123');
+  });
+
+  it('formatInviteOutput tells the lead to send the token privately, and includes join instructions', () => {
+    const out = formatInviteOutput({ url: 'https://ts.example.com', email: 'sam@team.com', name: 'Sam', token: 'tsm_the_token' });
+    expect(out.toLowerCase()).toContain('send this token privately');
+    expect(out).toContain('sam@team.com');
+    expect(out).toContain('tsm_the_token');
+    expect(out).toContain('/plugin install teamshare');
+  });
+
+  it('formatRevokeOutput reports a positive count as revoked, and zero as nothing to revoke', () => {
+    const some = formatRevokeOutput({ email: 'sam@team.com', revoked: 2 });
+    expect(some).toContain('Revoked 2 live token(s)');
+    expect(some).toContain('sam@team.com');
+
+    const none = formatRevokeOutput({ email: 'nobody@team.com', revoked: 0 });
+    expect(none.toLowerCase()).toContain('nothing to revoke');
+  });
+
+  it('formatRosterOutput lists each member with their status, active token count, and last-seen', () => {
+    const out = formatRosterOutput({
+      team: 'Rocket Squad',
+      members: [
+        { email: 'sam@team.com', name: 'Sam', status: 'active', active_tokens: 1, first_seen: NOW, last_seen: NOW },
+        { email: 'legacy@team.com', name: null, status: 'invited, not yet active', active_tokens: 0, first_seen: null, last_seen: null },
+      ],
+    });
+    expect(out).toContain('Rocket Squad');
+    expect(out).toContain('sam@team.com');
+    expect(out).toContain('active');
+    expect(out).toContain('legacy@team.com');
+    expect(out).toContain('invited, not yet active');
+    expect(out).toContain('never connected');
+  });
+
+  it('formatRosterOutput handles an empty roster without crashing', () => {
+    const out = formatRosterOutput({ team: 'Empty Team', members: [] });
+    expect(out).toContain('Empty Team');
   });
 });
 
@@ -437,7 +605,7 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
     expect(result.stdout).toContain('teamshare create-team — success');
     expect(result.stdout).toContain('CLI Squad');
     expect(result.stdout).toContain('[OK] server reachable');
-    expect(result.stdout.match(/\[OK\]/g)?.length).toBeGreaterThanOrEqual(2); // /health AND /unread
+    expect(result.stdout.match(/\[OK\]/g)?.length).toBeGreaterThanOrEqual(2); // /health AND /members
     expect(result.stdout).not.toContain(SIGNUP_SECRET);
     expect(result.stderr).not.toContain(SIGNUP_SECRET);
     expect(findTeamByName(db, 'CLI Squad')).toBeTruthy();
@@ -484,8 +652,13 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
     expect(result.stdout).not.toContain(oldToken);
     expect(result.stdout.toLowerCase()).toContain('stopped working');
 
-    const oldRes = await fetch(`${base}/unread`, {
-      headers: { Authorization: `Bearer ${oldToken}`, 'X-Teamshare-Email': identity.email, 'X-Teamshare-Name': identity.name },
+    // The old admin token must genuinely stop working on another
+    // admin-authenticated route — see the identical reasoning in the
+    // rotateTeamOverHttp test above for why /teams/rotate, not /unread, is
+    // the honest thing to check here.
+    const oldRes = await fetch(`${base}/teams/rotate`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${oldToken}` },
     });
     expect(oldRes.status).toBe(401);
   });
@@ -498,6 +671,84 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
     const unknown = await runTeamCli(['bogus', base], { env: {}, isTTY: false, identity });
     expect(unknown.exitCode).toBe(1);
     expect(unknown.stderr).toContain('bogus');
+  });
+
+  describe('invite / revoke / roster, via the ADMIN_TOKEN environment variable', () => {
+    let adminToken: string;
+
+    beforeEach(() => {
+      adminToken = 'ts_cli_admin_token';
+      createTeam(db, 'Admin Ops Team', hashToken(adminToken), NOW);
+    });
+
+    it('invite succeeds and the printed token genuinely works', async () => {
+      const result = await runTeamCli(['invite', base, 'sam@team.com', 'Sam'], {
+        env: { [ADMIN_TOKEN_ENV]: adminToken },
+        isTTY: false,
+        identity,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('teamshare invite — success');
+      expect(result.stdout).toContain('sam@team.com');
+      expect(result.stdout).not.toContain(adminToken);
+
+      const match = result.stdout.match(/Personal token for[^:]*:\s*\n\s*\n\s*(\S+)/);
+      expect(match).toBeTruthy();
+      const memberToken = match![1];
+      const check = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${memberToken}` } });
+      expect(check.status).toBe(200);
+    });
+
+    it('invite fails loudly when the admin token is wrong, minting nothing', async () => {
+      const result = await runTeamCli(['invite', base, 'sam@team.com'], {
+        env: { [ADMIN_TOKEN_ENV]: 'ts_wrong' },
+        isTTY: false,
+        identity,
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.toLowerCase()).toContain('failed to invite');
+    });
+
+    it('revoke kills a live token, and the holder 401s afterward', async () => {
+      const scope = makeTeamScope(db, findTeamByName(db, 'Admin Ops Team')!.id);
+      const memberToken = createMemberToken(scope, 'sam@team.com', 'Sam', NOW);
+
+      const result = await runTeamCli(['revoke', base, 'sam@team.com'], {
+        env: { [ADMIN_TOKEN_ENV]: adminToken },
+        isTTY: false,
+        identity,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('Revoked 1 live token(s)');
+
+      const check = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${memberToken}` } });
+      expect(check.status).toBe(401);
+    });
+
+    it('roster lists a known member', async () => {
+      const scope = makeTeamScope(db, findTeamByName(db, 'Admin Ops Team')!.id);
+      createMemberToken(scope, 'sam@team.com', 'Sam', NOW);
+
+      const result = await runTeamCli(['roster', base], {
+        env: { [ADMIN_TOKEN_ENV]: adminToken },
+        isTTY: false,
+        identity,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('Admin Ops Team');
+      expect(result.stdout).toContain('sam@team.com');
+      expect(result.stdout).toContain('active');
+    });
+
+    it('invite/revoke/roster fail immediately (no hang, no prompt) with no admin token and a non-TTY stdin', async () => {
+      const promptFn = vi.fn(async () => {
+        throw new Error('should never prompt when isTTY is false');
+      });
+      const result = await runTeamCli(['roster', base], { env: {}, isTTY: false, identity, promptFn });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(ADMIN_TOKEN_ENV);
+      expect(promptFn).not.toHaveBeenCalled();
+    });
   });
 });
 

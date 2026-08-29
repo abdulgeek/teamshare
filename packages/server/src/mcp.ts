@@ -312,14 +312,15 @@ export function registerMcpRoute(app: express.Express, opts: AppOptions): void {
   const now = opts.now ?? (() => new Date().toISOString());
 
   app.post('/mcp', async (req, res) => {
-    const auth = authenticate(db, req);
+    const nowIso = now();
+    const auth = authenticate(db, req, nowIso);
     if (!auth.ok) {
       res.status(auth.status).json({ error: auth.message });
       return;
     }
-    const nowIso = now();
-    // authenticate() resolved the caller's team from their bearer token and
-    // built the scope right there; this is the only scope this request uses.
+    // authenticate() resolved the caller's identity and team from their
+    // personal bearer token and built the scope right there; this is the
+    // only scope this request uses.
     const scope = auth.scope;
     touchMember(scope, auth.identity, nowIso);
 

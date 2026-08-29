@@ -43,6 +43,11 @@ import { homedir } from 'node:os';
 
 export const SIGNUP_SECRET_ENV = 'TEAMSHARE_SIGNUP_SECRET';
 export const TEAM_TOKEN_ENV = 'TEAMSHARE_TEAM_TOKEN';
+// The admin token — the same value create-team/rotate-team print, now used
+// for the day-to-day admin operations (invite/revoke/roster) instead of the
+// rarer team-creation/rotation ones. Never a positional argument, same rule
+// as the other two secrets above.
+export const ADMIN_TOKEN_ENV = 'TEAMSHARE_ADMIN_TOKEN';
 
 // ---------------------------------------------------------------------------
 // Identity (needed only to verify the freshly-minted token against /unread,
@@ -244,15 +249,21 @@ export async function rotateTeamOverHttp(opts) {
   }
 }
 
-// Every surface in this system ends by verifying: call /health and /unread
+// Every surface in this system ends by verifying: call /health and /members
 // with the new token and report the outcome. Every delivery failure here is
 // silent by design, so a lead who creates a team and distributes a token
-// otherwise has no evidence anything works. When no git identity resolves
-// on this machine, the /unread leg (which needs identity headers) is
-// skipped rather than sent malformed — the caller still gets the /health
-// result and an explicit note of what wasn't checked.
+// otherwise has no evidence anything works.
+//
+// This checks /members, not /unread: the token this verifies is the team's
+// ADMIN token (create-team/rotate-team mint it), and after the invites
+// redesign an admin token grants no access to shares, receipts, or the
+// digest at all — /unread is expected to 401 for it, by design. /members is
+// the one data-plane-adjacent thing an admin token genuinely does, so it's
+// the honest thing to verify here. Unlike the old /unread check, this needs
+// no per-user git identity, so there is no longer an "identity missing,
+// skip this leg" branch — every admin token is checked the same way.
 export async function verifyTeam(opts) {
-  const { url, token, identity, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
+  const { url, token, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
   const base = normalizeServerUrl(url);
   const lines = [];
   let healthy = true;
@@ -269,45 +280,109 @@ export async function verifyTeam(opts) {
     lines.push(`[PROBLEM] could not reach ${base}/health (${err && err.message ? err.message : err})`);
   }
 
-  if (!identity) {
-    lines.push(
-      '[INFO] skipped the /unread check — no git identity resolved on this machine. Set it, then run: ' +
-        // Env-var form, never positional: `token` here is a real, freshly
-        // minted credential, and doctor now accepts TEAMSHARE_URL/
-        // TEAMSHARE_TOKEN precisely so this suggestion doesn't put it into
-        // shell history or `ps` output the moment someone follows it.
-        `TEAMSHARE_URL=${url} TEAMSHARE_TOKEN=${token} teamshare doctor`,
-    );
-    return { healthy, lines };
-  }
-
   try {
     const res = await fetchWithTimeout(
       fetchImpl,
-      `${base}/unread`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'X-Teamshare-Email': identity.email.trim().toLowerCase(),
-          'X-Teamshare-Name': identity.name.trim(),
-        },
-      },
+      `${base}/members`,
+      { headers: { Authorization: `Bearer ${token}` } },
       timeoutMs,
     );
     if (res.status === 200) {
       const body = await res.json().catch(() => null);
-      const n = body && typeof body.total === 'number' ? body.total : 'an unknown number of';
-      lines.push(`[OK] ${base}/unread returned 200 (${n} unread share(s))`);
+      const n = body && Array.isArray(body.members) ? body.members.length : 'an unknown number of';
+      lines.push(`[OK] ${base}/members returned 200 (${n} known email(s))`);
     } else {
       healthy = false;
-      lines.push(`[PROBLEM] ${base}/unread returned ${res.status} — the new token does not work yet`);
+      lines.push(`[PROBLEM] ${base}/members returned ${res.status} — the new admin token does not work yet`);
     }
   } catch (err) {
     healthy = false;
-    lines.push(`[PROBLEM] could not reach ${base}/unread (${err && err.message ? err.message : err})`);
+    lines.push(`[PROBLEM] could not reach ${base}/members (${err && err.message ? err.message : err})`);
   }
 
   return { healthy, lines };
+}
+
+// POST /invites, admin-authenticated (the team's admin token, formerly "the"
+// team token — see docs/superpowers/specs/2026-08-30-teamshare-invites-design.md).
+// Mints a brand-new personal credential for one named email. There is no
+// redemption step: the returned token IS that person's credential, exactly
+// as-is, the same value they paste at install time.
+export async function inviteMemberOverHttp(opts) {
+  const { url, adminToken, email, name, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
+  const base = normalizeServerUrl(url);
+  try {
+    const res = await fetchWithTimeout(
+      fetchImpl,
+      `${base}/invites`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${adminToken}` },
+        body: JSON.stringify(name ? { email, name } : { email }),
+      },
+      timeoutMs,
+    );
+    const body = await res.json().catch(() => null);
+    if (res.ok) {
+      return { ok: true, email: body && body.email, name: body && body.name, token: body && body.token };
+    }
+    const message = (body && typeof body.error === 'string' && body.error) || `server responded ${res.status}`;
+    return { ok: false, status: res.status, message };
+  } catch (err) {
+    return { ok: false, status: 0, message: `could not reach ${base} (${err && err.message ? err.message : err})` };
+  }
+}
+
+// POST /revoke, admin-authenticated — kills every LIVE token for one email,
+// on every device it was ever issued to. This is the one-command remedy for
+// an ex-employee.
+export async function revokeMemberOverHttp(opts) {
+  const { url, adminToken, email, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
+  const base = normalizeServerUrl(url);
+  try {
+    const res = await fetchWithTimeout(
+      fetchImpl,
+      `${base}/revoke`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${adminToken}` },
+        body: JSON.stringify({ email }),
+      },
+      timeoutMs,
+    );
+    const body = await res.json().catch(() => null);
+    if (res.ok) {
+      return { ok: true, email: body && body.email, revoked: body && typeof body.revoked === 'number' ? body.revoked : 0 };
+    }
+    const message = (body && typeof body.error === 'string' && body.error) || `server responded ${res.status}`;
+    return { ok: false, status: res.status, message };
+  } catch (err) {
+    return { ok: false, status: 0, message: `could not reach ${base} (${err && err.message ? err.message : err})` };
+  }
+}
+
+// GET /members, admin-authenticated (a member token also works server-side,
+// but this script only ever holds the admin token, exactly like the other
+// two operations above).
+export async function getRosterOverHttp(opts) {
+  const { url, adminToken, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
+  const base = normalizeServerUrl(url);
+  try {
+    const res = await fetchWithTimeout(
+      fetchImpl,
+      `${base}/members`,
+      { headers: { Authorization: `Bearer ${adminToken}` } },
+      timeoutMs,
+    );
+    const body = await res.json().catch(() => null);
+    if (res.ok) {
+      return { ok: true, team: body && body.team, members: (body && body.members) || [] };
+    }
+    const message = (body && typeof body.error === 'string' && body.error) || `server responded ${res.status}`;
+    return { ok: false, status: res.status, message };
+  } catch (err) {
+    return { ok: false, status: 0, message: `could not reach ${base} (${err && err.message ? err.message : err})` };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +474,59 @@ export function formatCreateOutput(opts) {
   return lines.join('\n') + '\n';
 }
 
+// The plain-language warning for a freshly minted PERSONAL token — same
+// shape as formatTokenOnceWarning above, but named for what it actually is
+// now: this is one person's own credential, not "the" team's.
+export function formatMemberTokenOnceWarning(email, token) {
+  return [
+    `Personal token for ${email} (shown once — this cannot be recovered later; save it in a password manager now):`,
+    '',
+    `  ${token}`,
+  ].join('\n');
+}
+
+export function formatInviteOutput(opts) {
+  const { url, email, name, token } = opts;
+  const lines = [
+    'teamshare invite — success',
+    '',
+    `Invited: ${name} <${email}>`,
+    '',
+    formatMemberTokenOnceWarning(email, token),
+    '',
+    `Send this token privately to ${email} only — never post it in a shared channel or thread with`,
+    'others on the team. Whoever holds it can publish shares and record read receipts as this person.',
+    '',
+    formatJoinInstructions({ url, token }),
+  ];
+  return lines.join('\n') + '\n';
+}
+
+export function formatRevokeOutput(opts) {
+  const { email, revoked } = opts;
+  const lines = [
+    revoked > 0
+      ? `Revoked ${revoked} live token(s) for ${email}. Every device using one of them gets a 401 on ` +
+        'its next request and needs a fresh invite to regain access.'
+      : `No live tokens found for ${email} — nothing to revoke.`,
+  ];
+  return lines.join('\n') + '\n';
+}
+
+export function formatRosterOutput(opts) {
+  const { team, members } = opts;
+  const lines = [`Roster for "${team}" (${members.length} known email(s)):`, ''];
+  if (members.length === 0) {
+    lines.push('(nobody yet — invite the first teammate with `teamshare-team.mjs invite`)');
+  }
+  for (const m of members) {
+    const seen = m.last_seen ? `last seen ${m.last_seen}` : 'never connected';
+    const label = m.name && m.name !== m.email ? `${m.email} (${m.name})` : m.email;
+    lines.push(`  - ${label} — ${m.status}, ${m.active_tokens} active token(s), ${seen}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
 export function formatRotateOutput(opts) {
   const { url, team, verify } = opts;
   const lines = [
@@ -426,13 +554,20 @@ export function formatRotateOutput(opts) {
 
 // ---------------------------------------------------------------------------
 // Argv parsing — a SEPARATE contract from teamshare-connect.mjs's
-// parseConnectArgv. Two subcommands (create-team, rotate-team), never a
-// secret positional.
+// parseConnectArgv. Five subcommands (create-team, rotate-team, invite,
+// revoke, roster), never a secret positional.
 // ---------------------------------------------------------------------------
 
 export function parseTeamArgv(argv) {
   const rest = [...argv];
-  const parsed = { cmd: undefined, url: undefined, name: undefined, help: false, unknown: undefined };
+  const parsed = {
+    cmd: undefined,
+    url: undefined,
+    name: undefined,
+    email: undefined,
+    help: false,
+    unknown: undefined,
+  };
 
   if (rest.length === 0 || rest[0] === '--help' || rest[0] === '-h') {
     parsed.help = true;
@@ -447,6 +582,18 @@ export function parseTeamArgv(argv) {
   } else if (first === 'rotate-team') {
     parsed.cmd = 'rotate-team';
     if (rest[0] !== undefined && !rest[0].startsWith('-')) parsed.url = rest.shift();
+  } else if (first === 'invite') {
+    parsed.cmd = 'invite';
+    if (rest[0] !== undefined && !rest[0].startsWith('-')) parsed.url = rest.shift();
+    if (rest[0] !== undefined && !rest[0].startsWith('-')) parsed.email = rest.shift();
+    if (rest[0] !== undefined && !rest[0].startsWith('-')) parsed.name = rest.shift();
+  } else if (first === 'revoke') {
+    parsed.cmd = 'revoke';
+    if (rest[0] !== undefined && !rest[0].startsWith('-')) parsed.url = rest.shift();
+    if (rest[0] !== undefined && !rest[0].startsWith('-')) parsed.email = rest.shift();
+  } else if (first === 'roster') {
+    parsed.cmd = 'roster';
+    if (rest[0] !== undefined && !rest[0].startsWith('-')) parsed.url = rest.shift();
   } else {
     parsed.cmd = 'unknown';
     parsed.unknown = first;
@@ -455,7 +602,8 @@ export function parseTeamArgv(argv) {
   return parsed;
 }
 
-const USAGE = `teamshare-team — create a team, or rotate a team's token, on a shared teamshare server
+const USAGE = `teamshare-team — create/rotate a team, and invite/revoke/roster its members, on a shared \
+teamshare server
 
 Standalone, dependency-free — no clone, no pnpm install, no build required.
 This is the real first-time path: it works before anything else is installed.
@@ -463,11 +611,16 @@ This is the real first-time path: it works before anything else is installed.
 Usage:
   node teamshare-team.mjs create-team <server-url> "<team name>"
   node teamshare-team.mjs rotate-team <server-url>
+  node teamshare-team.mjs invite <server-url> <email> ["<name>"]
+  node teamshare-team.mjs revoke <server-url> <email>
+  node teamshare-team.mjs roster <server-url>
 
-The signup secret (create-team) and the team's current token (rotate-team) are never accepted as
-arguments — they would land in shell history and \`ps\` output. Set ${SIGNUP_SECRET_ENV} /
-${TEAM_TOKEN_ENV}, or leave it unset and you will be prompted for it on a real terminal (the
-value is not echoed back).
+The signup secret (create-team), the team's current admin token (rotate-team), and the admin token
+again (invite/revoke/roster) are never accepted as arguments — they would land in shell history and
+\`ps\` output. Set ${SIGNUP_SECRET_ENV} / ${TEAM_TOKEN_ENV} / ${ADMIN_TOKEN_ENV}, or leave it unset and
+you will be prompted for it on a real terminal (the value is not echoed back). The admin token is
+the same value create-team/rotate-team print — it grants no access to shares, receipts, or the
+digest, only to invite/revoke/roster.
 `;
 
 function isMainModule() {
@@ -511,7 +664,8 @@ export async function runTeamCli(argv, opts = {}) {
     return {
       exitCode: 1,
       stdout: '',
-      stderr: `unknown command "${parsed.unknown}" — expected create-team or rotate-team\n\n${USAGE}`,
+      stderr:
+        `unknown command "${parsed.unknown}" — expected create-team, rotate-team, invite, revoke, or roster\n\n${USAGE}`,
     };
   }
 
@@ -590,7 +744,124 @@ export async function runTeamCli(argv, opts = {}) {
     };
   }
 
-  // parseTeamArgv only ever returns help / unknown / create-team / rotate-team.
+  if (parsed.cmd === 'invite') {
+    if (!parsed.url || !parsed.email) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'usage: node teamshare-team.mjs invite <server-url> <email> ["<name>"]\n',
+      };
+    }
+
+    const adminResult = await resolveSecret({
+      envValue: env[ADMIN_TOKEN_ENV],
+      isTTY,
+      promptText: 'Admin token (input hidden): ',
+      promptFn: opts.promptFn,
+      streams: opts.streams,
+    });
+    if (!adminResult.ok) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr:
+          `could not resolve the admin token (${adminResult.reason}). Set ${ADMIN_TOKEN_ENV}, or run this ` +
+          'on an interactive terminal so it can prompt you.\n',
+      };
+    }
+
+    const invited = await inviteMemberOverHttp({
+      url: parsed.url,
+      adminToken: adminResult.value,
+      email: parsed.email,
+      name: parsed.name,
+      fetchImpl,
+    });
+    if (!invited.ok) {
+      return { exitCode: 1, stdout: '', stderr: `failed to invite ${parsed.email}: ${invited.message}\n` };
+    }
+
+    return {
+      exitCode: 0,
+      stdout: formatInviteOutput({ url: parsed.url, email: invited.email, name: invited.name, token: invited.token }),
+      stderr: '',
+    };
+  }
+
+  if (parsed.cmd === 'revoke') {
+    if (!parsed.url || !parsed.email) {
+      return { exitCode: 1, stdout: '', stderr: 'usage: node teamshare-team.mjs revoke <server-url> <email>\n' };
+    }
+
+    const adminResult = await resolveSecret({
+      envValue: env[ADMIN_TOKEN_ENV],
+      isTTY,
+      promptText: 'Admin token (input hidden): ',
+      promptFn: opts.promptFn,
+      streams: opts.streams,
+    });
+    if (!adminResult.ok) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr:
+          `could not resolve the admin token (${adminResult.reason}). Set ${ADMIN_TOKEN_ENV}, or run this ` +
+          'on an interactive terminal so it can prompt you.\n',
+      };
+    }
+
+    const revoked = await revokeMemberOverHttp({
+      url: parsed.url,
+      adminToken: adminResult.value,
+      email: parsed.email,
+      fetchImpl,
+    });
+    if (!revoked.ok) {
+      return { exitCode: 1, stdout: '', stderr: `failed to revoke ${parsed.email}: ${revoked.message}\n` };
+    }
+
+    return {
+      exitCode: 0,
+      stdout: formatRevokeOutput({ email: revoked.email, revoked: revoked.revoked }),
+      stderr: '',
+    };
+  }
+
+  if (parsed.cmd === 'roster') {
+    if (!parsed.url) {
+      return { exitCode: 1, stdout: '', stderr: 'usage: node teamshare-team.mjs roster <server-url>\n' };
+    }
+
+    const adminResult = await resolveSecret({
+      envValue: env[ADMIN_TOKEN_ENV],
+      isTTY,
+      promptText: 'Admin token (input hidden): ',
+      promptFn: opts.promptFn,
+      streams: opts.streams,
+    });
+    if (!adminResult.ok) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr:
+          `could not resolve the admin token (${adminResult.reason}). Set ${ADMIN_TOKEN_ENV}, or run this ` +
+          'on an interactive terminal so it can prompt you.\n',
+      };
+    }
+
+    const roster = await getRosterOverHttp({ url: parsed.url, adminToken: adminResult.value, fetchImpl });
+    if (!roster.ok) {
+      return { exitCode: 1, stdout: '', stderr: `failed to fetch roster: ${roster.message}\n` };
+    }
+
+    return {
+      exitCode: 0,
+      stdout: formatRosterOutput({ team: roster.team, members: roster.members }),
+      stderr: '',
+    };
+  }
+
+  // parseTeamArgv only ever returns help / unknown / create-team / rotate-team / invite / revoke / roster.
   return { exitCode: 1, stdout: '', stderr: USAGE };
 }
 

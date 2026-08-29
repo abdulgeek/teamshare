@@ -1,10 +1,13 @@
 import type { Request } from 'express';
 import { timingSafeEqual } from 'node:crypto';
 import {
+  findMemberByTokenHash,
+  findTeamById,
   findTeamByTokenHash,
   hashToken,
   makeTeamScope,
   normalizeEmail,
+  touchMemberTokenUsage,
   upsertMember,
   type Db,
   type TeamScope,
@@ -15,14 +18,14 @@ export interface Identity {
   name: string;
 }
 
-// The TeamScope is constructed here — inside authenticate()/authenticateTeamOnly()
+// The TeamScope is constructed here — inside authenticate()/authenticateAdmin()
 // — and nowhere else in a request path. Every caller (app.ts, mcp.ts) takes the
 // scope from this result rather than resolving a team id and building one of
 // its own; that is what makes "pass the wrong team's scope" impossible to
 // write by accident on the authenticated surfaces.
 export type AuthResult =
   | { ok: true; identity: Identity; scope: TeamScope; teamName: string }
-  | { ok: false; status: 401 | 400; message: string };
+  | { ok: false; status: 401; message: string };
 
 export type TeamAuthResult =
   | { ok: true; scope: TeamScope; teamName: string }
@@ -51,9 +54,21 @@ function headerValue(req: Request, name: string): string {
 // Byte-identical regardless of *why* the token was rejected — missing
 // header, malformed header, or a well-formed-but-unknown token all produce
 // this same 401. No branch below may leak which of those happened, or
-// whether any team/token exists at all (no existence oracle).
-const INVALID_TOKEN_MESSAGE =
+// whether any team/token/member exists at all (no existence oracle).
+const INVALID_ADMIN_TOKEN_MESSAGE =
   'invalid team token — reconnect: /plugin (Claude Code) or `teamshare connect` (other assistants)';
+
+// The 401 an old (pre-invites) team token, or any unknown/revoked bearer
+// token, now gets on every data route. Deliberately explains the remedy in
+// full: this is the ONE place a real, one-time cutover break is expected
+// (see the design doc's Migration section) — every existing install 401s
+// here and needs an invite from its lead, and the body must say exactly
+// that, not just "unauthorized".
+const INVALID_MEMBER_TOKEN_MESSAGE =
+  'invalid, missing, or revoked personal token — this server now requires a personal token per ' +
+  'person (the old shared team token no longer grants data access). Ask your team lead to run ' +
+  '`teamshare invite <your-email>` (or `node teamshare-team.mjs invite <server-url> <your-email>`) ' +
+  'and reconnect with the token they send you: /plugin (Claude Code) or `teamshare connect` (other assistants)';
 
 function bearerToken(req: Request): string | undefined {
   const raw = headerValue(req, 'authorization');
@@ -62,59 +77,51 @@ function bearerToken(req: Request): string | undefined {
   return token.length > 0 ? token : undefined;
 }
 
-// The one place a bearer token is resolved to a team: SHA-256 it and look it
-// up against teams.token_hash. Shared by authenticate() and
-// authenticateTeamOnly() so both surfaces fail the exact same way on an
-// unknown token.
-function resolveTeam(
-  db: Db,
-  req: Request,
-): { ok: true; team: { id: string; name: string } } | { ok: false; status: 401; message: string } {
+// The ADMIN resolver: consults ONLY teams.token_hash, never member_tokens.
+// Used by POST /teams/rotate, POST /invites, POST /revoke, and (alongside
+// authenticate() below) GET /members — every maintenance action on the team
+// itself, never one attributed to an individual member. Deliberately a
+// separate function from authenticate(), not one resolver returning a
+// `kind`: a shared resolver is safe only as long as every future route
+// remembers to check the kind it returns, and eventually one won't. Two
+// functions make "a member token grants admin access" or "an admin token
+// reads data" impossible to write by accident, rather than a convention a
+// reviewer has to remember — the same reasoning as TeamScope's structural
+// branding in db.ts.
+export function authenticateAdmin(db: Db, req: Request): TeamAuthResult {
   const token = bearerToken(req);
   const team = token ? findTeamByTokenHash(db, hashToken(token)) : undefined;
-  if (!team) return { ok: false, status: 401, message: INVALID_TOKEN_MESSAGE };
-  return { ok: true, team };
+  if (!team) return { ok: false, status: 401, message: INVALID_ADMIN_TOKEN_MESSAGE };
+  return { ok: true, scope: makeTeamScope(db, team.id), teamName: team.name };
 }
 
-// Token-only auth: resolves a team but requires no per-member identity
-// headers. Used by POST /teams/rotate, which is a maintenance action on the
-// team itself, not an action attributed to one of its members.
-export function authenticateTeamOnly(db: Db, req: Request): TeamAuthResult {
-  const resolved = resolveTeam(db, req);
-  if (!resolved.ok) return resolved;
-  return { ok: true, scope: makeTeamScope(db, resolved.team.id), teamName: resolved.team.name };
-}
+// The MEMBER resolver: consults ONLY member_tokens where revoked_at IS
+// NULL, never teams.token_hash. Identity comes entirely from the token —
+// X-Teamshare-Email/-Name are never read here (they stay accepted and
+// silently ignored so old clients that still send them keep working
+// unchanged; see the design doc's "Identity comes from the token, never the
+// header"). This is the sole source of `identity` for touchMember, and
+// therefore for every share, receipt, and roster write this request makes —
+// the fix for the forgery this whole change exists to close.
+export function authenticate(db: Db, req: Request, nowIso: string = new Date().toISOString()): AuthResult {
+  const token = bearerToken(req);
+  const tokenHash = token ? hashToken(token) : undefined;
+  const member = tokenHash ? findMemberByTokenHash(db, tokenHash) : undefined;
+  if (!member || !tokenHash) return { ok: false, status: 401, message: INVALID_MEMBER_TOKEN_MESSAGE };
 
-export function authenticate(db: Db, req: Request): AuthResult {
-  const resolved = resolveTeam(db, req);
-  if (!resolved.ok) return resolved;
+  const team = findTeamById(db, member.teamId);
+  // A member token whose team has since vanished should never happen (teams
+  // are never deleted today), but fail the same closed 401 rather than throw
+  // if it ever does — no different information leaked either way.
+  if (!team) return { ok: false, status: 401, message: INVALID_MEMBER_TOKEN_MESSAGE };
 
-  const email = headerValue(req, 'x-teamshare-email');
-  const name = headerValue(req, 'x-teamshare-name');
-  if (
-    !email ||
-    !name ||
-    PLACEHOLDER.test(email) ||
-    PLACEHOLDER.test(name) ||
-    !EMAIL.test(email) ||
-    name.length > MAX_NAME ||
-    hasControlChar(name) ||
-    hasControlChar(email)
-  ) {
-    return {
-      ok: false,
-      status: 400,
-      message:
-        'missing or malformed identity headers — check git config user.name/user.email, then reconnect: ' +
-        '/plugin (Claude Code) or `teamshare connect` (other assistants)',
-    };
-  }
+  touchMemberTokenUsage(db, tokenHash, nowIso);
 
   return {
     ok: true,
-    identity: { email: normalizeEmail(email), name },
-    scope: makeTeamScope(db, resolved.team.id),
-    teamName: resolved.team.name,
+    identity: { email: member.email, name: member.name },
+    scope: makeTeamScope(db, member.teamId),
+    teamName: team.name,
   };
 }
 
@@ -146,4 +153,34 @@ export function validateTeamName(input: unknown): TeamNameResult {
   if (PLACEHOLDER.test(value)) return { ok: false, error: 'name contains an unsubstituted placeholder' };
   if (hasControlChar(value)) return { ok: false, error: 'name contains a control character' };
   return { ok: true, value };
+}
+
+export type InviteEmailResult = { ok: true; value: string } | { ok: false; error: string };
+
+// The email an admin gives POST /invites — this is the identity source the
+// design doc requires: bound by the lead, at mint time, never by the person
+// claiming it. Same shape of checks as the identity headers used to get,
+// applied here instead since this is now the one place an email enters the
+// system as someone's asserted identity.
+export function validateInviteEmail(input: unknown): InviteEmailResult {
+  if (typeof input !== 'string') return { ok: false, error: 'email is required and must be a string' };
+  const value = input.trim();
+  if (value.length === 0) return { ok: false, error: 'email is required and cannot be empty' };
+  if (PLACEHOLDER.test(value)) return { ok: false, error: 'email contains an unsubstituted placeholder' };
+  if (hasControlChar(value)) return { ok: false, error: 'email contains a control character' };
+  if (!EMAIL.test(value)) return { ok: false, error: 'email is not a valid address' };
+  return { ok: true, value: normalizeEmail(value) };
+}
+
+export type InviteNameResult = { ok: true; value: string | null } | { ok: false; error: string };
+
+// The invitee's display name is optional on POST /invites — omitted, it
+// falls back to the email itself (the same fallback unread.ts's digest
+// query already uses for a sender with no member row: COALESCE(name,
+// email)). Given, it is validated with the exact same rules as a team name.
+export function validateInviteName(input: unknown): InviteNameResult {
+  if (input === undefined || input === null) return { ok: true, value: null };
+  const check = validateTeamName(input);
+  if (!check.ok) return check;
+  return { ok: true, value: check.value };
 }

@@ -6,20 +6,23 @@ import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createApp } from './app.js';
 import {
+  createMemberToken,
   createTeam,
   findTeamByName,
   generateTeamToken,
   getOrCreateSignupSecret,
   getSignupSecret,
   hashToken,
+  listRoster,
   listTeams,
   makeTeamScope,
   openDb,
   removeMember,
+  revokeMemberTokens,
   rotateTeamToken,
   type Db,
 } from './db.js';
-import { validateTeamName } from './http.js';
+import { validateInviteEmail, validateInviteName, validateTeamName } from './http.js';
 import {
   runConnect,
   listTargets,
@@ -29,7 +32,7 @@ import {
   normalizeServerUrl,
   type TargetId,
 } from './connect.js';
-import { formatJoinInstructions, formatTokenOnceWarning } from './team.js';
+import { formatInviteOutput, formatJoinInstructions, formatRosterOutput, formatTokenOnceWarning } from './team.js';
 
 export interface Args {
   cmd:
@@ -37,6 +40,9 @@ export interface Args {
     | 'rotate-token'
     | 'remove-member'
     | 'create-team'
+    | 'invite'
+    | 'revoke'
+    | 'roster'
     | 'doctor'
     | 'connect'
     | 'signup-secret'
@@ -46,8 +52,12 @@ export interface Args {
   dbPath: string;
   expiryDays: number;
   email?: string;
-  // Selects which team rotate-token/remove-member act on. Required whenever
-  // the server hosts more than one team — see resolveTeamForCli.
+  // invite only: the invitee's optional display name (positional, never a
+  // secret — the token invite mints is what gets protected, not this).
+  name?: string;
+  // Selects which team rotate-token/remove-member/invite/revoke/roster act
+  // on. Required whenever the server hosts more than one team — see
+  // resolveTeamForCli.
   team?: string;
   // serve only. Resolved as flag ?? TEAMSHARE_SIGNUP_SECRET env var ?? (a
   // freshly generated one, first boot only). Never a positional argument —
@@ -96,6 +106,9 @@ export function parseArgs(argv: string[]): Args {
       first === 'rotate-token' ||
       first === 'remove-member' ||
       first === 'create-team' ||
+      first === 'invite' ||
+      first === 'revoke' ||
+      first === 'roster' ||
       first === 'doctor' ||
       first === 'connect' ||
       first === 'signup-secret' ||
@@ -108,6 +121,13 @@ export function parseArgs(argv: string[]): Args {
       }
       if (args.cmd === 'create-team' && rest[0] && !rest[0].startsWith('-')) {
         args.teamName = rest.shift();
+      }
+      if (args.cmd === 'invite') {
+        if (rest[0] && !rest[0].startsWith('-')) args.email = rest.shift();
+        if (rest[0] && !rest[0].startsWith('-')) args.name = rest.shift();
+      }
+      if (args.cmd === 'revoke' && rest[0] && !rest[0].startsWith('-')) {
+        args.email = rest.shift();
       }
       if (args.cmd === 'connect') {
         if (rest[0] && !rest[0].startsWith('-')) args.connectUrl = rest.shift();
@@ -198,6 +218,9 @@ Usage:
   teamshare rotate-token [--team <name>] [--db <path>]
   teamshare remove-member <email> [--team <name>] [--db <path>]
   teamshare create-team "<name>" [--url <server-url>] [--db <path>]
+  teamshare invite <email> ["<name>"] [--team <name>] [--db <path>]
+  teamshare revoke <email> [--team <name>] [--db <path>]
+  teamshare roster [--team <name>] [--db <path>]
   teamshare doctor [<server-url> <team-token>]
   teamshare connect <server-url> <team-token> [--only cursor,codex,...] [--dry-run] [--force] [--show-token]
   teamshare connect --list
@@ -219,9 +242,20 @@ given, verifies the new token against that live server the same way
 teamshare doctor does; without --url it prints the doctor command to run
 once you know the URL. teamshare signup-secret --show remains the
 break-glass path for recovering the secret itself, when the normal HTTP path
-is still preferred. --team <name> is required for rotate-token/remove-member
-whenever more than one team exists; it is optional (and inferred) when there
-is exactly one.
+is still preferred. --team <name> is required for
+rotate-token/remove-member/invite/revoke/roster whenever more than one team
+exists; it is optional (and inferred) when there is exactly one.
+
+invite/revoke/roster are the per-member identity commands (see
+docs/superpowers/specs/2026-08-30-teamshare-invites-design.md): invite mints
+a personal token for one named email (send it to that person only — it IS
+their credential, nothing to redeem); revoke kills every live token for an
+email in one command, the remedy for a departed teammate; roster lists who
+has a live token and who is still "invited, not yet active". These operate
+on the local database directly, the same break-glass shape as rotate-token/
+remove-member above. The standalone, no-install equivalents — for a lead who
+has the server's admin token but not filesystem access to the box — are
+\`node teamshare-team.mjs invite|revoke|roster <server-url> ...\`.
 
 The signup secret is read from --signup-secret or the TEAMSHARE_SIGNUP_SECRET
 environment variable, never a positional argument (so it never ends up in
@@ -795,6 +829,110 @@ export async function main(argv: string[]): Promise<void> {
         ? `Removed ${args.email} from "${resolved.name}"\n`
         : `No member ${args.email} in "${resolved.name}"\n`,
     );
+    return;
+  }
+
+  // §Identity comes from the token. Local-database break-glass path (same
+  // shape as rotate-token/remove-member above): mints a brand-new personal
+  // credential for one named email. There is no redemption step — this
+  // token IS the invitee's credential, exactly as printed.
+  if (args.cmd === 'invite') {
+    if (!args.email) {
+      process.stderr.write('invite needs an email\n');
+      process.exitCode = 1;
+      return;
+    }
+    const emailCheck = validateInviteEmail(args.email);
+    if (!emailCheck.ok) {
+      process.stderr.write(emailCheck.error + '\n');
+      process.exitCode = 1;
+      return;
+    }
+    const nameCheck = validateInviteName(args.name);
+    if (!nameCheck.ok) {
+      process.stderr.write(nameCheck.error + '\n');
+      process.exitCode = 1;
+      return;
+    }
+    const name = nameCheck.value ?? emailCheck.value;
+
+    const db = openDb(args.dbPath);
+    const resolved = resolveTeamForCli(db, args.team);
+    if ('error' in resolved) {
+      db.close();
+      process.stderr.write(resolved.error + '\n');
+      process.exitCode = 1;
+      return;
+    }
+    const scope = makeTeamScope(db, resolved.id);
+    const token = createMemberToken(scope, emailCheck.value, name, new Date().toISOString());
+    db.close();
+
+    // No --url here (unlike create-team) to genuinely verify against, since
+    // this credential belongs to someone else, not whoever is running this
+    // command — there is no local identity to test it with. The lead's own
+    // remedy for "did this work" is the same one `create-team` prints:
+    // `teamshare doctor` run by the invitee, once they have it.
+    process.stdout.write(
+      `Team: "${resolved.name}"\n\n` +
+        formatInviteOutput({ url: '<url>', email: emailCheck.value, name, token }),
+    );
+    return;
+  }
+
+  // Kills every LIVE token for one email, across every device it was ever
+  // issued to — the one-command remedy for a departed teammate this whole
+  // change exists to provide. `remove-member` above still deletes the
+  // roster row; this is the credential-revocation half, and does not touch
+  // the roster row itself.
+  if (args.cmd === 'revoke') {
+    if (!args.email) {
+      process.stderr.write('revoke needs an email\n');
+      process.exitCode = 1;
+      return;
+    }
+    const emailCheck = validateInviteEmail(args.email);
+    if (!emailCheck.ok) {
+      process.stderr.write(emailCheck.error + '\n');
+      process.exitCode = 1;
+      return;
+    }
+    const db = openDb(args.dbPath);
+    const resolved = resolveTeamForCli(db, args.team);
+    if ('error' in resolved) {
+      db.close();
+      process.stderr.write(resolved.error + '\n');
+      process.exitCode = 1;
+      return;
+    }
+    const scope = makeTeamScope(db, resolved.id);
+    const revoked = revokeMemberTokens(scope, emailCheck.value, new Date().toISOString());
+    db.close();
+    process.stdout.write(
+      revoked > 0
+        ? `Revoked ${revoked} live token(s) for ${emailCheck.value} on "${resolved.name}". Every device ` +
+          'using one of them gets a 401 on its next request and needs a fresh invite to regain access.\n'
+        : `No live tokens found for ${emailCheck.value} on "${resolved.name}" — nothing to revoke.\n`,
+    );
+    return;
+  }
+
+  // Read-only: who has a live token, and who is still "invited, not yet
+  // active" — the migration's own progress bar, and the ongoing answer to
+  // "which of my teammates aren't set up yet".
+  if (args.cmd === 'roster') {
+    const db = openDb(args.dbPath);
+    const resolved = resolveTeamForCli(db, args.team);
+    if ('error' in resolved) {
+      db.close();
+      process.stderr.write(resolved.error + '\n');
+      process.exitCode = 1;
+      return;
+    }
+    const scope = makeTeamScope(db, resolved.id);
+    const roster = listRoster(scope);
+    db.close();
+    process.stdout.write(formatRosterOutput({ team: resolved.name, members: roster }));
     return;
   }
 

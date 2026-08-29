@@ -6,6 +6,7 @@
 
 export const SIGNUP_SECRET_ENV: string;
 export const TEAM_TOKEN_ENV: string;
+export const ADMIN_TOKEN_ENV: string;
 
 export interface GitIdentity {
   name: string;
@@ -69,10 +70,64 @@ export type TeamHttpResult =
 export function createTeamOverHttp(opts: CreateTeamOverHttpOptions): Promise<TeamHttpResult>;
 export function rotateTeamOverHttp(opts: RotateTeamOverHttpOptions): Promise<TeamHttpResult>;
 
+export interface InviteMemberOverHttpOptions {
+  url: string;
+  adminToken: string;
+  email: string;
+  name?: string;
+  fetchImpl?: FetchImpl;
+  timeoutMs?: number;
+}
+
+export type InviteHttpResult =
+  | { ok: true; email: string; name: string; token: string }
+  | { ok: false; status: number; message: string };
+
+export function inviteMemberOverHttp(opts: InviteMemberOverHttpOptions): Promise<InviteHttpResult>;
+
+export interface RevokeMemberOverHttpOptions {
+  url: string;
+  adminToken: string;
+  email: string;
+  fetchImpl?: FetchImpl;
+  timeoutMs?: number;
+}
+
+export type RevokeHttpResult =
+  | { ok: true; email: string; revoked: number }
+  | { ok: false; status: number; message: string };
+
+export function revokeMemberOverHttp(opts: RevokeMemberOverHttpOptions): Promise<RevokeHttpResult>;
+
+export interface RosterEntryOverHttp {
+  email: string;
+  name: string | null;
+  status: 'active' | 'invited, not yet active';
+  active_tokens: number;
+  first_seen: string | null;
+  last_seen: string | null;
+}
+
+export interface GetRosterOverHttpOptions {
+  url: string;
+  adminToken: string;
+  fetchImpl?: FetchImpl;
+  timeoutMs?: number;
+}
+
+export type RosterHttpResult =
+  | { ok: true; team: string; members: RosterEntryOverHttp[] }
+  | { ok: false; status: number; message: string };
+
+export function getRosterOverHttp(opts: GetRosterOverHttpOptions): Promise<RosterHttpResult>;
+
 export interface VerifyTeamOptions {
   url: string;
   token: string;
-  identity: GitIdentity | null;
+  // No longer read: verifying an admin token now checks GET /members, which
+  // needs no per-user identity. Accepted so existing call sites (which still
+  // pass the resolved git identity through) don't need to change.
+  identity?: GitIdentity | null;
   fetchImpl?: FetchImpl;
   timeoutMs?: number;
 }
@@ -101,10 +156,36 @@ export interface FormatTeamOutputOptions {
 export function formatCreateOutput(opts: FormatTeamOutputOptions): string;
 export function formatRotateOutput(opts: FormatTeamOutputOptions): string;
 
+export function formatMemberTokenOnceWarning(email: string, token: string): string;
+
+export interface FormatInviteOutputOptions {
+  url: string;
+  email: string;
+  name: string;
+  token: string;
+}
+
+export function formatInviteOutput(opts: FormatInviteOutputOptions): string;
+
+export interface FormatRevokeOutputOptions {
+  email: string;
+  revoked: number;
+}
+
+export function formatRevokeOutput(opts: FormatRevokeOutputOptions): string;
+
+export interface FormatRosterOutputOptions {
+  team: string;
+  members: RosterEntryOverHttp[];
+}
+
+export function formatRosterOutput(opts: FormatRosterOutputOptions): string;
+
 export interface ParsedTeamArgv {
-  cmd?: 'create-team' | 'rotate-team' | 'unknown';
+  cmd?: 'create-team' | 'rotate-team' | 'invite' | 'revoke' | 'roster' | 'unknown';
   url?: string;
   name?: string;
+  email?: string;
   help: boolean;
   unknown?: string;
 }

@@ -243,9 +243,48 @@ function migrateAddMultiTeam(db: Db, nowIso: string, probe: MigrationProbe): voi
   probe('2->3:version');
 }
 
+// The per-user-token rebuild (see docs/superpowers/specs/2026-08-30-teamshare-invites-design.md).
+// A brand-new table — no existing table changes shape, so this is a plain
+// CREATE, not a rebuild. Deliberately NOT folded into the frozen v1 SCHEMA
+// constant: that constant only ever describes the oldest possible shape, and
+// this table doesn't exist there even on a fresh install — the migration
+// chain is what carries every database, fresh or legacy, up to v4.
+//
+// token_hash is the PRIMARY KEY, not (team_id, email): one person can hold
+// several live tokens (laptop, desktop, CI) and revocation is an explicit,
+// targeted act rather than a side effect of a single-slot key. See the
+// rejected per-user-tokens design's Review outcome for why (team_id, email)
+// as a key produced a one-request permanent lockout of any named teammate.
+//
+// Mints nothing: this step creates an empty table. There is no channel to
+// deliver a token to the six-ish existing members of a live install, so
+// every one of them 401s on their next request until the lead invites them —
+// a deliberate, one-time break (see http.ts's INVALID_MEMBER_TOKEN_MESSAGE).
+function migrateAddMemberTokens(db: Db, _nowIso: string, probe: MigrationProbe): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS member_tokens (
+      token_hash   TEXT PRIMARY KEY,
+      team_id      TEXT NOT NULL,
+      email        TEXT NOT NULL,
+      name         TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      last_used_at TEXT,
+      revoked_at   TEXT
+    );
+  `);
+  probe('3->4:member_tokens-table');
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_member_tokens_team_email ON member_tokens (team_id, email);');
+  probe('3->4:index');
+
+  setConfig(db, 'schema_version', '4');
+  probe('3->4:version');
+}
+
 const MIGRATIONS: Migration[] = [
   { to: 2, run: migrateAddStaleAt },
   { to: 3, run: migrateAddMultiTeam },
+  { to: 4, run: migrateAddMemberTokens },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].to;
@@ -376,6 +415,14 @@ export function findTeamByName(db: Db, name: string): TeamRow | undefined {
   return db.prepare('SELECT id, name FROM teams WHERE name = ?').get(name) as TeamRow | undefined;
 }
 
+// Resolves a team by id — used by authenticate() (http.ts) to recover a
+// team's display name after a member token has already resolved teamId, and
+// by anything else that only has an id in hand (never the auth path's first
+// lookup; that's findTeamByTokenHash/findMemberByTokenHash).
+export function findTeamById(db: Db, id: string): TeamRow | undefined {
+  return db.prepare('SELECT id, name FROM teams WHERE id = ?').get(id) as TeamRow | undefined;
+}
+
 export function listTeams(db: Db): TeamRow[] {
   return db.prepare('SELECT id, name FROM teams ORDER BY name').all() as TeamRow[];
 }
@@ -445,4 +492,125 @@ export function removeMember(scope: TeamScope, email: string): boolean {
     .prepare('DELETE FROM members WHERE team_id = ? AND email = ?')
     .run(scope.teamId, normalizeEmail(email));
   return info.changes > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Member tokens (§Identity comes from the token). See
+// docs/superpowers/specs/2026-08-30-teamshare-invites-design.md.
+//
+// A member token IS its holder's credential — there is no join/redemption
+// step. `teams.token_hash` (above) is now the ADMIN credential exclusively:
+// it mints/revokes member tokens and reads the roster, but grants no access
+// to shares, receipts, or the digest. These two credential kinds are
+// resolved by separate functions in http.ts (authenticateAdmin/
+// authenticate), never a single resolver returning a `kind` — see that
+// file's comment for why a shared resolver is the wrong shape here.
+// ---------------------------------------------------------------------------
+
+export function generateMemberToken(): string {
+  return `tsm_${randomBytes(24).toString('hex')}`;
+}
+
+// Mints a brand-new, independent credential for (team, email) — never
+// updates or replaces an existing one. A person can hold several of these at
+// once (laptop, desktop, CI); each is revoked individually, not as a side
+// effect of minting another. Returned once, in plaintext; only the hash is
+// stored.
+export function createMemberToken(scope: TeamScope, email: string, name: string, nowIso: string): string {
+  const token = generateMemberToken();
+  scope.db
+    .prepare(
+      `INSERT INTO member_tokens (token_hash, team_id, email, name, created_at, last_used_at, revoked_at)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+    )
+    .run(hashToken(token), scope.teamId, normalizeEmail(email), name, nowIso);
+  return token;
+}
+
+export interface MemberIdentity {
+  teamId: string;
+  email: string;
+  name: string;
+}
+
+// The member-auth-path lookup: SHA-256 of a presented bearer token -> the
+// identity it belongs to, or undefined — mirroring findTeamByTokenHash's
+// shape exactly, but against member_tokens and filtered to revoked_at IS
+// NULL, so a revoked credential is indistinguishable from one that never
+// existed (no oracle either way).
+export function findMemberByTokenHash(db: Db, tokenHash: string): MemberIdentity | undefined {
+  const row = db
+    .prepare(`SELECT team_id, email, name FROM member_tokens WHERE token_hash = ? AND revoked_at IS NULL`)
+    .get(tokenHash) as { team_id: string; email: string; name: string } | undefined;
+  return row ? { teamId: row.team_id, email: row.email, name: row.name } : undefined;
+}
+
+// Called on every successful member authentication (see http.ts's
+// authenticate()) so the roster can eventually report per-token recency,
+// distinct from members.last_seen (which is per-person, not per-credential).
+export function touchMemberTokenUsage(db: Db, tokenHash: string, nowIso: string): void {
+  db.prepare('UPDATE member_tokens SET last_used_at = ? WHERE token_hash = ?').run(nowIso, tokenHash);
+}
+
+// Revokes every LIVE token for one email within one team — this is what
+// makes removing an ex-employee a single command rather than a per-device
+// hunt. Returns how many were actually revoked (0 means nothing was live,
+// not an error). Idempotent: revoking twice is a no-op the second time.
+export function revokeMemberTokens(scope: TeamScope, email: string, nowIso: string): number {
+  const info = scope.db
+    .prepare(
+      `UPDATE member_tokens SET revoked_at = ? WHERE team_id = ? AND email = ? AND revoked_at IS NULL`,
+    )
+    .run(nowIso, scope.teamId, normalizeEmail(email));
+  return info.changes;
+}
+
+export interface RosterEntry {
+  email: string;
+  name: string | null;
+  first_seen: string | null;
+  last_seen: string | null;
+  active_tokens: number;
+  status: 'active' | 'invited, not yet active';
+}
+
+// The roster GET /members renders: a union of everyone who has ever
+// authenticated (the `members` table — the historical roster, unaffected by
+// this change) and everyone who has ever been minted a token (member_tokens,
+// grouped by email). A pre-migration member with no live token yet reads as
+// "invited, not yet active" — this is deliberate: it makes the roster the
+// migration's own progress bar, per the design doc, rather than a second
+// place that needs its own "is this real" logic.
+export function listRoster(scope: TeamScope): RosterEntry[] {
+  const membersByEmail = new Map(listMembers(scope).map((m) => [m.email, m]));
+
+  const tokenRows = scope.db
+    .prepare(
+      `SELECT email,
+              SUM(CASE WHEN revoked_at IS NULL THEN 1 ELSE 0 END) AS active_tokens,
+              MAX(CASE WHEN revoked_at IS NULL THEN name END) AS live_name,
+              MAX(name) AS any_name
+         FROM member_tokens
+        WHERE team_id = ?
+        GROUP BY email`,
+    )
+    .all(scope.teamId) as { email: string; active_tokens: number; live_name: string | null; any_name: string }[];
+  const tokensByEmail = new Map(tokenRows.map((r) => [r.email, r]));
+
+  const emails = new Set<string>([...membersByEmail.keys(), ...tokensByEmail.keys()]);
+  const roster: RosterEntry[] = [];
+  for (const email of emails) {
+    const member = membersByEmail.get(email);
+    const tokenInfo = tokensByEmail.get(email);
+    const activeTokens = tokenInfo?.active_tokens ?? 0;
+    roster.push({
+      email,
+      name: member?.name ?? tokenInfo?.live_name ?? tokenInfo?.any_name ?? null,
+      first_seen: member?.first_seen ?? null,
+      last_seen: member?.last_seen ?? null,
+      active_tokens: activeTokens,
+      status: activeTokens > 0 ? 'active' : 'invited, not yet active',
+    });
+  }
+  return roster.sort((a, b) => a.email.localeCompare(b.email));
 }

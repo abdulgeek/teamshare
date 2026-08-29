@@ -1,6 +1,24 @@
 import express, { type Request } from 'express';
-import { countTeams, createTeam, generateTeamToken, hashToken, rotateTeamToken, type Db } from './db.js';
-import { authenticate, authenticateTeamOnly, touchMember, validateTeamName, verifySignupSecret } from './http.js';
+import {
+  countTeams,
+  createMemberToken,
+  createTeam,
+  generateTeamToken,
+  hashToken,
+  listRoster,
+  revokeMemberTokens,
+  rotateTeamToken,
+  type Db,
+} from './db.js';
+import {
+  authenticate,
+  authenticateAdmin,
+  touchMember,
+  validateInviteEmail,
+  validateInviteName,
+  validateTeamName,
+  verifySignupSecret,
+} from './http.js';
 import { getUnread } from './unread.js';
 import { registerMcpRoute } from './mcp.js';
 
@@ -70,12 +88,12 @@ export function createApp(opts: AppOptions): express.Express {
   // Fast door for the SessionStart hook: same auth and identity as /mcp, but
   // no MCP handshake so the hook stays a dependency-free script.
   app.get('/unread', (req, res) => {
-    const auth = authenticate(db, req);
+    const nowIso = now();
+    const auth = authenticate(db, req, nowIso);
     if (!auth.ok) {
       res.status(auth.status).json({ error: auth.message });
       return;
     }
-    const nowIso = now();
     touchMember(auth.scope, auth.identity, nowIso);
     // `team` rides along on this response (not a new endpoint) so `doctor`,
     // which already calls /unread, can report which team a token belongs to
@@ -121,18 +139,101 @@ export function createApp(opts: AppOptions): express.Express {
     res.status(201).json({ team_id: teamId, name: nameCheck.value, token });
   });
 
-  // §Rotation. Authenticated by the team's *current* token (not the signup
-  // secret) — self-serve, no operator involvement, and the required remedy
-  // for a leaked token. cli.ts's `rotate-token --team` is the equivalent
-  // break-glass path for an operator with filesystem access to the database.
+  // §Rotation. Authenticated by the team's *current* (admin) token — not the
+  // signup secret — self-serve, no operator involvement, and the required
+  // remedy for a leaked admin token. cli.ts's `rotate-token --team` is the
+  // equivalent break-glass path for an operator with filesystem access to
+  // the database. Rotating this token never disturbs any member's personal
+  // token — the two credential kinds are now completely independent.
   app.post('/teams/rotate', (req, res) => {
-    const auth = authenticateTeamOnly(db, req);
+    const auth = authenticateAdmin(db, req);
     if (!auth.ok) {
       res.status(auth.status).json({ error: auth.message });
       return;
     }
     const token = rotateTeamToken(db, auth.scope.teamId);
     res.json({ team_id: auth.scope.teamId, name: auth.teamName, token });
+  });
+
+  // §Identity comes from the token. Admin-only: mints a personal credential
+  // for one named email, never asserted by the joiner. Rate-limited with the
+  // exact same per-IP limiter POST /teams uses (deliberately shared, not a
+  // second independent bucket) — an admin token leaking should not let an
+  // attacker mint unlimited member credentials any more than a leaked
+  // signup secret should mint unlimited teams.
+  app.post('/invites', (req, res) => {
+    const ip = clientIp(req);
+    if (!allowSignupAttempt(ip, Date.parse(now()))) {
+      res.status(429).json({ error: 'too many invite attempts from this address — try again later' });
+      return;
+    }
+
+    const auth = authenticateAdmin(db, req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ error: auth.message });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown> | undefined;
+    const emailCheck = validateInviteEmail(body?.email);
+    if (!emailCheck.ok) {
+      res.status(400).json({ error: emailCheck.error });
+      return;
+    }
+    const nameCheck = validateInviteName(body?.name);
+    if (!nameCheck.ok) {
+      res.status(400).json({ error: nameCheck.error });
+      return;
+    }
+    const name = nameCheck.value ?? emailCheck.value;
+
+    const token = createMemberToken(auth.scope, emailCheck.value, name, now());
+    // Returned once, here, and never again — same "shown once, hashed at
+    // rest" contract as every other credential this server mints.
+    res.status(201).json({ email: emailCheck.value, name, token });
+  });
+
+  // Admin-only: revokes every LIVE token for one email, across every device
+  // that email was ever given one — this is the one-command remedy for an
+  // ex-employee the design doc exists to provide. Not scoped to a single
+  // token, deliberately: a partial revoke would leave a forgotten laptop
+  // token live.
+  app.post('/revoke', (req, res) => {
+    const auth = authenticateAdmin(db, req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ error: auth.message });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown> | undefined;
+    const emailCheck = validateInviteEmail(body?.email);
+    if (!emailCheck.ok) {
+      res.status(400).json({ error: emailCheck.error });
+      return;
+    }
+
+    const revoked = revokeMemberTokens(auth.scope, emailCheck.value, now());
+    res.json({ email: emailCheck.value, revoked });
+  });
+
+  // Admin OR member — deliberately tried as two independent, self-contained
+  // resolvers in sequence, never a merged "auth that accepts either kind"
+  // function: each one either fully grants access on its own terms or
+  // fully refuses, so there is no shared code path a future route could
+  // misread. Scoped through TeamScope like every other route, so this can
+  // never become a cross-team oracle.
+  app.get('/members', (req, res) => {
+    const adminAuth = authenticateAdmin(db, req);
+    if (adminAuth.ok) {
+      res.json({ team: adminAuth.teamName, members: listRoster(adminAuth.scope) });
+      return;
+    }
+    const memberAuth = authenticate(db, req, now());
+    if (!memberAuth.ok) {
+      res.status(memberAuth.status).json({ error: memberAuth.message });
+      return;
+    }
+    res.json({ team: memberAuth.teamName, members: listRoster(memberAuth.scope) });
   });
 
   registerMcpRoute(app, opts);
