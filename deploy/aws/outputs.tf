@@ -1,11 +1,11 @@
 output "elastic_ip" {
   description = "teamshare's Elastic IP."
-  value       = aws_eip.teamshare.public_ip
+  value       = aws_instance.teamshare.public_ip
 }
 
 output "url" {
   description = "teamshare's HTTPS URL (Caddy auto-provisions a Let's Encrypt cert for this sslip.io hostname)."
-  value       = "https://${aws_eip.teamshare.public_ip}.sslip.io"
+  value       = "https://${aws_instance.teamshare.public_ip}.sslip.io"
 }
 
 output "instance_id" {

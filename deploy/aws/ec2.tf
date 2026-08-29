@@ -11,11 +11,11 @@ resource "aws_instance" "teamshare" {
   vpc_security_group_ids = [aws_security_group.teamshare.id]
   iam_instance_profile   = aws_iam_instance_profile.teamshare.name
 
-  # An ephemeral public IP at launch, distinct from the Elastic IP associated
-  # right after (aws_eip_association below) — needed so the instance can
-  # reach the internet immediately: dnf, the Node/Caddy downloads, git clone,
-  # and SSM agent registration all happen in user_data, before the EIP
-  # association completes.
+  # The instance's auto-assigned public IP is what teammates reach and what the
+  # TLS hostname is derived from (<ip>.sslip.io, computed at boot from IMDS).
+  # No Elastic IP: this account is at its EIP quota, with every address in use
+  # by other p3m infrastructure. Trade-off documented in README.md — stopping
+  # and starting the instance changes this IP, and therefore the URL.
   associate_public_ip_address = true
 
   root_block_device {
@@ -29,7 +29,6 @@ resource "aws_instance" "teamshare" {
   # SSM Session Manager only (see security_group.tf — port 22 is
   # intentionally never opened, and iam.tf grants AmazonSSMManagedInstanceCore).
   user_data = templatefile("${path.module}/user_data.sh.tpl", {
-    hostname      = "${aws_eip.teamshare.public_ip}.sslip.io"
     repo_url      = var.repo_url
     node_version  = var.node_version
     pnpm_version  = var.pnpm_version
@@ -42,11 +41,6 @@ resource "aws_instance" "teamshare" {
   user_data_replace_on_change = true
 }
 
-# Caddy on this box requests a Let's Encrypt certificate for
-# <elastic-ip>.sslip.io on its own, retrying automatically — no custom wait
-# loop needed. It starts succeeding once this association completes and the
-# hostname actually resolves to a reachable instance.
-resource "aws_eip_association" "teamshare" {
-  instance_id   = aws_instance.teamshare.id
-  allocation_id = aws_eip.teamshare.id
-}
+# Caddy requests a Let's Encrypt certificate for <public-ip>.sslip.io on its
+# own and retries automatically, so no wait loop is needed here — issuance
+# succeeds as soon as the instance is reachable on port 80.

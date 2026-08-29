@@ -67,8 +67,30 @@ id -u caddy >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/n
 mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
 chown -R caddy:caddy /var/lib/caddy /var/log/caddy
 
-cat > /etc/caddy/Caddyfile <<'CADDYFILE'
-${hostname} {
+# The TLS hostname is derived from this instance's own public IPv4, discovered
+# at boot via IMDSv2. It is done here rather than templated in by Terraform
+# because this account is at its Elastic IP quota (all addresses are in use by
+# other p3m infrastructure), so there is no address known ahead of time.
+#
+# Consequence worth knowing: the public IP — and therefore this URL — changes
+# if the instance is ever STOPPED and started again (a reboot keeps it). If
+# that happens, teammates must reconnect against the new URL. See the README.
+IMDS_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300" || true)
+PUBLIC_IP=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  "http://169.254.169.254/latest/meta-data/public-ipv4" || true)
+
+if [ -z "$PUBLIC_IP" ]; then
+  echo "FATAL: could not determine this instance's public IPv4 from IMDS;" >&2
+  echo "Caddy has no hostname to request a certificate for." >&2
+  exit 1
+fi
+
+TEAMSHARE_HOSTNAME="$${PUBLIC_IP}.sslip.io"
+echo "teamshare hostname: $TEAMSHARE_HOSTNAME" > /etc/teamshare-hostname
+
+cat > /etc/caddy/Caddyfile <<CADDYFILE
+$${TEAMSHARE_HOSTNAME} {
     reverse_proxy 127.0.0.1:8787
 }
 CADDYFILE
@@ -112,6 +134,15 @@ Wants=network-online.target
 Type=simple
 User=caddy
 Group=caddy
+# The caddy user is created with --no-create-home, so /home/caddy does not
+# exist. Without these, Caddy falls back to $HOME/.local/share/caddy for its
+# certificate storage, fails with "mkdir /home/caddy: permission denied", and
+# never even attempts ACME issuance — the server then answers TLS handshakes
+# with an internal error and looks, misleadingly, like a network problem.
+# /var/lib/caddy is created and chowned to this user above.
+Environment=HOME=/var/lib/caddy
+Environment=XDG_DATA_HOME=/var/lib/caddy
+Environment=XDG_CONFIG_HOME=/var/lib/caddy
 ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 Restart=always
