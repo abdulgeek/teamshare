@@ -6,13 +6,15 @@ import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createApp } from './app.js';
 import {
-  getOrCreateDefaultTeamId,
-  getOrCreateToken,
-  hasToken,
+  findTeamByName,
+  getOrCreateSignupSecret,
+  getSignupSecret,
+  listTeams,
   makeTeamScope,
   openDb,
   removeMember,
-  rotateToken,
+  rotateTeamToken,
+  type Db,
 } from './db.js';
 import {
   runConnect,
@@ -25,12 +27,24 @@ import {
 } from './connect.js';
 
 export interface Args {
-  cmd: 'serve' | 'rotate-token' | 'remove-member' | 'doctor' | 'connect' | 'help';
+  cmd: 'serve' | 'rotate-token' | 'remove-member' | 'doctor' | 'connect' | 'signup-secret' | 'help';
   port: number;
   host: string;
   dbPath: string;
   expiryDays: number;
   email?: string;
+  // Selects which team rotate-token/remove-member act on. Required whenever
+  // the server hosts more than one team — see resolveTeamForCli.
+  team?: string;
+  // serve only. Resolved as flag ?? TEAMSHARE_SIGNUP_SECRET env var ?? (a
+  // freshly generated one, first boot only). Never a positional argument —
+  // see the design doc's "secrets never touch a command line".
+  signupSecret?: string;
+  openSignup?: boolean;
+  maxTeams?: number;
+  // signup-secret subcommand only: the one supported flag, so revealing the
+  // plaintext is always an explicit ask, never a bare-command accident.
+  signupSecretShow?: boolean;
   connectUrl?: string;
   connectToken?: string;
   connectOnly?: TargetId[];
@@ -63,6 +77,7 @@ export function parseArgs(argv: string[]): Args {
       first === 'remove-member' ||
       first === 'doctor' ||
       first === 'connect' ||
+      first === 'signup-secret' ||
       first === 'help'
     ) {
       args.cmd = first;
@@ -101,6 +116,11 @@ export function parseArgs(argv: string[]): Args {
     else if (flag === '--force') { args.connectForce = true; }
     else if (flag === '--list') { args.connectList = true; }
     else if (flag === '--show-token') { args.connectShowToken = true; }
+    else if (flag === '--team' && value) { args.team = value; i++; }
+    else if (flag === '--signup-secret' && value) { args.signupSecret = value; i++; }
+    else if (flag === '--max-teams' && value) { args.maxTeams = Number(value); i++; }
+    else if (flag === '--open-signup') { args.openSignup = true; }
+    else if (flag === '--show') { args.signupSecretShow = true; }
   }
 
   return args;
@@ -148,11 +168,27 @@ const HELP = `teamshare — shared context for coding agents
 
 Usage:
   teamshare serve [--port 8787] [--host 127.0.0.1] [--db <path>] [--expiry-days 14]
-  teamshare rotate-token [--db <path>]
-  teamshare remove-member <email> [--db <path>]
+                  [--signup-secret <secret>] [--open-signup] [--max-teams <n>]
+  teamshare signup-secret --show [--db <path>]
+  teamshare rotate-token [--team <name>] [--db <path>]
+  teamshare remove-member <email> [--team <name>] [--db <path>]
   teamshare doctor [<server-url> <team-token>]
   teamshare connect <server-url> <team-token> [--only cursor,codex,...] [--dry-run] [--force] [--show-token]
   teamshare connect --list
+
+This server hosts multiple teams. A team is created by POSTing to /teams
+(gated by the instance signup secret) — see the design doc for the
+standalone/plugin surfaces that wrap that call; teamshare signup-secret
+--show is the break-glass path when that secret is lost. --team <name> is
+required for rotate-token/remove-member whenever more than one team exists;
+it is optional (and inferred) when there is exactly one.
+
+The signup secret is read from --signup-secret or the TEAMSHARE_SIGNUP_SECRET
+environment variable, never a positional argument (so it never ends up in
+shell history or a process list), and is generated automatically on first
+boot if neither is given. --open-signup disables the gate entirely (a loud
+startup warning is printed) and --max-teams caps how many teams this
+instance will ever host.
 
 serve binds to 127.0.0.1 (loopback) by default — correct when a reverse
 proxy (e.g. Caddy) terminates TLS and forwards to it locally, since the
@@ -202,6 +238,83 @@ export function formatServeBanner(opts: {
     '',
   );
   return lines.join('\n');
+}
+
+// The real `serve` startup banner in the multi-team world: there is no
+// longer a single "the" team token to print (formatServeBanner above is kept
+// only for its own direct tests — this server now hosts N teams, each with
+// its own token, minted via POST /teams). Never prints the signup secret's
+// value: it is stored plaintext precisely so it stays recoverable, but this
+// banner still must not be a second place it gets echoed — `signup-secret
+// --show` is the one deliberate, on-demand way to see it.
+export function formatServeStartupBanner(opts: {
+  port: number;
+  host: string;
+  dbPath: string;
+  teamCount: number;
+  openSignup: boolean;
+  signupSecretGenerated: boolean;
+  maxTeams?: number;
+}): string {
+  const { port, host, dbPath, teamCount, openSignup, signupSecretGenerated, maxTeams } = opts;
+  const lines = [
+    `teamshare server listening on ${host}:${port}`,
+    `database: ${dbPath}`,
+    '',
+    `${teamCount} team(s) currently on this instance.`,
+  ];
+
+  if (openSignup) {
+    lines.push(
+      '',
+      'WARNING: --open-signup is set — POST /teams requires no secret at all. Only run this on a',
+      'fully trusted network, and turn it off once every team that needs one has been created.',
+    );
+  } else if (signupSecretGenerated) {
+    lines.push(
+      '',
+      'A signup secret was generated for this instance on first boot (not shown here — it is never',
+      'printed to a log). To view it: teamshare signup-secret --show',
+    );
+  } else {
+    lines.push('', 'Signup secret: configured. To view it: teamshare signup-secret --show');
+  }
+
+  if (maxTeams !== undefined) {
+    lines.push(`Team cap: ${maxTeams} (POST /teams refuses once this instance reaches it).`);
+  }
+
+  lines.push(
+    '',
+    'WARNING: serve plain HTTP only on a trusted network. Put TLS in front for anything else.',
+    '',
+  );
+  return lines.join('\n');
+}
+
+// Resolves which team rotate-token/remove-member act on. Fixing these two
+// commands is the point of this stage: after migration, the old
+// config.team_token-based rotate-token wrote to a column nothing reads any
+// more, so it would print a fresh token, claim teammates must reconnect, and
+// change nothing — a silent no-op standing in for the documented remedy for
+// a leaked credential. Every path below now resolves an actual team row and
+// either operates on it or fails loudly; none can silently do nothing.
+function resolveTeamForCli(db: Db, teamName?: string): { id: string; name: string } | { error: string } {
+  if (teamName) {
+    const team = findTeamByName(db, teamName);
+    if (!team) return { error: `no team named "${teamName}" on this server` };
+    return team;
+  }
+  const teams = listTeams(db);
+  if (teams.length === 0) {
+    return { error: 'no teams exist on this server yet' };
+  }
+  if (teams.length === 1) return teams[0];
+  return {
+    error:
+      `this server hosts multiple teams (${teams.length}) — specify --team <name>. Known teams: ` +
+      teams.map((t) => t.name).join(', '),
+  };
 }
 
 interface TeamshareConfig {
@@ -464,9 +577,15 @@ export async function runDoctor(
         },
       });
       if (res.status === 200) {
-        const body = (await res.json().catch(() => null)) as { total?: number } | null;
+        const body = (await res.json().catch(() => null)) as { total?: number; team?: string } | null;
         const n = body && typeof body.total === 'number' ? body.total : 'an unknown number of';
         ok(`${base}/unread returned 200 (${n} unread share(s))`);
+        // The first question anyone asks when a share doesn't appear is
+        // "which team am I even connected to" — /unread already resolves
+        // the team from the token, so surface it here at near-zero cost.
+        if (body && typeof body.team === 'string' && body.team.length > 0) {
+          ok(`connected to team: ${body.team}`);
+        }
       } else if (res.status === 401) {
         problem(
           `${base}/unread returned 401 — token rejected. Reconnect: /plugin (Claude Code) or ` +
@@ -538,12 +657,40 @@ export async function main(argv: string[]): Promise<void> {
 
   mkdirSync(dirname(args.dbPath), { recursive: true });
 
+  if (args.cmd === 'signup-secret') {
+    if (!args.signupSecretShow) {
+      process.stderr.write('signup-secret needs --show (the only supported flag) to print the current value\n');
+      process.exitCode = 1;
+      return;
+    }
+    const db = openDb(args.dbPath);
+    const secret = getSignupSecret(db);
+    db.close();
+    if (!secret) {
+      process.stdout.write(
+        'No signup secret is configured yet. One is generated automatically the first time `serve`\n' +
+          'runs without --signup-secret/TEAMSHARE_SIGNUP_SECRET, or immediately if you pass one:\n' +
+          '  teamshare serve --signup-secret <your-secret>\n',
+      );
+      return;
+    }
+    process.stdout.write(`${secret}\n`);
+    return;
+  }
+
   if (args.cmd === 'rotate-token') {
     const db = openDb(args.dbPath);
-    const token = rotateToken(db);
+    const resolved = resolveTeamForCli(db, args.team);
+    if ('error' in resolved) {
+      db.close();
+      process.stderr.write(resolved.error + '\n');
+      process.exitCode = 1;
+      return;
+    }
+    const token = rotateTeamToken(db, resolved.id);
     db.close();
     process.stdout.write(
-      `New team token:\n\n  ${token}\n\n` +
+      `New team token for "${resolved.name}":\n\n  ${token}\n\n` +
         'Teammates must reconnect with this token: `/plugin configure teamshare` for Claude Code, ' +
         'or `teamshare connect` again for everyone else.\n',
     );
@@ -557,31 +704,63 @@ export async function main(argv: string[]): Promise<void> {
       return;
     }
     const db = openDb(args.dbPath);
-    // Stage-1 compatibility: still a single-team instance, so scope to that
-    // sole team. Real `--team` selection is the next stage's job (see the
-    // design doc's Rotation section).
-    const scope = makeTeamScope(db, getOrCreateDefaultTeamId(db));
+    const resolved = resolveTeamForCli(db, args.team);
+    if ('error' in resolved) {
+      db.close();
+      process.stderr.write(resolved.error + '\n');
+      process.exitCode = 1;
+      return;
+    }
+    const scope = makeTeamScope(db, resolved.id);
     const removed = removeMember(scope, args.email);
     db.close();
     if (!removed) {
       process.exitCode = 1;
     }
-    process.stdout.write(removed ? `Removed ${args.email}\n` : `No member ${args.email}\n`);
+    process.stdout.write(
+      removed
+        ? `Removed ${args.email} from "${resolved.name}"\n`
+        : `No member ${args.email} in "${resolved.name}"\n`,
+    );
     return;
   }
 
   const release = acquireLock(args.dbPath);
   const db = openDb(args.dbPath);
-  // Captured BEFORE getOrCreateToken, which mints and persists a token on
-  // first call — this is the only way to tell "printed before" from "first
-  // time" apart (spec §8 / README: printed exactly once per generation).
-  const alreadyHadToken = hasToken(db);
-  const token = getOrCreateToken(db);
-  const app = createApp({ db, expiryDays: args.expiryDays });
+
+  // §Creating a team: the signup secret is operator-settable via --signup-secret
+  // or TEAMSHARE_SIGNUP_SECRET, and only generated on first boot if neither is
+  // given — never minted into a log line the operator would need SSM/Terraform
+  // access to read back. --open-signup skips resolving one entirely and
+  // disables the gate, with a loud warning printed below.
+  let signupSecret: string | null = null;
+  let signupSecretGenerated = false;
+  if (!args.openSignup) {
+    const explicit = args.signupSecret ?? process.env.TEAMSHARE_SIGNUP_SECRET;
+    const resolved = getOrCreateSignupSecret(db, explicit);
+    signupSecret = resolved.secret;
+    signupSecretGenerated = resolved.generated;
+  }
+
+  const app = createApp({
+    db,
+    expiryDays: args.expiryDays,
+    signupSecret,
+    openSignup: args.openSignup,
+    maxTeams: args.maxTeams,
+  });
 
   const server = app.listen(args.port, args.host, () => {
     process.stdout.write(
-      formatServeBanner({ port: args.port, host: args.host, dbPath: args.dbPath, token, alreadyHadToken }),
+      formatServeStartupBanner({
+        port: args.port,
+        host: args.host,
+        dbPath: args.dbPath,
+        teamCount: listTeams(db).length,
+        openSignup: Boolean(args.openSignup),
+        signupSecretGenerated,
+        maxTeams: args.maxTeams,
+      }),
     );
   });
 

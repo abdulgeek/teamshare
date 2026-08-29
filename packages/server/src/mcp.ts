@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { AppOptions } from './app.js';
-import { getOrCreateDefaultTeamId, makeTeamScope, type TeamScope } from './db.js';
+import type { TeamScope } from './db.js';
 import { authenticate, touchMember, type Identity } from './http.js';
 import { CAPS, createShare, getShare, listShares, markStale, retractShare, validateShare } from './shares.js';
 import { getUnread, type Digest } from './unread.js';
@@ -318,10 +318,9 @@ export function registerMcpRoute(app: express.Express, opts: AppOptions): void {
       return;
     }
     const nowIso = now();
-    // Stage-1 compatibility: this server still models exactly one team, so
-    // every request scopes to that sole team. Real per-team resolution from
-    // auth is the next stage; see db.ts's getOrCreateDefaultTeamId.
-    const scope = makeTeamScope(db, getOrCreateDefaultTeamId(db));
+    // authenticate() resolved the caller's team from their bearer token and
+    // built the scope right there; this is the only scope this request uses.
+    const scope = auth.scope;
     touchMember(scope, auth.identity, nowIso);
 
     // Stateless: a fresh server + transport per request (verified pattern).

@@ -9,7 +9,10 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import {
   openDb, getOrCreateToken, hasToken, rotateToken, upsertMember,
   listMembers, removeMember, normalizeEmail, migrateSchema, hashToken,
-  createTeam, getOrCreateDefaultTeamId, makeTeamScope, type Db, type TeamScope,
+  createTeam, getOrCreateDefaultTeamId, makeTeamScope,
+  findTeamByTokenHash, findTeamByName, listTeams, countTeams,
+  generateTeamToken, rotateTeamToken, getSignupSecret, getOrCreateSignupSecret,
+  type Db, type TeamScope,
 } from './db.js';
 import { createShare, getShare, listShares, retractShare } from './shares.js';
 import { recordReceipt, getReceipts } from './receipts.js';
@@ -82,6 +85,93 @@ describe('teams', () => {
     expect(second).not.toBe(first);
     const count = db.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
     expect(count.n).toBe(2);
+  });
+
+  describe('findTeamByTokenHash (the auth-path lookup)', () => {
+    it('resolves the team that owns a given token hash', () => {
+      const id = createTeam(db, 'Acme', hashToken('ts_acme'), '2026-08-29T00:00:00.000Z');
+      const found = findTeamByTokenHash(db, hashToken('ts_acme'));
+      expect(found).toEqual({ id, name: 'Acme' });
+    });
+
+    it('returns undefined for a token hash matching no team', () => {
+      createTeam(db, 'Acme', hashToken('ts_acme'), '2026-08-29T00:00:00.000Z');
+      expect(findTeamByTokenHash(db, hashToken('ts_never_issued'))).toBeUndefined();
+    });
+  });
+
+  describe('findTeamByName / listTeams / countTeams', () => {
+    it('finds a team by its exact name and returns undefined for an unknown one', () => {
+      const id = createTeam(db, 'Rocket Squad', hashToken('ts_rocket'), '2026-08-29T00:00:00.000Z');
+      expect(findTeamByName(db, 'Rocket Squad')).toEqual({ id, name: 'Rocket Squad' });
+      expect(findTeamByName(db, 'Nonexistent')).toBeUndefined();
+    });
+
+    it('lists every team and counts them', () => {
+      expect(countTeams(db)).toBe(0);
+      expect(listTeams(db)).toEqual([]);
+      createTeam(db, 'Beta', hashToken('ts_beta'), '2026-08-29T00:00:00.000Z');
+      createTeam(db, 'Alpha', hashToken('ts_alpha'), '2026-08-29T00:00:00.000Z');
+      expect(countTeams(db)).toBe(2);
+      expect(listTeams(db).map((t) => t.name)).toEqual(['Alpha', 'Beta']); // ordered by name
+    });
+  });
+
+  describe('rotateTeamToken (§Rotation)', () => {
+    it('replaces token_hash so the old token no longer resolves and the new one does', () => {
+      const teamId = createTeam(db, 'Acme', hashToken('ts_acme_old'), '2026-08-29T00:00:00.000Z');
+      const newToken = rotateTeamToken(db, teamId);
+      expect(newToken).not.toBe('ts_acme_old');
+      expect(findTeamByTokenHash(db, hashToken('ts_acme_old'))).toBeUndefined();
+      expect(findTeamByTokenHash(db, hashToken(newToken))).toEqual({ id: teamId, name: 'Acme' });
+    });
+
+    it('does not disturb another team\'s token', () => {
+      const teamA = createTeam(db, 'A', hashToken('ts_a'), '2026-08-29T00:00:00.000Z');
+      createTeam(db, 'B', hashToken('ts_b'), '2026-08-29T00:00:00.000Z');
+      rotateTeamToken(db, teamA);
+      expect(findTeamByTokenHash(db, hashToken('ts_b'))?.name).toBe('B');
+    });
+  });
+
+  describe('generateTeamToken', () => {
+    it('produces distinct, reasonably long tokens', () => {
+      const a = generateTeamToken();
+      const b = generateTeamToken();
+      expect(a).not.toBe(b);
+      expect(a.length).toBeGreaterThanOrEqual(32);
+    });
+  });
+
+  describe('signup secret (§Creating a team)', () => {
+    it('is unset until getOrCreateSignupSecret is called', () => {
+      expect(getSignupSecret(db)).toBeUndefined();
+    });
+
+    it('generates one on first call when nothing is explicit, and reuses it after', () => {
+      const first = getOrCreateSignupSecret(db);
+      expect(first.generated).toBe(true);
+      expect(first.secret.length).toBeGreaterThan(0);
+
+      const second = getOrCreateSignupSecret(db);
+      expect(second.generated).toBe(false);
+      expect(second.secret).toBe(first.secret);
+      expect(getSignupSecret(db)).toBe(first.secret);
+    });
+
+    it('persists an explicit (operator-given) secret and reports it as not generated', () => {
+      const result = getOrCreateSignupSecret(db, 'operator-chosen-secret');
+      expect(result).toEqual({ secret: 'operator-chosen-secret', generated: false });
+      expect(getSignupSecret(db)).toBe('operator-chosen-secret');
+    });
+
+    it('an explicit value overwrites whatever was stored before, so it stays recoverable across restarts', () => {
+      getOrCreateSignupSecret(db); // auto-generates one
+      getOrCreateSignupSecret(db, 'now-operator-set');
+      expect(getSignupSecret(db)).toBe('now-operator-set');
+      // A later boot with no flag/env reuses the persisted value.
+      expect(getOrCreateSignupSecret(db).secret).toBe('now-operator-set');
+    });
   });
 });
 

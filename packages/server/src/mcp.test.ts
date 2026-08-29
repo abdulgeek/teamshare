@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Server } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { openDb, getOrCreateToken, upsertMember, getOrCreateDefaultTeamId, makeTeamScope, type Db } from './db.js';
+import {
+  openDb, getOrCreateToken, upsertMember, getOrCreateDefaultTeamId, makeTeamScope,
+  createTeam, hashToken, type Db,
+} from './db.js';
 import { createApp } from './app.js';
 
 let db: Db;
@@ -386,5 +389,55 @@ describe('mcp surface', () => {
     const markRes = await client.callTool({ name: 'mark_stale', arguments: { id: 'shr_missing' } });
     expect(markRes.isError).toBe(true);
     await client.close();
+  });
+
+  it("a token for team B cannot read team A's shares over MCP, and its own shares stay separate", async () => {
+    const adnan = await connect('adnan@team.com', 'Adnan');
+    const created = await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'Team A only secret plan', priority: 'fyi' },
+    });
+    const teamAShareId = JSON.parse(textOf(created)).id as string;
+    await adnan.close();
+
+    const tokenB = 'ts_mcp_teamB_token';
+    const teamB = createTeam(db, 'Team B', hashToken(tokenB), NOW);
+    const scopeB = makeTeamScope(db, teamB);
+    upsertMember(scopeB, 'b@teamb.com', 'B', NOW);
+
+    const client = new Client({ name: 'teamB', version: '1.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+      requestInit: {
+        headers: {
+          Authorization: `Bearer ${tokenB}`,
+          'X-Teamshare-Email': 'b@teamb.com',
+          'X-Teamshare-Name': 'B',
+        },
+      },
+    });
+    await client.connect(transport);
+
+    const digest = textOf(await client.callTool({ name: 'unread', arguments: {} }));
+    expect(digest).toContain('No unread');
+
+    const list = textOf(await client.callTool({ name: 'list_shares', arguments: {} }));
+    expect(list).not.toContain('Team A only secret plan');
+    expect(list).not.toContain(teamAShareId);
+
+    // No existence oracle: team A's share id, addressed from team B, reads
+    // exactly like a nonexistent id.
+    const readAttempt = await client.callTool({ name: 'read_share', arguments: { id: teamAShareId } });
+    expect(readAttempt.isError).toBe(true);
+    expect(textOf(readAttempt)).toBe(`no share with id ${teamAShareId}`);
+
+    await client.close();
+  });
+
+  it('rejects a bearer token that matches no team, over MCP, the same way as an unauthenticated request', async () => {
+    const client = new Client({ name: 'unknown', version: '1.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+      requestInit: { headers: { Authorization: 'Bearer ts_totally_unknown' } },
+    });
+    await expect(client.connect(transport)).rejects.toThrow();
   });
 });

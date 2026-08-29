@@ -6,8 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { parseArgs, acquireLock, formatServeBanner, runDoctor, main } from './cli.js';
-import { openDb, hasToken, getOrCreateToken } from './db.js';
+import Database from 'better-sqlite3';
+import { parseArgs, acquireLock, formatServeBanner, formatServeStartupBanner, runDoctor, main } from './cli.js';
+import {
+  openDb, hasToken, getOrCreateToken, createTeam, findTeamByName,
+  getOrCreateSignupSecret, hashToken, makeTeamScope, upsertMember,
+} from './db.js';
+import { createApp } from './app.js';
 
 const dirs: string[] = [];
 function tmp() {
@@ -48,6 +53,31 @@ describe('parseArgs', () => {
       cmd: 'remove-member',
       email: 'a@b.com',
     });
+  });
+
+  it('parses --team on rotate-token and remove-member', () => {
+    expect(parseArgs(['rotate-token', '--team', 'Acme'])).toMatchObject({ cmd: 'rotate-token', team: 'Acme' });
+    expect(parseArgs(['remove-member', 'a@b.com', '--team', 'Acme'])).toMatchObject({
+      cmd: 'remove-member',
+      email: 'a@b.com',
+      team: 'Acme',
+    });
+  });
+
+  it('parses serve --signup-secret, --open-signup, and --max-teams', () => {
+    const a = parseArgs(['serve', '--signup-secret', 'mysecret', '--open-signup', '--max-teams', '10']);
+    expect(a).toMatchObject({ cmd: 'serve', signupSecret: 'mysecret', openSignup: true, maxTeams: 10 });
+  });
+
+  it('parses signup-secret --show', () => {
+    const a = parseArgs(['signup-secret', '--show']);
+    expect(a).toMatchObject({ cmd: 'signup-secret', signupSecretShow: true });
+  });
+
+  it('parses signup-secret without --show as not showing anything', () => {
+    const a = parseArgs(['signup-secret']);
+    expect(a.cmd).toBe('signup-secret');
+    expect(a.signupSecretShow).toBeUndefined();
   });
 
   it('parses doctor', () => {
@@ -241,6 +271,336 @@ describe('formatServeBanner (spec §8 / README: token printed exactly once per g
   });
 });
 
+describe('formatServeStartupBanner (the real multi-team serve banner)', () => {
+  it('never includes a raw token value, and mentions the break-glass command', () => {
+    const out = formatServeStartupBanner({
+      port: 8787,
+      host: '127.0.0.1',
+      dbPath: '/tmp/x.db',
+      teamCount: 1,
+      openSignup: false,
+      signupSecretGenerated: true,
+    });
+    expect(out).toContain('signup-secret --show');
+    expect(out).toContain('1 team(s)');
+  });
+
+  it('prints a loud warning when open-signup is set', () => {
+    const out = formatServeStartupBanner({
+      port: 8787,
+      host: '127.0.0.1',
+      dbPath: '/tmp/x.db',
+      teamCount: 0,
+      openSignup: true,
+      signupSecretGenerated: false,
+    });
+    expect(out.toUpperCase()).toContain('WARNING');
+    expect(out).toContain('--open-signup');
+  });
+
+  it('mentions the team cap when --max-teams is set', () => {
+    const out = formatServeStartupBanner({
+      port: 8787,
+      host: '127.0.0.1',
+      dbPath: '/tmp/x.db',
+      teamCount: 2,
+      openSignup: false,
+      signupSecretGenerated: false,
+      maxTeams: 5,
+    });
+    expect(out).toContain('Team cap: 5');
+  });
+});
+
+describe('signup-secret --show', () => {
+  it('needs --show, and errors without it', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['signup-secret', '--db', dbPath]);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(chunks.join('')).toContain('--show');
+  });
+
+  it('prints a friendly message, not a crash, when no secret has ever been configured', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['signup-secret', '--show', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(chunks.join('')).toContain('No signup secret is configured');
+  });
+
+  it('prints the plaintext secret once it has been configured (via serve)', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    getOrCreateSignupSecret(db, 'the-real-secret');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['signup-secret', '--show', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(chunks.join('')).toContain('the-real-secret');
+  });
+});
+
+describe('rotate-token / remove-member across a multi-team server', () => {
+  it('operates on the sole team implicitly when --team is omitted and only one team exists', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Only Team', hashToken('ts_only'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['rotate-token', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(chunks.join('')).toContain('Only Team');
+  });
+
+  it('fails loudly (not silently) on rotate-token when multiple teams exist and --team is omitted', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Team A', hashToken('ts_a'), '2026-01-01T00:00:00Z');
+    createTeam(db, 'Team B', hashToken('ts_b'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['rotate-token', '--db', dbPath]);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    const out = chunks.join('');
+    expect(out).toContain('multiple teams');
+    expect(out).toContain('Team A');
+    expect(out).toContain('Team B');
+
+    // And, crucially, nothing was rotated — neither token changed.
+    const verifyDb = openDb(dbPath);
+    expect(findTeamByName(verifyDb, 'Team A')).toBeTruthy();
+    verifyDb.close();
+  });
+
+  it('rotates the named team when --team is given, on a multi-team server, leaving the other untouched', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Team A', hashToken('ts_a2'), '2026-01-01T00:00:00Z');
+    createTeam(db, 'Team B', hashToken('ts_b2'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['rotate-token', '--team', 'Team A', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(chunks.join('')).toContain('Team A');
+
+    const verifyDb = openDb(dbPath);
+    try {
+      const app = createApp({ db: verifyDb, expiryDays: 14 });
+      const server = app.listen(0);
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const addr = server.address() as AddressInfo;
+      const base = `http://127.0.0.1:${addr.port}`;
+
+      // Team A's old token is dead...
+      const oldA = await fetch(`${base}/unread`, {
+        headers: { Authorization: 'Bearer ts_a2', 'X-Teamshare-Email': 'a@a.com', 'X-Teamshare-Name': 'A' },
+      });
+      expect(oldA.status).toBe(401);
+
+      // ...but Team B's token still works, untouched.
+      const b = await fetch(`${base}/unread`, {
+        headers: { Authorization: 'Bearer ts_b2', 'X-Teamshare-Email': 'b@b.com', 'X-Teamshare-Name': 'B' },
+      });
+      expect(b.status).toBe(200);
+
+      await new Promise<void>((r) => server.close(() => r()));
+    } finally {
+      verifyDb.close();
+    }
+  });
+
+  it('errors with an unknown --team name rather than guessing', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Team A', hashToken('ts_a3'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['rotate-token', '--team', 'Nonexistent', '--db', dbPath]);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(chunks.join('')).toContain('no team named');
+  });
+
+  it('remove-member also fails loudly (not silently) with multiple teams and no --team', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    const teamA = createTeam(db, 'Team A', hashToken('ts_rm_a'), '2026-01-01T00:00:00Z');
+    createTeam(db, 'Team B', hashToken('ts_rm_b'), '2026-01-01T00:00:00Z');
+    const scopeA = makeTeamScope(db, teamA);
+    upsertMember(scopeA, 'a@a.com', 'A', '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['remove-member', 'a@a.com', '--db', dbPath]);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(chunks.join('')).toContain('multiple teams');
+
+    // The member must still be there — nothing removed.
+    const verifyDb = openDb(dbPath);
+    const scope = makeTeamScope(verifyDb, teamA);
+    expect(scope).toBeTruthy();
+    verifyDb.close();
+  });
+
+  it('removes from the named team with --team, on a multi-team server', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    const teamA = createTeam(db, 'Team A', hashToken('ts_rm2_a'), '2026-01-01T00:00:00Z');
+    createTeam(db, 'Team B', hashToken('ts_rm2_b'), '2026-01-01T00:00:00Z');
+    const scopeA = makeTeamScope(db, teamA);
+    upsertMember(scopeA, 'a@a.com', 'A', '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['remove-member', 'a@a.com', '--team', 'Team A', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(chunks.join('')).toContain('Removed a@a.com');
+    expect(chunks.join('')).toContain('Team A');
+  });
+});
+
+// This is the exact regression the design doc calls out: after migration,
+// the OLD rotate-token wrote to config.team_token, which authenticate() no
+// longer reads — it would print a fresh token, tell the operator teammates
+// must reconnect, and change nothing, a silent failure of the documented
+// remedy for a leaked credential. The new rotate-token must genuinely
+// invalidate the old token on a real migrated database.
+describe('rotate-token on a migrated database genuinely invalidates the old token', () => {
+  it('the pre-migration token stops authenticating, and the freshly rotated one works', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const oldToken = 'ts_legacy_pre_migration_token';
+
+    // Build a legacy v2-shaped database by hand, exactly as a real
+    // pre-upgrade install would look: token in config.team_token, one
+    // member, no `teams` table yet.
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE members (email TEXT PRIMARY KEY, name TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL);
+      CREATE TABLE shares (id TEXT PRIMARY KEY, sender_email TEXT NOT NULL, what TEXT NOT NULL, why TEXT, action TEXT, tags TEXT NOT NULL DEFAULT '[]', priority TEXT NOT NULL, created_at TEXT NOT NULL, stale_at TEXT);
+      CREATE TABLE receipts (share_id TEXT NOT NULL, member_email TEXT NOT NULL, status TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (share_id, member_email));
+    `);
+    raw.prepare(`INSERT INTO config (key, value) VALUES ('schema_version', '2')`).run();
+    raw.prepare(`INSERT INTO config (key, value) VALUES ('team_token', ?)`).run(oldToken);
+    raw
+      .prepare(`INSERT INTO members (email, name, first_seen, last_seen) VALUES (?, ?, ?, ?)`)
+      .run('a@team.com', 'A', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+    raw.close();
+
+    // Opening it through the real server migrates it to the current
+    // schema — this is "a migrated database" in the same sense production
+    // instances are.
+    openDb(dbPath).close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['rotate-token', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    const printed = chunks.join('');
+    const match = printed.match(/New team token[^:]*:\s*\n\s*\n\s*(\S+)/);
+    expect(match).toBeTruthy();
+    const newToken = match![1];
+    expect(newToken).not.toBe(oldToken);
+
+    const verifyDb = openDb(dbPath);
+    try {
+      const app = createApp({ db: verifyDb, expiryDays: 14 });
+      const server = app.listen(0);
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const addr = server.address() as AddressInfo;
+      const base = `http://127.0.0.1:${addr.port}`;
+
+      const headers = (bearer: string) => ({
+        Authorization: `Bearer ${bearer}`,
+        'X-Teamshare-Email': 'a@team.com',
+        'X-Teamshare-Name': 'A',
+      });
+
+      const oldRes = await fetch(`${base}/unread`, { headers: headers(oldToken) });
+      expect(oldRes.status).toBe(401);
+
+      const newRes = await fetch(`${base}/unread`, { headers: headers(newToken) });
+      expect(newRes.status).toBe(200);
+
+      await new Promise<void>((r) => server.close(() => r()));
+    } finally {
+      verifyDb.close();
+    }
+  });
+});
+
 describe('doctor', () => {
   const originalHome = process.env.HOME;
   let home: string;
@@ -377,6 +737,28 @@ describe('doctor', () => {
     const { exitCode, output } = await runDoctor();
     expect(exitCode).toBe(1);
     expect(output).toContain('http://127.0.0.1:1');
+  });
+
+  it('names the team a token belongs to, against a real server with a real team', async () => {
+    writeGitConfig('Priya', 'priya@team.com');
+    const realDb = openDb(':memory:');
+    const teamId = createTeam(realDb, 'Rocket Squad', hashToken('ts_rocket_team'), '2026-01-01T00:00:00Z');
+    const scope = makeTeamScope(realDb, teamId);
+    upsertMember(scope, 'priya@team.com', 'Priya', '2026-01-01T00:00:00Z');
+    const realApp = createApp({ db: realDb, expiryDays: 14 });
+    const realServer = realApp.listen(0);
+    await new Promise<void>((resolve) => realServer.once('listening', resolve));
+    const addr = realServer.address() as AddressInfo;
+    const realBase = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      const { exitCode, output } = await runDoctor(realBase, 'ts_rocket_team');
+      expect(exitCode).toBe(0);
+      expect(output).toContain('connected to team: Rocket Squad');
+    } finally {
+      await new Promise<void>((r) => realServer.close(() => r()));
+      realDb.close();
+    }
   });
 
   describe('resolving a server URL/token from three sources', () => {

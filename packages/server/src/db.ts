@@ -91,7 +91,7 @@ function setConfig(db: Db, key: string, value: string): void {
   ).run(key, value);
 }
 
-function count(db: Db, table: 'members' | 'shares' | 'receipts'): number {
+function count(db: Db, table: 'members' | 'shares' | 'receipts' | 'teams'): number {
   const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number };
   return row.n;
 }
@@ -315,15 +315,14 @@ export function rotateToken(db: Db): string {
   return token;
 }
 
-// Stage-1 compatibility bridge: this instance model is still "one server is
-// one team" end to end (real per-team auth is the next stage), so every
-// caller needs the same single team's id to build a TeamScope. A migrated
-// production database already has that team (created during the 2->3
-// migration from its existing config.team_token). A brand-new database has
-// none yet, so this bootstraps exactly one team the first time it's needed —
-// the same lazy, idempotent pattern getOrCreateToken already uses for the
-// token itself, and it reuses whatever token already exists (or mints one)
-// rather than minting a second, disagreeing one.
+// Was the Stage-1 compatibility bridge for a production request path that no
+// longer exists: real per-team auth (http.ts's authenticate()) now resolves
+// a request's team from its bearer token via findTeamByTokenHash, so
+// app.ts/mcp.ts/cli.ts no longer call this. It remains as a test-fixture
+// convenience — "give me a single team, lazily and idempotently" is still a
+// useful shape for tests that don't care which team they get, one just like
+// a migrated production database already has (created during the 2->3
+// migration from its existing config.team_token).
 export function getOrCreateDefaultTeamId(db: Db): string {
   const existing = db.prepare('SELECT id FROM teams LIMIT 1').get() as { id: string } | undefined;
   if (existing) return existing.id;
@@ -336,10 +335,9 @@ export function getOrCreateDefaultTeamId(db: Db): string {
   return id;
 }
 
-// Data-layer primitive for creating an additional team — used by tests that
-// need a genuine two-team fixture. (The signup-gated HTTP surface that calls
-// this in production is a later stage; this function is the honest
-// mechanism underneath it.)
+// Data-layer primitive for creating an additional team — this is the honest
+// mechanism underneath the signup-gated POST /teams surface (http.ts/app.ts),
+// and is also used directly by tests that need a genuine two-team fixture.
 export function createTeam(
   db: Db,
   name: string,
@@ -353,6 +351,78 @@ export function createTeam(
      VALUES (?, ?, ?, NULL, ?, ?)`,
   ).run(id, name, tokenHash, nowIso, createdByEmail);
   return id;
+}
+
+export interface TeamRow {
+  id: string;
+  name: string;
+}
+
+// The auth-path lookup: SHA-256 of a presented bearer token -> the team it
+// belongs to, or undefined. `teams.token_hash` is UNIQUE and indexed, so this
+// is the single query authenticate() needs to resolve a request to a team.
+export function findTeamByTokenHash(db: Db, tokenHash: string): TeamRow | undefined {
+  return db.prepare('SELECT id, name FROM teams WHERE token_hash = ?').get(tokenHash) as
+    | TeamRow
+    | undefined;
+}
+
+// Used by the CLI (rotate-token/remove-member --team <name>) to resolve an
+// operator-named team. Not part of the HTTP auth path, so "team not found"
+// can be reported honestly here — the operator already has filesystem
+// access to the database, so there is no cross-tenant oracle to protect
+// against the way there is on the authenticated HTTP/MCP surface.
+export function findTeamByName(db: Db, name: string): TeamRow | undefined {
+  return db.prepare('SELECT id, name FROM teams WHERE name = ?').get(name) as TeamRow | undefined;
+}
+
+export function listTeams(db: Db): TeamRow[] {
+  return db.prepare('SELECT id, name FROM teams ORDER BY name').all() as TeamRow[];
+}
+
+export function countTeams(db: Db): number {
+  return count(db, 'teams');
+}
+
+export function generateTeamToken(): string {
+  return `ts_${randomBytes(24).toString('hex')}`;
+}
+
+// §Rotation: replaces one team's token_hash, authenticated by its current
+// token (see http.ts's authenticateTeamOnly / POST /teams/rotate), or driven
+// directly by the CLI's rotate-token --team path. Returns the new plaintext
+// token once; it is not recoverable afterwards.
+export function rotateTeamToken(db: Db, teamId: string): string {
+  const token = generateTeamToken();
+  db.prepare('UPDATE teams SET token_hash = ? WHERE id = ?').run(hashToken(token), teamId);
+  return token;
+}
+
+// §Creating a team: the instance-wide signup secret that gates POST /teams.
+// Stored plaintext in `config` (same table/pattern as the legacy team_token)
+// deliberately — see the design doc: it gates creation only, never grants
+// access to any team's data, and recoverability (an operator can retrieve it
+// with `teamshare signup-secret --show`) matters more than hashing it would.
+export function getSignupSecret(db: Db): string | undefined {
+  return readConfig(db, 'signup_secret');
+}
+
+// `explicit`, when given, comes from --signup-secret or TEAMSHARE_SIGNUP_SECRET
+// (cli.ts resolves precedence) and is persisted so it survives even if the
+// flag/env var is absent on a later boot — the whole point being that the
+// operator never has to run an SSM-style ritual to recover it. Absent an
+// explicit value, this reuses whatever secret already exists, and mints one
+// only the very first time, exactly like getOrCreateToken.
+export function getOrCreateSignupSecret(db: Db, explicit?: string): { secret: string; generated: boolean } {
+  if (explicit) {
+    setConfig(db, 'signup_secret', explicit);
+    return { secret: explicit, generated: false };
+  }
+  const existing = readConfig(db, 'signup_secret');
+  if (existing) return { secret: existing, generated: false };
+  const secret = `tss_${randomBytes(24).toString('hex')}`;
+  setConfig(db, 'signup_secret', secret);
+  return { secret, generated: true };
 }
 
 export function upsertMember(scope: TeamScope, email: string, name: string, nowIso: string): void {
