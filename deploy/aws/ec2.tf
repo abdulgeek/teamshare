@@ -40,7 +40,11 @@ resource "aws_instance" "teamshare" {
     # variable is null: cli.ts treats an empty value the same as unset and
     # falls back to generating one on first boot, so this is never a syntax
     # hazard, just a documented no-op.
-    signup_secret = coalesce(var.signup_secret, "")
+    # NOT coalesce(): it rejects empty strings as well as null, so
+    # coalesce(var.signup_secret, "") throws "no non-null, non-empty-string
+    # arguments" whenever the variable is unset — which is the default case,
+    # and broke every plan.
+    signup_secret = var.signup_secret == null ? "" : var.signup_secret
     # Base64, not raw text: this goes through templatefile()'s own ${...}
     # interpolation, and the backup script uses plenty of shell $-syntax of
     # its own. Base64 has no `$` or `{` in it, so there is nothing for
