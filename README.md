@@ -96,17 +96,27 @@ speaks plain HTTP and says so on startup. That's fine on a local network;
 anywhere else, terminate TLS with your platform's proxy (Fly.io and Railway
 both do this for you automatically) before exposing the port.
 
-## Install (plugin)
+## Install (plugin, Claude Code)
 
-Each engineer installs the plugin once:
+Each engineer runs two commands, once. Point the first at wherever this repo
+lives — a GitHub repo (`your-org/teamshare`), a git URL, or a local path if
+you have the repo checked out:
 
 ```
-/plugin marketplace add <your-org-or-repo>
+/plugin marketplace add your-org/teamshare
 /plugin install teamshare
 ```
 
-(For local development without publishing a marketplace, point Claude Code
-at the plugin directory directly: `claude --plugin-dir packages/plugin`.)
+That reads `.claude-plugin/marketplace.json` at the repo root, which points at
+`packages/plugin`. Restart Claude Code so the SessionStart hook and the MCP
+server registration load.
+
+For local development without installing, point Claude Code straight at the
+plugin directory instead:
+
+```bash
+claude --plugin-dir packages/plugin
+```
 
 Then connect this machine to the team's server:
 
@@ -131,6 +141,42 @@ shell profile:
 ```bash
 export TEAMSHARE_URL=https://teamshare.your-team.internal
 ```
+
+
+## Install (other AI coding assistants)
+
+The server is plain MCP over Streamable HTTP with no Claude-specific
+assumptions, so any MCP-capable assistant can join the same shared memory.
+There is no packaged adapter yet — you register the server by hand:
+
+```json
+{
+  "mcpServers": {
+    "teamshare": {
+      "type": "http",
+      "url": "http://your-server:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer <team-token>",
+        "X-Teamshare-Email": "you@example.com",
+        "X-Teamshare-Name": "Your Name"
+      }
+    }
+  }
+}
+```
+
+Put that wherever your assistant keeps MCP config. Both identity headers are
+required — the server returns 400 without them, and the email must be the
+same one you use elsewhere or you will show up as a second member.
+
+What you get and what you do not: all the tools (`share`, `unread`,
+`read_share`, `acknowledge`, `retract`, `mark_stale`, `list_shares`,
+`receipts`) work, and the server's MCP `instructions` field asks the client to
+call `unread` at the start of a conversation. Whether that actually happens
+depends on the client. What you do not get is the Claude Code plugin's
+SessionStart hook, which is what makes the digest reliably appear before your
+first message. Until an adapter exists for your assistant, ask it to check
+`unread` when you start work.
 
 ## Usage
 

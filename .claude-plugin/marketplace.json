@@ -1,0 +1,15 @@
+{
+  "name": "teamshare",
+  "description": "Shared team context for coding agents — one engineer publishes a short note, every teammate's next session surfaces it",
+  "owner": {
+    "name": "teamshare"
+  },
+  "plugins": [
+    {
+      "name": "teamshare",
+      "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start.",
+      "version": "0.1.0",
+      "source": "./packages/plugin"
+    }
+  ]
+}
