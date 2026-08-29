@@ -85,13 +85,11 @@ export function buildMcpServer(ctx: {
     {
       title: 'Unread team shares',
       description: 'Team shares this user has not viewed or dismissed.',
-      inputSchema: {
-        format: z.enum(['text', 'json']).optional().describe('json returns the raw digest.'),
-      },
+      inputSchema: {},
     },
-    async ({ format }) => {
+    async () => {
       const digest = getUnread(db, identity.email, now(), expiryDays);
-      return ok(format === 'json' ? JSON.stringify(digest) : renderDigest(digest));
+      return ok(renderDigest(digest));
     },
   );
 
