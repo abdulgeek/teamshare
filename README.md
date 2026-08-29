@@ -17,8 +17,9 @@ memory.
 
 It's two pieces: `teamshare-server`, a small self-hosted MCP server backed by
 one SQLite file, and thin client adapters — a Claude Code plugin, and one
-CLI command for every other assistant. The server speaks plain MCP over
-HTTP, so any MCP-capable agent can join.
+dependency-free connect script for every other assistant, runnable with
+plain `node` and no install step. The server speaks plain MCP over HTTP, so
+any MCP-capable agent can join.
 
 ## Install the server
 
@@ -160,23 +161,48 @@ development, or to repair a machine whose stored values have gone wrong.
 
 ## Connect: every other assistant
 
-One command detects which assistants are installed and writes their MCP
-config for you:
+**No clone, no `pnpm install`, no build.** `teamshare connect` is a plain
+Node script — `packages/server/src/teamshare-connect.mjs` — that imports
+nothing outside Node's own builtins. It never touches `better-sqlite3` or any
+other native module (that's only needed to *run the server*, not to connect
+a client to one). Grab that one file — from a checkout of this repo, or as a
+single downloaded file on its own — and run it directly:
+
+```bash
+node packages/server/src/teamshare-connect.mjs <server-url> <team-token>
+```
+
+```
+node packages/server/src/teamshare-connect.mjs --list
+node packages/server/src/teamshare-connect.mjs <server-url> <team-token> --only cursor,codex
+node packages/server/src/teamshare-connect.mjs <server-url> <team-token> --dry-run
+node packages/server/src/teamshare-connect.mjs <server-url> <team-token> --force
+node packages/server/src/teamshare-connect.mjs <server-url> <team-token> --show-token
+```
+
+If you've already built the server package (e.g. because you're also running
+`serve` from a full checkout), `teamshare connect` / `teamshare-server`'s
+bundled CLI does exactly the same thing and takes the same flags:
 
 ```bash
 node packages/server/dist/cli.js connect <server-url> <team-token>
 ```
 
-```
-node packages/server/dist/cli.js connect --list
-node packages/server/dist/cli.js connect <server-url> <team-token> --only cursor,codex
-node packages/server/dist/cli.js connect <server-url> <team-token> --dry-run
-node packages/server/dist/cli.js connect <server-url> <team-token> --force
-```
+Both commands run the *same* implementation — there is only one — so
+anything below applies equally to either.
 
 Supported targets: `cursor`, `vscode`, `windsurf`, `gemini`, `cline`,
 `codex`, `zed`, `continue`. `--list` shows which of these are detected on
-this machine and their exact config paths, and writes nothing.
+this machine and their exact config paths, and writes nothing. An unknown id
+passed to `--only` (a typo like `cursur`) is rejected — it names the unknown
+id, lists the valid ones, and exits non-zero rather than silently configuring
+nothing.
+
+Paste in a server URL that already has a path on it (e.g. the `/mcp` endpoint
+URL itself, a common copy-paste mistake) and it's normalized back to the
+origin before `/mcp` is appended — `http://host:8787/mcp` and
+`http://host:8787` are treated the same, so you never end up with a
+silently-broken `.../mcp/mcp` config.
 
 What it guarantees on every write:
 
@@ -190,6 +216,17 @@ What it guarantees on every write:
   see Identity above. A config written without one would 400 on every call.
 - **`--dry-run`** prints exactly what would change and writes nothing.
 - **`--only cursor,codex`** restricts the run to specific targets.
+- **Never prints the real token by default.** When a target is skipped or
+  print-only, the manual snippet it prints shows `<team-token>` in place of
+  the real value, with a note on where to put it — including under
+  `--dry-run`, which never gets a pass on this. Pass **`--show-token`** if
+  you genuinely want the real, pasteable snippet (e.g. Zed and Continue.dev
+  are print-only every time, so you'll want this for those).
+
+VS Code and Cline's config paths are detected per OS (macOS, Linux, Windows)
+following each platform's standard VS Code user-data location; only the
+macOS paths have been hands-on verified, so treat Linux/Windows detection as
+best-effort.
 
 Two targets are special cases:
 
@@ -207,9 +244,10 @@ Two targets are special cases:
   URL+headers entry, because Zed's native remote-HTTP auth has an open
   upstream bug where the auth flow doesn't trigger.
 
-After it runs, restart the assistants it configured and run
-`node packages/server/dist/cli.js doctor` to confirm the connection actually
-works.
+After it runs, restart the assistants it configured and run `teamshare
+doctor` (`node packages/server/dist/cli.js doctor` — this one does need the
+package built, since `doctor` isn't part of the dependency-free script above)
+to confirm the connection actually works.
 
 ## Usage
 
@@ -288,13 +326,18 @@ used:
    on the URL/token, doctor reports every one it found and which it picked to
    test, since disagreeing configs are themselves a real problem.
 
-If none of the three has anything, doctor does **not** report a broken
-install — that's the expected shape of the two normal setups: for Claude
-Code, the plugin holds the server URL and team token itself (run `/plugin` to
-see them; no `~/.teamshare.json` is ever created for this install path), and
-for every other assistant, run `teamshare connect` first. It still tells you
-how to test a server directly in that case (`teamshare doctor <server-url>
-<team-token>`).
+If none of the three has anything, doctor does **not** print a `[PROBLEM]` —
+that's the expected shape of the two normal setups: for Claude Code, the
+plugin holds the server URL and team token itself (run `/plugin` to see
+them; no `~/.teamshare.json` is ever created for this install path), and for
+every other assistant, run `teamshare connect` first. It still tells you how
+to test a server directly in that case (`teamshare doctor <server-url>
+<team-token>`). It **does still exit non-zero**, though — nothing was
+actually checked against a real server, so exit 0 here would be a false
+all-clear that a script piping doctor's exit code could mistake for "every
+check passed." A calm, non-`[PROBLEM]` message and a non-zero exit are not a
+contradiction: the first says "this isn't broken," the second says "this
+run verified nothing, so don't read the exit code as a pass."
 
 Once it has a URL/token, it checks, and tells you the remedy for each problem
 it finds:
@@ -306,9 +349,10 @@ it finds:
   many shares are unread), 401 (token rejected), 400 (identity malformed), or
   any other status code, verbatim.
 
-It exits `0` when every check passes and `1` otherwise, and never prints the
-team token — when it reads one out of an assistant config, it says where it
-came from, never what it is.
+It exits `0` only when it actually verified a server (every check on it
+passed) and `1` otherwise — including when it had nothing to verify at all
+(see above) — and never prints the team token — when it reads one out of an
+assistant config, it says where it came from, never what it is.
 
 ## Trust model
 
@@ -338,7 +382,9 @@ explicitly out of scope for v1.
 ## Requirements
 
 - **Node ≥ 20.** `better-sqlite3` is pinned to `^12.11.1` — v13 requires
-  Node ≥ 22 and segfaults on Node 20.
+  Node ≥ 22 and segfaults on Node 20. This only affects *running the server*
+  (`teamshare serve`); `teamshare-connect.mjs` and `teamshare doctor` never
+  load `better-sqlite3` and need nothing beyond plain Node.
 - **Claude Code ≥ 2.1.238** for `headersHelper` support in a plugin's
   `.mcp.json` (the mechanism that authenticates the MCP connection without a
   bridge process).

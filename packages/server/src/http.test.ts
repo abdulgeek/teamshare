@@ -46,10 +46,12 @@ describe('auth', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects a wrong token with 401 and a setup hint', async () => {
+  it('rejects a wrong token with 401 and a reconnect hint', async () => {
     const res = await fetch(`${base}/unread`, { headers: headers({ Authorization: 'Bearer nope' }) });
     expect(res.status).toBe(401);
-    expect((await res.json()).error).toContain('teamshare-setup');
+    const error = (await res.json()).error;
+    expect(error).toContain('/plugin');
+    expect(error).toContain('teamshare connect');
   });
 
   it('rejects missing identity headers with 400', async () => {

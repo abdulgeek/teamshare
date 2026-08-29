@@ -73,6 +73,16 @@ describe('parseArgs', () => {
     expect(a.connectDryRun).toBe(true);
     expect(a.connectForce).toBe(true);
   });
+
+  it('parses connect --show-token', () => {
+    const a = parseArgs(['connect', 'https://ts.example.com', 'ts_abc123', '--show-token']);
+    expect(a.connectShowToken).toBe(true);
+  });
+
+  it('defaults --show-token to falsy when not passed', () => {
+    const a = parseArgs(['connect', 'https://ts.example.com', 'ts_abc123']);
+    expect(a.connectShowToken).toBeUndefined();
+  });
 });
 
 describe('help text', () => {
@@ -136,6 +146,23 @@ describe('connect wiring in main()', () => {
     expect(process.exitCode).toBe(1);
     process.exitCode = 0;
     expect(chunks.join('')).toContain('--list');
+  });
+
+  it('exits 1 and names the unknown target when --only is given an invalid id (e.g. a typo)', async () => {
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['connect', 'https://ts.example.com', 'ts_abc123', '--only', 'cursur']);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    const out = chunks.join('');
+    expect(out).toContain('cursur');
+    expect(out).toContain('cursor');
   });
 });
 
@@ -294,13 +321,14 @@ describe('doctor', () => {
     expect(output).toMatch(/0 unread/);
   });
 
-  it('flags a 401 on /unread and points to /teamshare-setup', async () => {
+  it('flags a 401 on /unread and points to the reconnect remedy', async () => {
     writeConfig();
     respondUnread = (res) => { res.writeHead(401); res.end('{}'); };
     const { exitCode, output } = await runDoctor();
     expect(exitCode).toBe(1);
     expect(output).toContain('401');
-    expect(output).toContain('/teamshare-setup');
+    expect(output).toContain('/plugin');
+    expect(output).toContain('teamshare connect');
   });
 
   it('flags a 400 on /unread and points to git config', async () => {
@@ -370,16 +398,39 @@ describe('doctor', () => {
       expect(output).not.toContain('token_b');
     });
 
-    it('produces guidance, not a false alarm, when no source has a URL/token configured', async () => {
-      // Identity resolves fine so this isolates the config-source behavior —
-      // the point is that a missing config alone must not fail doctor.
+    it('produces calm guidance, not a scary [PROBLEM], when no source has a URL/token configured — but still exits non-zero, since nothing was actually verified', async () => {
+      // Identity resolves fine so this isolates the config-source behavior.
+      // This is the expected shape of a normal Claude Code install (the
+      // plugin holds the values itself, so there is nothing on disk for
+      // doctor to find) — not a misconfiguration, hence no [PROBLEM] line.
+      // But zero checks actually ran against a real server, so exit 0 here
+      // would be a false all-clear (the README says exit 0 means every
+      // check passed): a script piping doctor's exit code must not read
+      // this state as "everything's fine."
       writeGitConfig('Priya', 'priya@team.com');
       const { exitCode, output } = await runDoctor();
-      expect(exitCode).toBe(0);
+      expect(exitCode).toBe(1);
       expect(output).not.toContain('[PROBLEM]');
       expect(output).toContain('/plugin');
       expect(output).toContain('teamshare connect');
       expect(output).toContain('teamshare doctor <server-url> <team-token>');
+    });
+  });
+
+  describe('URL normalization (same rule `teamshare connect` applies)', () => {
+    it('probes /health and /unread at the origin even when the configured url already ends in "/mcp"', async () => {
+      writeConfig({ url: `http://127.0.0.1:${port}/mcp` });
+      const { exitCode, output } = await runDoctor();
+      expect(exitCode).toBe(0);
+      expect(output).toContain('/health');
+      expect(output).toMatch(/0 unread/);
+    });
+
+    it('normalizes an explicit command-line url that ends in "/mcp/"', async () => {
+      writeGitConfig('Priya', 'priya@team.com');
+      const { exitCode, output } = await runDoctor(`http://127.0.0.1:${port}/mcp/`, 'explicit_token');
+      expect(exitCode).toBe(0);
+      expect(output).toContain('/health');
     });
   });
 });

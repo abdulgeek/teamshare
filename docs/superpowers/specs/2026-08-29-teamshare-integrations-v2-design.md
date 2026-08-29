@@ -122,9 +122,13 @@ clients without a session-start hook.
 
 **What is actually left:**
 - A per-agent adapter providing the equivalent of the SessionStart hook. The
-  work is small — read `~/.teamshare.json`, call `GET /unread`, inject the
-  digest — and the fence/receipt rules must be copied exactly, including the
-  "record receipts only for shares the user explicitly answered" rule.
+  work is small — read the url/token `teamshare connect` already wrote into
+  that assistant's own config (see the teamshare-easy-install work and
+  `2026-08-29-teamshare-design.md` §13 — **not** `~/.teamshare.json`, which is
+  only Claude Code's `--plugin-dir`/repair fallback, not the normal source of
+  truth for any assistant), call `GET /unread`, inject the digest — and the
+  fence/receipt rules must be copied exactly, including the "record receipts
+  only for shares the user explicitly answered" rule.
 - The `neutralizeFences` copy problem gets worse with each adapter. Before
   the second adapter exists, extract the fence logic into one small shared
   module that every adapter vendors from a single source, rather than three

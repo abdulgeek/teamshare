@@ -242,7 +242,7 @@ describe('session-start hook', () => {
   it('prints a visible notice on 401 rather than failing silently', async () => {
     writeConfig();
     respond = (res) => { res.writeHead(401); res.end('{"error":"bad token"}'); };
-    expect(await runHook()).toContain('/teamshare-setup');
+    expect(await runHook()).toContain('/plugin');
   });
 
   it('exits 0 and prints nothing when the server is unreachable', async () => {

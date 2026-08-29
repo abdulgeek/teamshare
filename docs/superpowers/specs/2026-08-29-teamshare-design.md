@@ -100,6 +100,16 @@ A single self-hosted TypeScript/Node process.
 
 ### 3.2 Claude Code plugin `teamshare`
 
+> **Retired as the normal install path — superseded by §13.** Everything
+> below describes the v1 flow: `/teamshare-setup` writes `~/.teamshare.json`,
+> and `headersHelper` / the SessionStart hook read it. §13 (v1.1) replaces
+> this for a normal install: `userConfig` prompts at `/plugin install` supply
+> the server URL and team token directly via `CLAUDE_PLUGIN_OPTION_*` and
+> `${user_config.*}`, with no config file and no setup command required.
+> `~/.teamshare.json` and `/teamshare-setup` survive only as the
+> `--plugin-dir` development / repair-a-broken-machine fallback described
+> there — read §13 first if you're implementing against this section.
+
 - **Config file:** `~/.teamshare.json` — `{ url, token, name, email }` —
   created by `/teamshare-setup`, which prompts for the server URL and token,
   reads `git config user.name`/`user.email`, echoes the resolved identity for
@@ -158,7 +168,7 @@ public docs imply, so implementers must not "correct" them back.
 | `headersHelper` | Runs the command, parses stdout as a JSON string→string map, merges it over static `headers`. Emitting `{}` sends no auth headers (server then 401s). Needs Claude Code ≥ 2.1.238 and persisted workspace trust. |
 | SessionStart STDIN | Field is **`source`** — *not* `session_source`. Payload: `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `source`. |
 | Hook context injection | Plain stdout on **exit 0** becomes context. Exit 2 suppresses it. |
-| Hook env | Only `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` are exported. `CLAUDE_PLUGIN_OPTION_*` is **not** available, so `userConfig` cannot feed the hook — hence one shared `~/.teamshare.json`. |
+| Hook env | **Corrected by §13 — this row was wrong.** `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` are exported, and so is `CLAUDE_PLUGIN_OPTION_<KEY>` for each configured `userConfig` entry, once a value has actually been set. An earlier probe reported `CLAUDE_PLUGIN_OPTION_*` absent from hooks entirely; that was wrong — it only looked absent because nothing had been configured yet. This is what lets the SessionStart hook read the URL and token directly, no `~/.teamshare.json` required. (`headersHelper`'s environment is scrubbed of these vars separately — see §13 — which is the real reason `~/.teamshare.json` still exists, as a fallback for `headersHelper` and for `--plugin-dir` development.) |
 | Hook matcher | `hooks/hooks.json` → `hooks.SessionStart[].matcher` accepts `"startup|resume|clear"`. |
 | MCP tool validation | `registerTool(name, {title, description, inputSchema}, handler)` where `inputSchema` is a **zod raw shape** (zod v4 works). Constraint violations (`.max()`, enums, missing required) **are** enforced, returned as `isError: true` results — **not** thrown. Tests must assert on `result.isError`. Unknown extra fields are silently stripped. |
 | Stateless HTTP transport | `new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })`, a fresh `McpServer` + transport per request, then `transport.handleRequest(req, res, parsedBody)`. |

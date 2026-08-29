@@ -34,7 +34,11 @@ export function authenticate(db: Db, req: Request): AuthResult {
   const auth = headerValue(req, 'authorization');
   const expected = `Bearer ${getOrCreateToken(db)}`;
   if (!auth || auth !== expected) {
-    return { ok: false, status: 401, message: 'invalid team token — run /teamshare-setup' };
+    return {
+      ok: false,
+      status: 401,
+      message: 'invalid team token — reconnect: /plugin (Claude Code) or `teamshare connect` (other assistants)',
+    };
   }
 
   const email = headerValue(req, 'x-teamshare-email');
@@ -53,7 +57,8 @@ export function authenticate(db: Db, req: Request): AuthResult {
       ok: false,
       status: 400,
       message:
-        'missing or malformed identity headers — run /teamshare-setup and check git config user.name/user.email',
+        'missing or malformed identity headers — check git config user.name/user.email, then reconnect: ' +
+        '/plugin (Claude Code) or `teamshare connect` (other assistants)',
     };
   }
 

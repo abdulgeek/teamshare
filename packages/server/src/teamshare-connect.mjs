@@ -1,0 +1,895 @@
+#!/usr/bin/env node
+// teamshare-connect.mjs — writes the MCP server config for every AI coding
+// assistant it can detect on this machine, so joining the team's shared
+// context is one command instead of a per-tool manual edit.
+//
+// This is the ONE implementation of `teamshare connect` — plain ESM,
+// zero imports outside Node builtins, no build step. It is both:
+//   1. A standalone script: from a checkout of this repo, run
+//      `node packages/server/src/teamshare-connect.mjs <server-url> <team-token>`
+//      (or `cd packages/server/src && node teamshare-connect.mjs ...`). It
+//      also works as a single downloaded file on its own — it has no
+//      relative imports of its own — with no `pnpm install`, no
+//      `pnpm -r build`, and no native module compilation. This is the
+//      primary path for every assistant other than Claude Code (see
+//      README.md).
+//   2. The module `./connect.ts` re-exports from, so `teamshare connect`
+//      (built into the `teamshare` CLI) runs this exact code — never a
+//      second, hand-duplicated copy of it. The package's "build" script
+//      copies this file into dist/ alongside the compiled output, so the
+//      published CLI stays self-contained.
+//
+// These are real developers' config files. They hold unrelated settings and
+// sometimes secrets. Six rules are non-negotiable and apply to every target
+// below:
+//   1. Back up before every write (`<file>.teamshare-backup-<epoch>`).
+//   2. Read-merge-write — never regenerate a file from scratch.
+//   3. Never clobber a different server that happens to be named `teamshare`
+//      unless --force is passed.
+//   4. --dry-run prints what would change and writes nothing.
+//   5. Refuse rather than guess: unparseable or unexpected shape -> skip and
+//      print the manual snippet instead.
+//   6. Never print the real token by default — snippets show a
+//      `<team-token>` placeholder unless --show-token is passed. (The one
+//      other exception, same as before: paths and the names of servers being
+//      added are always printed — never full file contents.)
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  copyFileSync,
+  readdirSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+
+/**
+ * @typedef {'cursor'|'vscode'|'windsurf'|'gemini'|'cline'|'codex'|'zed'|'continue'} TargetId
+ * @typedef {{ name: string, email: string }} GitIdentity
+ */
+
+export const ALL_TARGET_IDS = [
+  'cursor',
+  'vscode',
+  'windsurf',
+  'gemini',
+  'cline',
+  'codex',
+  'zed',
+  'continue',
+];
+
+// Shown in place of the real token in every printed snippet unless
+// --show-token / { showToken: true } is passed.
+const TOKEN_PLACEHOLDER = '<team-token>';
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+// This is a fourth hand-maintained copy of the same git-identity resolution
+// as packages/plugin/headers.sh, packages/plugin/hooks/session-start.mjs, and
+// cli.ts's own gitIdentity() (used by `doctor`) — nothing enforces the four
+// staying in sync, so update the others by hand if this changes.
+//
+// Deliberately mirrors doctor's gitIdentity(), not headers.sh's simpler
+// version: cwd defaults to the *home* directory, never the caller's cwd, and
+// --global is tried before plain --get. `connect` bakes a static identity
+// into other tools' user-scope configs, so it must resolve the same
+// machine-wide identity doctor checks and headers.sh normally sends —
+// resolving from whatever directory the user happened to be in when they
+// typed `teamshare connect` let a repo-local git identity silently diverge
+// from that, which is exactly the kind of mismatch this tool exists to avoid.
+//
+// cwd/env are still injectable so tests can prove both the "found" and
+// "genuinely absent" paths without ever touching the real machine's git
+// config: a temp cwd (a fresh repo, or not a repo at all) plus an env
+// pointing HOME/XDG_CONFIG_HOME at an empty temp dir with
+// GIT_CONFIG_NOSYSTEM=1 fully isolates the lookup from the real machine.
+/**
+ * @param {{ cwd?: string, env?: NodeJS.ProcessEnv }} [opts]
+ * @returns {GitIdentity | null}
+ */
+export function resolveGitIdentity(opts = {}) {
+  const cwd = opts.cwd ?? homedir();
+  const env = opts.env ?? process.env;
+
+  const run = (args) => {
+    try {
+      return execFileSync('git', args, {
+        cwd,
+        env,
+        timeout: 1500,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+        .toString('utf8')
+        .trim();
+    } catch {
+      return '';
+    }
+  };
+
+  let name = run(['config', '--global', '--get', 'user.name']);
+  let email = run(['config', '--global', '--get', 'user.email']);
+  if (!name) name = run(['config', '--get', 'user.name']);
+  if (!email) email = run(['config', '--get', 'user.email']);
+
+  if (!name || !email) return null;
+  return { name, email: email.toLowerCase() };
+}
+
+function headersObj(ctx) {
+  return {
+    Authorization: `Bearer ${ctx.token}`,
+    'X-Teamshare-Name': ctx.identity.name.trim(),
+    'X-Teamshare-Email': ctx.identity.email.trim().toLowerCase(),
+  };
+}
+
+// Strips a trailing "/mcp" (any case, any trailing slashes around it) and any
+// trailing slashes, repeatedly, so a URL that already points at the MCP
+// endpoint — the single most common paste mistake, since that's the literal
+// endpoint this tool's own headers point at — normalizes back to the plain
+// origin instead of getting "/mcp" appended a second time
+// (`http://host:8787/mcp` -> `.../mcp/mcp`, which looks valid and silently
+// never connects). Also used by `teamshare doctor` so both tools agree on
+// what "the server URL" means.
+export function normalizeServerUrl(url) {
+  let u = String(url).trim();
+  for (;;) {
+    const stripped = u.replace(/\/+$/, '');
+    if (/\/mcp$/i.test(stripped)) {
+      u = stripped.slice(0, -4);
+      continue;
+    }
+    u = stripped;
+    break;
+  }
+  return u;
+}
+
+function mcpUrl(baseUrl) {
+  return `${normalizeServerUrl(baseUrl)}/mcp`;
+}
+
+// ---------------------------------------------------------------------------
+// Generic JSON target support (Cursor, VS Code, Windsurf, Gemini CLI, Cline, Zed)
+// ---------------------------------------------------------------------------
+
+function readJsonFileOrEmpty(filePath) {
+  if (!existsSync(filePath)) return { ok: true, data: {} };
+  let raw;
+  try {
+    raw = readFileSync(filePath, 'utf8');
+  } catch {
+    return { ok: false };
+  }
+  if (raw.trim().length === 0) return { ok: true, data: {} };
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false };
+    return { ok: true, data: parsed };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function writeJsonServerConfig(p) {
+  const parsed = readJsonFileOrEmpty(p.filePath);
+  if (!parsed.ok) {
+    return {
+      status: 'skipped',
+      reason: `${p.filePath} exists but does not parse as JSON — leaving it untouched`,
+    };
+  }
+
+  const data = parsed.data;
+  const serversRaw = data[p.serversKey];
+  if (serversRaw !== undefined && (typeof serversRaw !== 'object' || serversRaw === null || Array.isArray(serversRaw))) {
+    return {
+      status: 'skipped',
+      reason: `${p.filePath}'s "${p.serversKey}" key is not an object — leaving it untouched`,
+    };
+  }
+  const servers = serversRaw ? { ...serversRaw } : {};
+
+  const existingEntry = servers[p.entryKey];
+  if (existingEntry !== undefined && !p.force && !looksLikeOurEntry(existingEntry)) {
+    return {
+      status: 'skipped',
+      reason:
+        `${p.filePath} already has a "${p.entryKey}" entry under "${p.serversKey}" that doesn't ` +
+        'look like teamshare\'s — pass --force to overwrite it',
+    };
+  }
+
+  servers[p.entryKey] = p.buildEntry();
+  const nextData = { ...data, [p.serversKey]: servers };
+
+  if (p.dryRun) return { status: 'would-write' };
+
+  mkdirSync(dirname(p.filePath), { recursive: true });
+  let backupPath;
+  if (existsSync(p.filePath)) {
+    backupPath = `${p.filePath}.teamshare-backup-${p.now()}`;
+    copyFileSync(p.filePath, backupPath);
+  }
+  writeFileSync(p.filePath, JSON.stringify(nextData, null, 2) + '\n', 'utf8');
+  return { status: 'written', backupPath };
+}
+
+function jsonEntrySnippet(serversKey, path, entry) {
+  const body = JSON.stringify({ [serversKey]: { teamshare: entry } }, null, 2);
+  return `Add this into "${serversKey}" in ${path}:\n${body}\n`;
+}
+
+// A previously-written teamshare entry always carries our identity header as
+// a telltale marker (present as a JSON key for most targets, and as a
+// "X-Teamshare-Email:..." arg string for Zed's bridge form) — so a rerun can
+// refresh its own entry (e.g. after `rotate-token`) without needing --force,
+// while a genuinely different server that happens to be named "teamshare" is
+// left alone unless the caller explicitly overrides.
+function looksLikeOurEntry(entry) {
+  try {
+    return JSON.stringify(entry).includes('X-Teamshare-Email');
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reading credentials back out of a previously-written entry (`doctor`'s
+// third resolution source). Never writes anything; a malformed/missing file
+// or entry just yields null, same "refuse rather than guess" spirit as the
+// write path above.
+// ---------------------------------------------------------------------------
+
+function readBackTeamshareEntry(path, serversKey) {
+  const parsed = readJsonFileOrEmpty(path);
+  if (!parsed.ok) return null;
+  const serversRaw = parsed.data[serversKey];
+  if (!serversRaw || typeof serversRaw !== 'object' || Array.isArray(serversRaw)) return null;
+  const entry = serversRaw.teamshare;
+  if (entry === undefined || typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null;
+  if (!looksLikeOurEntry(entry)) return null;
+  return entry;
+}
+
+// Covers Cursor, VS Code, Cline, Gemini CLI (and any future target) whose
+// entry is a plain { [urlKey]: string, headers: { Authorization: string } }
+// object — the only thing that varies between them is which key holds the
+// url and which top-level key the servers map lives under.
+function readBackJsonUrlEntry(serversKey, urlKey) {
+  return (path) => {
+    const entry = readBackTeamshareEntry(path, serversKey);
+    if (!entry) return null;
+    const rawUrl = entry[urlKey];
+    const headers = entry.headers;
+    if (typeof rawUrl !== 'string' || !headers || typeof headers !== 'object') return null;
+    const auth = headers.Authorization;
+    if (typeof auth !== 'string') return null;
+    const token = auth.replace(/^Bearer\s+/i, '');
+    if (!token) return null;
+    return { url: normalizeServerUrl(rawUrl), token };
+  };
+}
+
+// Zed's entry has no top-level url/headers — everything is baked into the
+// mcp-remote bridge's `args` array (see buildTargets' zed entry below).
+function readBackZedEntry(path) {
+  const entry = readBackTeamshareEntry(path, 'context_servers');
+  if (!entry) return null;
+  const args = entry.args;
+  if (!Array.isArray(args)) return null;
+  const url = args.find((a) => typeof a === 'string' && /^https?:\/\//i.test(a));
+  const authArg = args.find((a) => typeof a === 'string' && /^Authorization:/i.test(a));
+  if (!url || !authArg) return null;
+  const token = authArg.replace(/^Authorization:Bearer\s*/i, '');
+  if (!token) return null;
+  return { url: normalizeServerUrl(url), token };
+}
+
+function makeJsonTarget(opts) {
+  const installed = existsSync(opts.path) || existsSync(opts.appDir);
+  return {
+    id: opts.id,
+    label: opts.label,
+    configPath: opts.path,
+    installed,
+    apply: (ctx) => {
+      const entry = opts.buildEntry(ctx);
+      const result = writeJsonServerConfig({
+        filePath: opts.path,
+        serversKey: opts.serversKey,
+        entryKey: 'teamshare',
+        buildEntry: () => entry,
+        dryRun: ctx.dryRun,
+        force: ctx.force,
+        now: ctx.now,
+      });
+      if (result.status === 'skipped') {
+        const snippetEntry = ctx.showToken ? entry : opts.buildEntry({ ...ctx, token: TOKEN_PLACEHOLDER });
+        return { ...result, snippet: jsonEntrySnippet(opts.serversKey, opts.path, snippetEntry) };
+      }
+      return result;
+    },
+    readBack: () => opts.readBack(opts.path),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// VS Code data directory: shared by the VS Code target itself and by Cline
+// (a VS Code extension whose settings live under VS Code's own user-data
+// tree). Branches on `platform` (injectable for tests; defaults to
+// process.platform) so both targets are detected correctly on Linux and
+// Windows, not just macOS — these paths follow VS Code's own documented
+// per-OS user-data locations, but have only been hands-on verified on macOS;
+// treat the Linux/Windows branches as best-effort.
+// ---------------------------------------------------------------------------
+
+function vscodeAppDir(home, platform) {
+  if (platform === 'win32') return join(home, 'AppData', 'Roaming', 'Code');
+  if (platform === 'linux') return join(home, '.config', 'Code');
+  return join(home, 'Library', 'Application Support', 'Code'); // darwin, and the fallback for anything else
+}
+
+function vscodeUserDir(home, platform) {
+  return join(vscodeAppDir(home, platform), 'User');
+}
+
+// ---------------------------------------------------------------------------
+// Cline: extension id is not stable, so detection globs globalStorage rather
+// than hardcoding a path.
+// ---------------------------------------------------------------------------
+
+function resolveClineDir(home, platform) {
+  const globalStorage = join(vscodeUserDir(home, platform), 'globalStorage');
+  if (!existsSync(globalStorage)) return { globalStorage, matchDir: null };
+  let entries = [];
+  try {
+    entries = readdirSync(globalStorage);
+  } catch {
+    return { globalStorage, matchDir: null };
+  }
+  const match = entries.find((e) => /claude-dev/i.test(e) || /cline/i.test(e));
+  return { globalStorage, matchDir: match ? join(globalStorage, match) : null };
+}
+
+// ---------------------------------------------------------------------------
+// Codex CLI: config.toml is a single shared file for MCP servers, plugin
+// registrations, trust levels, and shell policy, and the Codex app itself has
+// been reported to rewrite it. We deliberately never parse-and-reserialize —
+// only ever append a new table at the end (TOML permits tables anywhere), and
+// only when the literal table header isn't already present. This also means
+// --force cannot make Codex overwrite an existing block: doing that safely
+// would require a real TOML parser, which is explicitly out of scope.
+// ---------------------------------------------------------------------------
+
+const CODEX_TABLE_HEADER = '[mcp_servers.teamshare]';
+
+// TOML basic strings share JSON's escaping rules for the characters we might
+// ever emit here (", \, control chars), so JSON.stringify produces a valid
+// TOML basic string without hand-rolling an escaper.
+function tomlString(value) {
+  return JSON.stringify(value);
+}
+
+function buildCodexBlock(ctx) {
+  const lines = [
+    '# added by teamshare connect',
+    CODEX_TABLE_HEADER,
+    `url = ${tomlString(mcpUrl(ctx.url))}`,
+    '',
+    '[mcp_servers.teamshare.http_headers]',
+    `Authorization = ${tomlString(`Bearer ${ctx.token}`)}`,
+    `X-Teamshare-Name = ${tomlString(ctx.identity.name.trim())}`,
+    `X-Teamshare-Email = ${tomlString(ctx.identity.email.trim().toLowerCase())}`,
+  ];
+  return lines.join('\n') + '\n';
+}
+
+function appendCodexBlock(existing, block) {
+  if (existing.length === 0) return block;
+  const sep = existing.endsWith('\n') ? '\n' : '\n\n';
+  return existing + sep + block;
+}
+
+function buildCodexSnippet(ctx) {
+  const snippetCtx = ctx.showToken ? ctx : { ...ctx, token: TOKEN_PLACEHOLDER };
+  return `Append this to the end of ~/.codex/config.toml:\n\n${buildCodexBlock(snippetCtx)}`;
+}
+
+// TOML basic strings decode with the same escaping JSON uses (see
+// tomlString() above), so wrapping the captured body back in quotes and
+// handing it to JSON.parse reverses tomlString() exactly.
+function tomlStringValue(raw) {
+  try {
+    const value = JSON.parse(`"${raw}"`);
+    return typeof value === 'string' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function readBackCodexEntry(path) {
+  if (!existsSync(path)) return null;
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  const idx = text.indexOf(CODEX_TABLE_HEADER);
+  if (idx === -1) return null;
+  const rest = text.slice(idx);
+  const urlMatch = rest.match(/\burl\s*=\s*"((?:[^"\\]|\\.)*)"/);
+  const authMatch = rest.match(/\bAuthorization\s*=\s*"((?:[^"\\]|\\.)*)"/);
+  if (!urlMatch || !authMatch) return null;
+  const rawUrl = tomlStringValue(urlMatch[1]);
+  const auth = tomlStringValue(authMatch[1]);
+  if (!rawUrl || !auth) return null;
+  const token = auth.replace(/^Bearer\s+/i, '');
+  if (!token) return null;
+  return { url: normalizeServerUrl(rawUrl), token };
+}
+
+function applyCodex(path, ctx) {
+  const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  if (existing.includes(CODEX_TABLE_HEADER)) {
+    return {
+      status: 'skipped',
+      reason: `${path} already has ${CODEX_TABLE_HEADER} — edit or remove it by hand, then re-run`,
+      snippet: buildCodexSnippet(ctx),
+    };
+  }
+
+  if (ctx.dryRun) return { status: 'would-write' };
+
+  const block = buildCodexBlock(ctx);
+  const next = appendCodexBlock(existing, block);
+
+  mkdirSync(dirname(path), { recursive: true });
+  let backupPath;
+  if (existsSync(path)) {
+    backupPath = `${path}.teamshare-backup-${ctx.now()}`;
+    copyFileSync(path, backupPath);
+  }
+  writeFileSync(path, next, 'utf8');
+  return { status: 'written', backupPath };
+}
+
+// ---------------------------------------------------------------------------
+// Continue.dev: mcpServers is a YAML list (not a map) and this shape was not
+// verifiable against a real install, so this version never writes it — only
+// detects it and prints the snippet, with requestOptions.headers nesting.
+// ---------------------------------------------------------------------------
+
+function buildContinueSnippet(ctx) {
+  const snippetCtx = ctx.showToken ? ctx : { ...ctx, token: TOKEN_PLACEHOLDER };
+  const lines = [
+    'Continue.dev support is print-only in this version. Add this to ~/.continue/config.yaml by hand:',
+    '',
+    'mcpServers:',
+    '  - name: teamshare',
+    `    url: ${mcpUrl(snippetCtx.url)}`,
+    '    requestOptions:',
+    '      headers:',
+    `        Authorization: Bearer ${snippetCtx.token}`,
+    `        X-Teamshare-Name: ${snippetCtx.identity.name.trim()}`,
+    `        X-Teamshare-Email: ${snippetCtx.identity.email.trim().toLowerCase()}`,
+  ];
+  return lines.join('\n') + '\n';
+}
+
+// ---------------------------------------------------------------------------
+// Target list
+// ---------------------------------------------------------------------------
+
+function buildTargets(home, platform) {
+  const targets = [];
+
+  targets.push(
+    makeJsonTarget({
+      id: 'cursor',
+      label: 'Cursor',
+      path: join(home, '.cursor', 'mcp.json'),
+      appDir: join(home, '.cursor'),
+      serversKey: 'mcpServers',
+      buildEntry: (ctx) => ({ url: mcpUrl(ctx.url), headers: headersObj(ctx) }),
+      readBack: readBackJsonUrlEntry('mcpServers', 'url'),
+    }),
+  );
+
+  targets.push(
+    makeJsonTarget({
+      id: 'vscode',
+      label: 'VS Code',
+      path: join(vscodeUserDir(home, platform), 'mcp.json'),
+      appDir: vscodeAppDir(home, platform),
+      serversKey: 'servers',
+      buildEntry: (ctx) => ({ type: 'http', url: mcpUrl(ctx.url), headers: headersObj(ctx) }),
+      readBack: readBackJsonUrlEntry('servers', 'url'),
+    }),
+  );
+
+  targets.push(
+    makeJsonTarget({
+      id: 'windsurf',
+      label: 'Windsurf',
+      path: join(home, '.codeium', 'mcp_config.json'),
+      appDir: join(home, '.codeium'),
+      serversKey: 'mcpServers',
+      buildEntry: (ctx) => ({ serverUrl: mcpUrl(ctx.url), headers: headersObj(ctx) }),
+      readBack: readBackJsonUrlEntry('mcpServers', 'serverUrl'),
+    }),
+  );
+
+  targets.push(
+    makeJsonTarget({
+      id: 'gemini',
+      label: 'Gemini CLI',
+      path: join(home, '.gemini', 'settings.json'),
+      appDir: join(home, '.gemini'),
+      serversKey: 'mcpServers',
+      buildEntry: (ctx) => ({ httpUrl: mcpUrl(ctx.url), headers: headersObj(ctx) }),
+      readBack: readBackJsonUrlEntry('mcpServers', 'httpUrl'),
+    }),
+  );
+
+  const { globalStorage, matchDir } = resolveClineDir(home, platform);
+  const clinePath = matchDir
+    ? join(matchDir, 'settings', 'cline_mcp_settings.json')
+    : join(globalStorage, '<cline-extension>', 'settings', 'cline_mcp_settings.json');
+  targets.push({
+    id: 'cline',
+    label: 'Cline',
+    configPath: clinePath,
+    installed: matchDir !== null,
+    apply: (ctx) => {
+      const entry = { url: mcpUrl(ctx.url), type: 'streamableHttp', headers: headersObj(ctx) };
+      const result = writeJsonServerConfig({
+        filePath: clinePath,
+        serversKey: 'mcpServers',
+        entryKey: 'teamshare',
+        buildEntry: () => entry,
+        dryRun: ctx.dryRun,
+        force: ctx.force,
+        now: ctx.now,
+      });
+      if (result.status === 'skipped') {
+        const snippetEntry = ctx.showToken
+          ? entry
+          : { url: mcpUrl(ctx.url), type: 'streamableHttp', headers: headersObj({ ...ctx, token: TOKEN_PLACEHOLDER }) };
+        return { ...result, snippet: jsonEntrySnippet('mcpServers', clinePath, snippetEntry) };
+      }
+      return result;
+    },
+    readBack: () => readBackJsonUrlEntry('mcpServers', 'url')(clinePath),
+  });
+
+  targets.push(
+    makeJsonTarget({
+      id: 'zed',
+      label: 'Zed (via mcp-remote bridge)',
+      path: join(home, '.config', 'zed', 'settings.json'),
+      appDir: join(home, '.config', 'zed'),
+      serversKey: 'context_servers',
+      // Zed's native remote-HTTP auth has an open upstream bug where the auth
+      // flow doesn't trigger, so this goes through the mcp-remote stdio
+      // bridge instead of a direct url+headers entry.
+      buildEntry: (ctx) => ({
+        command: 'npx',
+        args: [
+          '-y',
+          'mcp-remote',
+          mcpUrl(ctx.url),
+          '--header',
+          `Authorization:Bearer ${ctx.token}`,
+          '--header',
+          `X-Teamshare-Name:${ctx.identity.name.trim()}`,
+          '--header',
+          `X-Teamshare-Email:${ctx.identity.email.trim().toLowerCase()}`,
+        ],
+      }),
+      readBack: readBackZedEntry,
+    }),
+  );
+
+  const codexPath = join(home, '.codex', 'config.toml');
+  const codexAppDir = join(home, '.codex');
+  targets.push({
+    id: 'codex',
+    label: 'Codex CLI',
+    configPath: codexPath,
+    installed: existsSync(codexPath) || existsSync(codexAppDir),
+    apply: (ctx) => applyCodex(codexPath, ctx),
+    readBack: () => readBackCodexEntry(codexPath),
+  });
+
+  const continuePath = join(home, '.continue', 'config.yaml');
+  const continueAppDir = join(home, '.continue');
+  targets.push({
+    id: 'continue',
+    label: 'Continue.dev',
+    configPath: continuePath,
+    installed: existsSync(continuePath) || existsSync(continueAppDir),
+    apply: (ctx) => ({ status: 'print-only', snippet: buildContinueSnippet(ctx) }),
+  });
+
+  return targets;
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+export function listTargets(home = homedir(), platform = process.platform) {
+  return buildTargets(home, platform).map((t) => ({
+    id: t.id,
+    label: t.label,
+    path: t.configPath,
+    installed: t.installed,
+  }));
+}
+
+// `teamshare doctor`'s third resolution source: when there's no
+// ~/.teamshare.json (e.g. Claude Code's plugin-managed install never creates
+// one), look for a teamshare entry already written into any assistant config
+// `connect` knows how to write, and read the url/token back out of it. Only
+// ever reads; never creates or modifies a file. Returns one entry per
+// assistant that has a recognizable teamshare entry — callers should treat
+// more than one result as worth flagging (disagreeing configs), not just
+// pick the first silently.
+export function discoverConnectedTargets(home = homedir(), platform = process.platform) {
+  const found = [];
+  for (const target of buildTargets(home, platform)) {
+    if (!target.readBack) continue;
+    const creds = target.readBack();
+    if (creds) found.push({ id: target.id, label: target.label, path: target.configPath, ...creds });
+  }
+  return found;
+}
+
+function missingIdentityAbort() {
+  return {
+    reason: 'git identity (user.name and/or user.email) is not fully configured',
+    remedy: [
+      'A config written without an identity would fail every call with a confusing 400.',
+      'Set your git identity, then re-run teamshare connect:',
+      '',
+      '  git config --global user.name "Your Name"',
+      '  git config --global user.email "you@example.com"',
+    ].join('\n'),
+  };
+}
+
+function invalidOnlyAbort(unknown) {
+  return {
+    reason: `--only named an unknown target: ${unknown.join(', ')}`,
+    remedy: `Valid targets: ${ALL_TARGET_IDS.join(', ')}`,
+  };
+}
+
+function emptyOnlyAbort() {
+  return {
+    reason: '--only matched no targets',
+    remedy: `Valid targets: ${ALL_TARGET_IDS.join(', ')}`,
+  };
+}
+
+export function runConnect(url, token, options = {}) {
+  const home = options.home ?? homedir();
+  const platform = options.platform ?? process.platform;
+  const now = options.now ?? Date.now;
+  const dryRun = options.dryRun ?? false;
+  const force = options.force ?? false;
+  const showToken = options.showToken ?? false;
+
+  // Validate --only against the known target ids before doing anything
+  // else (including before resolving git identity) — an unknown id like
+  // "cursur" is a typo the user should hear about immediately, not a run
+  // that silently configures nothing and reports success.
+  if (options.only) {
+    const unknown = options.only.filter((id) => !ALL_TARGET_IDS.includes(id));
+    if (unknown.length > 0) {
+      return { aborted: invalidOnlyAbort(unknown), results: [], showToken };
+    }
+    if (options.only.length === 0) {
+      return { aborted: emptyOnlyAbort(), results: [], showToken };
+    }
+  }
+
+  // Default the git-identity cwd to the *effective* home (the injected test
+  // home, or the real one in production) rather than letting
+  // resolveGitIdentity() fall back to its own os.homedir() default — a test
+  // that injects `home` but forgets to also pass an identity or
+  // gitIdentityOptions must never fall through to reading the real machine's
+  // global git config.
+  const identity =
+    options.identity !== undefined
+      ? options.identity
+      : resolveGitIdentity(options.gitIdentityOptions ?? { cwd: home });
+
+  if (!identity || !identity.name.trim() || !identity.email.trim()) {
+    return { aborted: missingIdentityAbort(), results: [], showToken };
+  }
+
+  const allTargets = buildTargets(home, platform);
+  const selected = options.only ? allTargets.filter((t) => options.only.includes(t.id)) : allTargets;
+
+  const results = selected.map((target) => {
+    if (!target.installed) {
+      return { id: target.id, label: target.label, status: 'not-installed', path: target.configPath };
+    }
+    const applied = target.apply({ url, token, identity, dryRun, force, now, showToken });
+    return { id: target.id, label: target.label, path: target.configPath, ...applied };
+  });
+
+  return { identity, results, showToken };
+}
+
+// ---------------------------------------------------------------------------
+// Output formatting
+// ---------------------------------------------------------------------------
+
+export function formatListOutput(detected) {
+  const lines = ['teamshare connect --list — detected assistants', ''];
+  for (const d of detected) {
+    const marker = d.installed ? '[detected]    ' : '[not installed]';
+    lines.push(`  ${marker} ${d.label.padEnd(28)} ${d.path}`);
+  }
+  lines.push('');
+  lines.push('Nothing was written. Run: teamshare connect <server-url> <team-token>');
+  return lines.join('\n') + '\n';
+}
+
+export function formatConnectOutput(run) {
+  if (run.aborted) {
+    return (
+      [
+        'teamshare connect: aborted before touching any file',
+        '',
+        run.aborted.reason,
+        '',
+        run.aborted.remedy,
+        '',
+      ].join('\n') + '\n'
+    );
+  }
+
+  const lines = ['teamshare connect — result', ''];
+  let writtenCount = 0;
+  const snippets = [];
+
+  for (const r of run.results) {
+    switch (r.status) {
+      case 'written':
+        writtenCount++;
+        lines.push(
+          `  [written]       ${r.label} -> ${r.path}` +
+            (r.backupPath ? ` (backup: ${r.backupPath})` : ''),
+        );
+        break;
+      case 'would-write':
+        lines.push(`  [would write]   ${r.label} -> ${r.path} (--dry-run, nothing written)`);
+        break;
+      case 'skipped':
+        lines.push(`  [skipped]       ${r.label} -> ${r.path}` + (r.reason ? ` — ${r.reason}` : ''));
+        if (r.snippet) snippets.push({ label: r.label, snippet: r.snippet });
+        break;
+      case 'print-only':
+        lines.push(`  [manual only]   ${r.label} -> ${r.path}`);
+        if (r.snippet) snippets.push({ label: r.label, snippet: r.snippet });
+        break;
+      case 'not-installed':
+        lines.push(`  [not installed] ${r.label}`);
+        break;
+    }
+  }
+
+  lines.push('');
+  lines.push(`${writtenCount} assistant(s) configured automatically.`);
+  lines.push('Restart the affected assistant(s) to pick up the change.');
+  lines.push('Run `teamshare doctor` next to confirm the connection actually works.');
+
+  if (snippets.length > 0) {
+    lines.push('');
+    lines.push('Manual setup needed for the rest:');
+    if (!run.showToken) {
+      lines.push(
+        `(token shown as ${TOKEN_PLACEHOLDER} below — replace it with the real team token your admin gave you; ` +
+          'pass --show-token to print the real value instead)',
+      );
+    }
+    for (const s of snippets) {
+      lines.push('');
+      lines.push(`-- ${s.label} --`);
+      lines.push(s.snippet.trimEnd());
+    }
+  }
+
+  return lines.join('\n') + '\n';
+}
+
+// ---------------------------------------------------------------------------
+// Standalone CLI entry point — used when this file is run directly (not
+// imported). `teamshare connect` (packages/server/src/cli.ts) has its own
+// top-level argv parsing shared across every subcommand, but calls the exact
+// same runConnect/listTargets/formatConnectOutput/formatListOutput above.
+// ---------------------------------------------------------------------------
+
+export function parseConnectArgv(argv) {
+  const rest = [...argv];
+  const parsed = { url: undefined, token: undefined, only: undefined, dryRun: false, force: false, list: false, showToken: false, help: false };
+
+  if (rest[0] === '--help' || rest[0] === '-h') {
+    parsed.help = true;
+    return parsed;
+  }
+
+  if (rest[0] && !rest[0].startsWith('-')) parsed.url = rest.shift();
+  if (rest[0] && !rest[0].startsWith('-')) parsed.token = rest.shift();
+
+  for (let i = 0; i < rest.length; i++) {
+    const flag = rest[i];
+    const value = rest[i + 1];
+    if (flag === '--only' && value) {
+      parsed.only = value.split(',').map((s) => s.trim()).filter(Boolean);
+      i++;
+    } else if (flag === '--dry-run') {
+      parsed.dryRun = true;
+    } else if (flag === '--force') {
+      parsed.force = true;
+    } else if (flag === '--list') {
+      parsed.list = true;
+    } else if (flag === '--show-token') {
+      parsed.showToken = true;
+    }
+  }
+
+  return parsed;
+}
+
+const USAGE = `teamshare-connect — write MCP config for this machine's coding assistants
+
+Standalone, dependency-free — no clone, no pnpm install, no build required.
+This is the exact same implementation \`teamshare connect\` uses.
+
+Usage:
+  node teamshare-connect.mjs <server-url> <team-token>
+  node teamshare-connect.mjs <server-url> <team-token> --only cursor,codex
+  node teamshare-connect.mjs <server-url> <team-token> --dry-run
+  node teamshare-connect.mjs <server-url> <team-token> --force
+  node teamshare-connect.mjs <server-url> <team-token> --show-token
+  node teamshare-connect.mjs --list
+
+targets: ${ALL_TARGET_IDS.join(', ')}
+`;
+
+function isMainModule() {
+  return typeof process.argv[1] === 'string' && import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isMainModule()) {
+  const parsed = parseConnectArgv(process.argv.slice(2));
+  if (parsed.help) {
+    process.stdout.write(USAGE);
+  } else if (parsed.list) {
+    process.stdout.write(formatListOutput(listTargets()));
+  } else if (!parsed.url || !parsed.token) {
+    process.stderr.write('usage: node teamshare-connect.mjs <server-url> <team-token> (or --list, --help)\n');
+    process.exitCode = 1;
+  } else {
+    const run = runConnect(parsed.url, parsed.token, {
+      dryRun: parsed.dryRun,
+      force: parsed.force,
+      only: parsed.only,
+      showToken: parsed.showToken,
+    });
+    process.stdout.write(formatConnectOutput(run));
+    if (run.aborted) process.exitCode = 1;
+  }
+}

@@ -17,6 +17,7 @@ import {
   resolveGitIdentity,
   formatConnectOutput,
   formatListOutput,
+  normalizeServerUrl,
   type GitIdentity,
 } from './connect.js';
 
@@ -226,7 +227,10 @@ describe('Continue.dev: print-only, never auto-written, list-shaped snippet with
   it('prints a snippet with mcpServers as a list and headers nested under requestOptions', () => {
     const home = tmp();
     mkdirSync(join(home, '.continue'), { recursive: true });
-    const run = runConnect(url, token, { home, identity, only: ['continue'], now: FIXED_NOW });
+    // showToken: true here — this test is about the snippet's *shape*
+    // (YAML list, requestOptions.headers nesting), not about redaction,
+    // which has its own dedicated tests below.
+    const run = runConnect(url, token, { home, identity, only: ['continue'], now: FIXED_NOW, showToken: true });
     const snippet = run.results[0].snippet!;
     expect(snippet).toContain('mcpServers:');
     expect(snippet).toContain('- name: teamshare');
@@ -580,5 +584,178 @@ describe('formatting: formatConnectOutput / formatListOutput', () => {
     const out = formatConnectOutput(run);
     const statusLine = out.split('\n').find((l) => l.includes('[written]'))!;
     expect(statusLine).not.toContain(token);
+  });
+});
+
+describe('normalizeServerUrl / mcpUrl: a URL that already has "/mcp" is not doubled up', () => {
+  it('normalizeServerUrl strips a trailing "/mcp" and trailing slashes', () => {
+    expect(normalizeServerUrl('https://teamshare.example.com/mcp')).toBe('https://teamshare.example.com');
+    expect(normalizeServerUrl('https://teamshare.example.com/mcp/')).toBe('https://teamshare.example.com');
+    expect(normalizeServerUrl('https://teamshare.example.com/mcp/mcp')).toBe('https://teamshare.example.com');
+    expect(normalizeServerUrl('https://teamshare.example.com/')).toBe('https://teamshare.example.com');
+    expect(normalizeServerUrl('https://teamshare.example.com')).toBe('https://teamshare.example.com');
+  });
+
+  it('runConnect writes a single "/mcp" suffix even when the given url already ends in "/mcp"', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    const run = runConnect('https://teamshare.example.com/mcp', token, {
+      home,
+      identity,
+      only: ['cursor'],
+      now: FIXED_NOW,
+    });
+    const written = readJson(join(home, '.cursor', 'mcp.json')) as any;
+    expect(written.mcpServers.teamshare.url).toBe('https://teamshare.example.com/mcp');
+  });
+
+  it('Codex CLI also gets a single "/mcp" suffix when given a url that already ends in "/mcp/"', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    runConnect('https://teamshare.example.com/mcp/', token, { home, identity, only: ['codex'], now: FIXED_NOW });
+    const content = readFileSync(join(home, '.codex', 'config.toml'), 'utf8');
+    expect(content).toContain('url = "https://teamshare.example.com/mcp"');
+    expect(content).not.toContain('/mcp/mcp');
+  });
+});
+
+describe('--only validation: an unknown target id aborts instead of silently configuring nothing', () => {
+  it('aborts, names the unknown id, and lists the valid ones', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['cursur'] as any, now: FIXED_NOW });
+    expect(run.aborted).toBeDefined();
+    expect(run.aborted!.reason).toContain('cursur');
+    expect(run.aborted!.remedy).toContain('cursor');
+    expect(run.aborted!.remedy).toContain('codex');
+    expect(run.results).toEqual([]);
+    expect(existsSync(join(home, '.cursor', 'mcp.json'))).toBe(false);
+  });
+
+  it('aborts when --only is an empty list (matches nothing)', () => {
+    const home = tmp();
+    const run = runConnect(url, token, { home, identity, only: [], now: FIXED_NOW });
+    expect(run.aborted).toBeDefined();
+    expect(run.aborted!.reason.toLowerCase()).toContain('no targets');
+  });
+
+  it('formatConnectOutput reports the --only abort with a non-zero-worthy message (exit code is cli.ts\'s job)', () => {
+    const out = formatConnectOutput({
+      aborted: { reason: '--only named an unknown target: cursur', remedy: 'Valid targets: cursor, vscode' },
+      results: [],
+    });
+    expect(out).toContain('cursur');
+    expect(out).toContain('Valid targets');
+  });
+});
+
+describe('token redaction: snippets hide the real token by default', () => {
+  it('redacts the token in a skipped-target snippet (Zed with a JSONC config) unless --show-token is passed', () => {
+    const home = tmp();
+    const dir = join(home, '.config', 'zed');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, 'settings.json');
+    writeFileSync(path, '{\n  // a comment Zed allows but JSON.parse rejects\n  "theme": "one-dark"\n}\n');
+
+    const redacted = runConnect(url, token, { home, identity, only: ['zed'], now: FIXED_NOW });
+    expect(redacted.results[0].status).toBe('skipped');
+    expect(redacted.results[0].snippet).not.toContain(token);
+    expect(redacted.results[0].snippet).toContain('<team-token>');
+    expect(formatConnectOutput(redacted)).not.toContain(token);
+
+    const shown = runConnect(url, token, { home, identity, only: ['zed'], now: FIXED_NOW, showToken: true });
+    expect(shown.results[0].snippet).toContain(token);
+    expect(formatConnectOutput(shown)).toContain(token);
+  });
+
+  it('redacts the token in a print-only snippet (Continue.dev) unless --show-token is passed', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.continue'), { recursive: true });
+    const redacted = runConnect(url, token, { home, identity, only: ['continue'], now: FIXED_NOW });
+    expect(redacted.results[0].snippet).not.toContain(token);
+    expect(redacted.results[0].snippet).toContain('<team-token>');
+  });
+
+  it('--dry-run does not bypass redaction: a skipped target under --dry-run still hides the token by default', () => {
+    // Regression: the reported bug was specifically that --dry-run, sold as
+    // the safe preview, still printed the real token whenever a target was
+    // skipped (e.g. Zed's JSONC config failing to parse) — dry-run never
+    // affected that code path at all.
+    const home = tmp();
+    const dir = join(home, '.config', 'zed');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, 'settings.json');
+    writeFileSync(path, '{\n  // comment\n  "theme": "one-dark"\n}\n');
+    const run = runConnect(url, token, { home, identity, only: ['zed'], now: FIXED_NOW, dryRun: true });
+    expect(run.results[0].status).toBe('skipped');
+    expect(run.results[0].snippet).not.toContain(token);
+  });
+});
+
+describe('platform-specific paths: VS Code and Cline are detected on Linux and Windows too', () => {
+  it('defaults to the macOS path when no platform is given (darwin)', () => {
+    const home = tmp();
+    mkdirSync(join(home, 'Library', 'Application Support', 'Code'), { recursive: true });
+    const detected = listTargets(home, 'darwin').find((d) => d.id === 'vscode')!;
+    expect(detected.path).toBe(join(home, 'Library', 'Application Support', 'Code', 'User', 'mcp.json'));
+    expect(detected.installed).toBe(true);
+  });
+
+  it('VS Code: resolves the Linux path (~/.config/Code/User/mcp.json) and writes there', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.config', 'Code'), { recursive: true });
+    const detected = listTargets(home, 'linux').find((d) => d.id === 'vscode')!;
+    const expectedPath = join(home, '.config', 'Code', 'User', 'mcp.json');
+    expect(detected.path).toBe(expectedPath);
+    expect(detected.installed).toBe(true);
+
+    const run = runConnect(url, token, { home, identity, only: ['vscode'], now: FIXED_NOW, platform: 'linux' });
+    expect(run.results[0].status).toBe('written');
+    const written = readJson(expectedPath) as any;
+    expect(written.servers.teamshare.url).toBe('https://teamshare.example.com/mcp');
+  });
+
+  it('VS Code: resolves the Windows path (AppData/Roaming/Code/User/mcp.json) and writes there', () => {
+    const home = tmp();
+    mkdirSync(join(home, 'AppData', 'Roaming', 'Code'), { recursive: true });
+    const detected = listTargets(home, 'win32').find((d) => d.id === 'vscode')!;
+    const expectedPath = join(home, 'AppData', 'Roaming', 'Code', 'User', 'mcp.json');
+    expect(detected.path).toBe(expectedPath);
+    expect(detected.installed).toBe(true);
+
+    const run = runConnect(url, token, { home, identity, only: ['vscode'], now: FIXED_NOW, platform: 'win32' });
+    expect(run.results[0].status).toBe('written');
+    const written = readJson(expectedPath) as any;
+    expect(written.servers.teamshare.url).toBe('https://teamshare.example.com/mcp');
+  });
+
+  it('Cline: detects via the Linux globalStorage location', () => {
+    const home = tmp();
+    const extDir = join(home, '.config', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev');
+    mkdirSync(extDir, { recursive: true });
+    const detected = listTargets(home, 'linux').find((d) => d.id === 'cline')!;
+    expect(detected.installed).toBe(true);
+
+    const run = runConnect(url, token, { home, identity, only: ['cline'], now: FIXED_NOW, platform: 'linux' });
+    expect(run.results[0].status).toBe('written');
+    const written = readJson(join(extDir, 'settings', 'cline_mcp_settings.json')) as any;
+    expect(written.mcpServers.teamshare.url).toBe('https://teamshare.example.com/mcp');
+  });
+
+  it('Cline: detects via the Windows globalStorage location', () => {
+    const home = tmp();
+    const extDir = join(home, 'AppData', 'Roaming', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev');
+    mkdirSync(extDir, { recursive: true });
+    const detected = listTargets(home, 'win32').find((d) => d.id === 'cline')!;
+    expect(detected.installed).toBe(true);
+  });
+
+  it('VS Code: does not report "installed" on Linux just because the macOS directory happens to exist under home', () => {
+    const home = tmp();
+    // Only the macOS-shaped directory exists; on a simulated Linux machine
+    // this must not count.
+    mkdirSync(join(home, 'Library', 'Application Support', 'Code'), { recursive: true });
+    const detected = listTargets(home, 'linux').find((d) => d.id === 'vscode')!;
+    expect(detected.installed).toBe(false);
   });
 });

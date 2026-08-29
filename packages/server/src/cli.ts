@@ -12,6 +12,7 @@ import {
   discoverConnectedTargets,
   formatConnectOutput,
   formatListOutput,
+  normalizeServerUrl,
   type TargetId,
 } from './connect.js';
 
@@ -27,6 +28,7 @@ export interface Args {
   connectDryRun?: boolean;
   connectForce?: boolean;
   connectList?: boolean;
+  connectShowToken?: boolean;
   doctorUrl?: string;
   doctorToken?: string;
 }
@@ -81,6 +83,7 @@ export function parseArgs(argv: string[]): Args {
     else if (flag === '--dry-run') { args.connectDryRun = true; }
     else if (flag === '--force') { args.connectForce = true; }
     else if (flag === '--list') { args.connectList = true; }
+    else if (flag === '--show-token') { args.connectShowToken = true; }
   }
 
   return args;
@@ -131,10 +134,14 @@ Usage:
   teamshare rotate-token [--db <path>]
   teamshare remove-member <email> [--db <path>]
   teamshare doctor [<server-url> <team-token>]
-  teamshare connect <server-url> <team-token> [--only cursor,codex,...] [--dry-run] [--force]
+  teamshare connect <server-url> <team-token> [--only cursor,codex,...] [--dry-run] [--force] [--show-token]
   teamshare connect --list
 
 connect targets: cursor, vscode, windsurf, gemini, cline, codex, zed, continue
+
+Non-Claude-Code assistants can also connect with zero install: download
+teamshare-connect.mjs and run \`node teamshare-connect.mjs <server-url> <team-token>\`
+directly — no clone, no pnpm install, no build. Same implementation as above.
 `;
 
 // The exact text `serve` prints on stdout, kept as a pure function so the
@@ -343,7 +350,12 @@ function resolveServer(explicitUrl?: string, explicitToken?: string): ServerReso
       'To test a specific server directly, regardless of what is installed on this machine:',
       '  teamshare doctor <server-url> <team-token>',
     );
-    return { server: null, legacyConfig: null, lines, problem: false };
+    // This is the expected shape of a normal install, not a misconfiguration
+    // — so the lines above stay [INFO], not [PROBLEM]. But no check actually
+    // ran: exiting 0 here would be a false all-clear (the README says exit 0
+    // means every check passed), so this alone still makes the overall run
+    // exit non-zero.
+    return { server: null, legacyConfig: null, lines, problem: true };
   }
 
   const uniquePairs = new Set(discovered.map((d) => `${d.url} ${d.token}`));
@@ -403,7 +415,11 @@ export async function runDoctor(
   }
 
   if (server) {
-    const base = server.url.replace(/\/+$/, '');
+    // Normalize the same way `teamshare connect` does: a URL that already
+    // ends in "/mcp" (a common paste mistake — that's the literal endpoint
+    // this tool prints in some contexts) must probe the plain origin's
+    // /health and /unread, not "<url>/mcp/health".
+    const base = normalizeServerUrl(server.url);
 
     try {
       const res = await fetchWithTimeout(`${base}/health`);
@@ -428,7 +444,10 @@ export async function runDoctor(
         const n = body && typeof body.total === 'number' ? body.total : 'an unknown number of';
         ok(`${base}/unread returned 200 (${n} unread share(s))`);
       } else if (res.status === 401) {
-        problem(`${base}/unread returned 401 — token rejected, re-run /teamshare-setup`);
+        problem(
+          `${base}/unread returned 401 — token rejected. Reconnect: /plugin (Claude Code) or ` +
+            '`teamshare connect` (other assistants)',
+        );
       } else if (res.status === 400) {
         problem(
           `${base}/unread returned 400 — identity malformed, check git config user.name/user.email`,
@@ -486,6 +505,7 @@ export async function main(argv: string[]): Promise<void> {
       dryRun: args.connectDryRun,
       force: args.connectForce,
       only: args.connectOnly,
+      showToken: args.connectShowToken,
     });
     process.stdout.write(formatConnectOutput(run));
     if (run.aborted) process.exitCode = 1;
@@ -499,7 +519,9 @@ export async function main(argv: string[]): Promise<void> {
     const token = rotateToken(db);
     db.close();
     process.stdout.write(
-      `New team token:\n\n  ${token}\n\nTeammates must re-run /teamshare-setup with this token.\n`,
+      `New team token:\n\n  ${token}\n\n` +
+        'Teammates must reconnect with this token: `/plugin configure teamshare` for Claude Code, ' +
+        'or `teamshare connect` again for everyone else.\n',
     );
     return;
   }
