@@ -122,11 +122,11 @@ set; the Claude Code plugin just fails quietly per-request until you fix it.
 ## Connect: Claude Code
 
 Two commands, two prompts. Point the first at wherever this repo lives — a
-GitHub repo (`your-org/teamshare`), a git URL, or a local path if you have it
+GitHub repo (`abdulgeek/teamshare`), a git URL, or a local path if you have it
 checked out:
 
 ```
-/plugin marketplace add your-org/teamshare
+/plugin marketplace add abdulgeek/teamshare
 /plugin install teamshare
 ```
 
