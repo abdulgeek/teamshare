@@ -66,7 +66,7 @@ describe('schema migration', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('adds stale_at to a database created by an earlier version, keeping existing rows', () => {
+  it('adds stale_at to a database created by an earlier version, keeping existing rows and bumping schema_version', () => {
     dir = mkdtempSync(join(tmpdir(), 'teamshare-migration-'));
     const dbPath = join(dir, 'old.db');
 
@@ -122,6 +122,14 @@ describe('schema migration', () => {
       expect(row).toBeDefined();
       expect(row?.what).toBe('pre-migration share');
       expect(row?.stale_at).toBeNull();
+
+      // The brief calls this out specifically: a stale version number is a
+      // trap for the next migration. openDb must advance it, not just leave
+      // whatever the earlier version wrote.
+      const versionRow = migrated
+        .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
+        .get() as { value: string } | undefined;
+      expect(versionRow?.value).toBe('2');
     } finally {
       migrated.close();
     }
