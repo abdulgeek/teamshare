@@ -88,7 +88,7 @@ Type=simple
 User=teamshare
 Group=teamshare
 WorkingDirectory=/opt/teamshare
-ExecStart=/usr/local/bin/node /opt/teamshare/packages/server/dist/cli.js serve --port 8787 --db /var/lib/teamshare/teamshare.db
+ExecStart=/usr/local/bin/node /opt/teamshare/packages/server/dist/cli.js serve --port 8787 --host 127.0.0.1 --db /var/lib/teamshare/teamshare.db
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -96,13 +96,11 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 UNIT
-# NOTE on binding: the teamshare CLI's `serve` command has no --host/bind
-# flag — it calls Express's app.listen(port) with no host argument, which
-# binds every interface (0.0.0.0), not just localhost. Exposure is therefore
-# controlled entirely by the security group: only 80 and 443 are open, so
-# port 8787 is never reachable from outside the instance even though the
-# process itself is listening on all interfaces. Caddy reaches it over
-# 127.0.0.1 regardless.
+# NOTE on binding: `--host 127.0.0.1` is passed explicitly above (it's also
+# the CLI's default) so the process only ever accepts loopback connections —
+# Caddy reaches it over 127.0.0.1, and it is never reachable from another
+# interface even if the security group below were ever loosened. Being
+# explicit here documents that intent at the place an operator will read it.
 
 cat > /etc/systemd/system/caddy.service <<'UNIT'
 [Unit]

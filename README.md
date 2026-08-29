@@ -40,7 +40,7 @@ prefix and just run `teamshare <subcommand>`.
 First run prints the team token **exactly once**:
 
 ```
-teamshare server listening on port 8787
+teamshare server listening on 127.0.0.1:8787
 database: /Users/you/.teamshare/teamshare.db
 
 Team token (share with teammates — for Claude Code they install the plugin and are
@@ -58,8 +58,18 @@ the only way to see a new one. Send the token and the server's URL to your
 team. Useful flags:
 
 ```bash
-node packages/server/dist/cli.js serve --port 8787 --db /path/to/teamshare.db --expiry-days 14
+node packages/server/dist/cli.js serve --port 8787 --host 127.0.0.1 --db /path/to/teamshare.db --expiry-days 14
 ```
+
+**`serve` binds to `127.0.0.1` (loopback) by default**, not every interface.
+That's correct when a reverse proxy (e.g. Caddy, as in
+[`deploy/aws/`](deploy/aws/README.md)) terminates TLS and forwards to the
+process locally — the Node process then never needs to be reachable
+directly, so a plain-HTTP, token-authenticated server is never exposed even
+if some other layer (a security group, a firewall rule) were misconfigured.
+This is a behavior change from binding every interface: **if you're running
+this for a LAN team with no reverse proxy in front, pass `--host 0.0.0.0`
+explicitly** so teammates on other machines can reach it.
 
 The database is a single SQLite file (default `~/.teamshare/teamshare.db`)
 holding the team token, members, shares, and receipts — the entire server
@@ -82,14 +92,21 @@ fly volumes create teamshare_data --size 1
 # [mounts]
 #   source = "teamshare_data"
 #   destination = "/data"
-# node packages/server/dist/cli.js serve --db /data/teamshare.db
+# node packages/server/dist/cli.js serve --host 0.0.0.0 --db /data/teamshare.db
 ```
 
 ```bash
 # Railway: add a Volume in the service settings, mount it (e.g. at /data),
 # and set the start command to use it:
-# node packages/server/dist/cli.js serve --db /data/teamshare.db
+# node packages/server/dist/cli.js serve --host 0.0.0.0 --db /data/teamshare.db
 ```
+
+Note the explicit `--host 0.0.0.0` above: `serve` now binds to `127.0.0.1` by
+default (see "Install the server" above), which is correct only when a proxy
+runs on the *same* host and reaches the process over loopback, as with the
+AWS/Caddy stack. Fly.io's and Railway's edge proxies terminate TLS off-host
+and forward to the container over the network, not loopback, so the process
+must still bind every interface there.
 
 **Do not let the machine scale to zero.** The SessionStart hook aborts its
 request after 1.5 seconds so it never stalls a session. A cold start on

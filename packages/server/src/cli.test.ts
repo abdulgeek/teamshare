@@ -27,6 +27,16 @@ describe('parseArgs', () => {
     expect(a.expiryDays).toBe(14);
   });
 
+  it('defaults host to 127.0.0.1 (loopback-only, correct behind a reverse proxy)', () => {
+    const a = parseArgs([]);
+    expect(a.host).toBe('127.0.0.1');
+  });
+
+  it('reads --host when given, e.g. to opt into 0.0.0.0 for a LAN team with no proxy', () => {
+    const a = parseArgs(['serve', '--host', '0.0.0.0']);
+    expect(a.host).toBe('0.0.0.0');
+  });
+
   it('reads --port, --db, and --expiry-days', () => {
     const a = parseArgs(['serve', '--port', '9000', '--db', '/tmp/x.db', '--expiry-days', '30']);
     expect(a).toMatchObject({ cmd: 'serve', port: 9000, dbPath: '/tmp/x.db', expiryDays: 30 });
@@ -170,6 +180,7 @@ describe('formatServeBanner (spec §8 / README: token printed exactly once per g
   it('prints the token when it did not previously exist', () => {
     const out = formatServeBanner({
       port: 8787,
+      host: '127.0.0.1',
       dbPath: '/tmp/x.db',
       token: 'ts_abc123token',
       alreadyHadToken: false,
@@ -178,9 +189,22 @@ describe('formatServeBanner (spec §8 / README: token printed exactly once per g
     expect(out).toContain('Team token');
   });
 
+  it('includes the bound host so an operator can see what it is actually listening on', () => {
+    const out = formatServeBanner({
+      port: 8787,
+      host: '0.0.0.0',
+      dbPath: '/tmp/x.db',
+      token: 'ts_abc123token',
+      alreadyHadToken: false,
+    });
+    expect(out).toContain('0.0.0.0');
+    expect(out).toContain('8787');
+  });
+
   it('omits the token and points to rotate-token when one already existed', () => {
     const out = formatServeBanner({
       port: 8787,
+      host: '127.0.0.1',
       dbPath: '/tmp/x.db',
       token: 'ts_abc123token',
       alreadyHadToken: true,
@@ -200,7 +224,7 @@ describe('formatServeBanner (spec §8 / README: token printed exactly once per g
       expect(beforeFirstServe).toBe(false);
       const token = getOrCreateToken(db);
       const firstBanner = formatServeBanner({
-        port: 8787, dbPath: ':memory:', token, alreadyHadToken: beforeFirstServe,
+        port: 8787, host: '127.0.0.1', dbPath: ':memory:', token, alreadyHadToken: beforeFirstServe,
       });
       expect(firstBanner).toContain(token);
 
@@ -208,7 +232,7 @@ describe('formatServeBanner (spec §8 / README: token printed exactly once per g
       const beforeSecondServe = hasToken(db);
       expect(beforeSecondServe).toBe(true);
       const secondBanner = formatServeBanner({
-        port: 8787, dbPath: ':memory:', token, alreadyHadToken: beforeSecondServe,
+        port: 8787, host: '127.0.0.1', dbPath: ':memory:', token, alreadyHadToken: beforeSecondServe,
       });
       expect(secondBanner).not.toContain(token);
     } finally {

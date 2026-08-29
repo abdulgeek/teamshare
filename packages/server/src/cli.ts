@@ -19,6 +19,7 @@ import {
 export interface Args {
   cmd: 'serve' | 'rotate-token' | 'remove-member' | 'doctor' | 'connect' | 'help';
   port: number;
+  host: string;
   dbPath: string;
   expiryDays: number;
   email?: string;
@@ -35,8 +36,15 @@ export interface Args {
 
 const DEFAULT_DB = join(homedir(), '.teamshare', 'teamshare.db');
 
+// Loopback-only by default: correct behind the Caddy/TLS reverse-proxy setup
+// this is meant for (deploy/aws), since the Node process then never needs to
+// be reachable directly. A LAN team running this with no proxy in front must
+// pass --host 0.0.0.0 explicitly to accept connections from other machines —
+// see the WARNING in formatServeBanner and the README's server-install section.
+const DEFAULT_HOST = '127.0.0.1';
+
 export function parseArgs(argv: string[]): Args {
-  const args: Args = { cmd: 'serve', port: 8787, dbPath: DEFAULT_DB, expiryDays: 14 };
+  const args: Args = { cmd: 'serve', port: 8787, host: DEFAULT_HOST, dbPath: DEFAULT_DB, expiryDays: 14 };
   const rest = [...argv];
 
   const first = rest[0];
@@ -74,6 +82,7 @@ export function parseArgs(argv: string[]): Args {
     const flag = rest[i];
     const value = rest[i + 1];
     if (flag === '--port' && value) { args.port = Number(value); i++; }
+    else if (flag === '--host' && value) { args.host = value; i++; }
     else if (flag === '--db' && value) { args.dbPath = value; i++; }
     else if (flag === '--expiry-days' && value) { args.expiryDays = Number(value); i++; }
     else if (flag === '--only' && value) {
@@ -130,12 +139,18 @@ export function acquireLock(dbPath: string): () => void {
 const HELP = `teamshare — shared context for coding agents
 
 Usage:
-  teamshare serve [--port 8787] [--db <path>] [--expiry-days 14]
+  teamshare serve [--port 8787] [--host 127.0.0.1] [--db <path>] [--expiry-days 14]
   teamshare rotate-token [--db <path>]
   teamshare remove-member <email> [--db <path>]
   teamshare doctor [<server-url> <team-token>]
   teamshare connect <server-url> <team-token> [--only cursor,codex,...] [--dry-run] [--force] [--show-token]
   teamshare connect --list
+
+serve binds to 127.0.0.1 (loopback) by default — correct when a reverse
+proxy (e.g. Caddy) terminates TLS and forwards to it locally, since the
+Node process then never needs to be reachable directly. Running this for a
+LAN team with no proxy in front? Pass --host 0.0.0.0 explicitly to accept
+connections from other machines.
 
 connect targets: cursor, vscode, windsurf, gemini, cline, codex, zed, continue
 
@@ -150,12 +165,13 @@ directly — no clone, no pnpm install, no build. Same implementation as above.
 // before this call, and this is the only place that formats that banner.
 export function formatServeBanner(opts: {
   port: number;
+  host: string;
   dbPath: string;
   token: string;
   alreadyHadToken: boolean;
 }): string {
-  const { port, dbPath, token, alreadyHadToken } = opts;
-  const lines = [`teamshare server listening on port ${port}`, `database: ${dbPath}`, ''];
+  const { port, host, dbPath, token, alreadyHadToken } = opts;
+  const lines = [`teamshare server listening on ${host}:${port}`, `database: ${dbPath}`, ''];
 
   if (alreadyHadToken) {
     lines.push(
@@ -551,9 +567,9 @@ export async function main(argv: string[]): Promise<void> {
   const token = getOrCreateToken(db);
   const app = createApp({ db, expiryDays: args.expiryDays });
 
-  const server = app.listen(args.port, () => {
+  const server = app.listen(args.port, args.host, () => {
     process.stdout.write(
-      formatServeBanner({ port: args.port, dbPath: args.dbPath, token, alreadyHadToken }),
+      formatServeBanner({ port: args.port, host: args.host, dbPath: args.dbPath, token, alreadyHadToken }),
     );
   });
 
