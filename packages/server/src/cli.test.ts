@@ -1,10 +1,13 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, cpSync, symlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { parseArgs, acquireLock } from './cli.js';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { parseArgs, acquireLock, formatServeBanner, runDoctor, main } from './cli.js';
+import { openDb, hasToken, getOrCreateToken } from './db.js';
 
 const dirs: string[] = [];
 function tmp() {
@@ -35,6 +38,203 @@ describe('parseArgs', () => {
       cmd: 'remove-member',
       email: 'a@b.com',
     });
+  });
+
+  it('parses doctor', () => {
+    expect(parseArgs(['doctor']).cmd).toBe('doctor');
+  });
+});
+
+describe('help text', () => {
+  it('documents doctor as a subcommand', async () => {
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['help']);
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(chunks.join('')).toContain('doctor');
+  });
+});
+
+describe('formatServeBanner (spec §8 / README: token printed exactly once per generation)', () => {
+  it('prints the token when it did not previously exist', () => {
+    const out = formatServeBanner({
+      port: 8787,
+      dbPath: '/tmp/x.db',
+      token: 'ts_abc123token',
+      alreadyHadToken: false,
+    });
+    expect(out).toContain('ts_abc123token');
+    expect(out).toContain('Team token');
+  });
+
+  it('omits the token and points to rotate-token when one already existed', () => {
+    const out = formatServeBanner({
+      port: 8787,
+      dbPath: '/tmp/x.db',
+      token: 'ts_abc123token',
+      alreadyHadToken: true,
+    });
+    expect(out).not.toContain('ts_abc123token');
+    expect(out).toContain('rotate-token');
+    expect(out.toLowerCase()).toContain('already configured');
+  });
+
+  it('a first serve-path call prints the token; a second, against the same database, does not', () => {
+    // Exercises the exact sequence main()'s serve path runs: check hasToken
+    // BEFORE getOrCreateToken (which would otherwise mint one and erase the
+    // distinction), then format the banner from that captured boolean.
+    const db = openDb(':memory:');
+    try {
+      const beforeFirstServe = hasToken(db);
+      expect(beforeFirstServe).toBe(false);
+      const token = getOrCreateToken(db);
+      const firstBanner = formatServeBanner({
+        port: 8787, dbPath: ':memory:', token, alreadyHadToken: beforeFirstServe,
+      });
+      expect(firstBanner).toContain(token);
+
+      // A second `serve` against the same (now-persisted) database.
+      const beforeSecondServe = hasToken(db);
+      expect(beforeSecondServe).toBe(true);
+      const secondBanner = formatServeBanner({
+        port: 8787, dbPath: ':memory:', token, alreadyHadToken: beforeSecondServe,
+      });
+      expect(secondBanner).not.toContain(token);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('doctor', () => {
+  const originalHome = process.env.HOME;
+  const originalTeamshareUrl = process.env.TEAMSHARE_URL;
+  let home: string;
+  let server: http.Server;
+  let port: number;
+  let respondHealth: (res: http.ServerResponse) => void;
+  let respondUnread: (res: http.ServerResponse) => void;
+
+  beforeEach(async () => {
+    home = tmp();
+    process.env.HOME = home;
+    delete process.env.TEAMSHARE_URL;
+    respondHealth = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    };
+    respondUnread = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ total: 0, shares: [] }));
+    };
+    server = http.createServer((req, res) => {
+      if (req.url === '/health') respondHealth(res);
+      else if (req.url === '/unread') respondUnread(res);
+      else { res.writeHead(404); res.end(); }
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    port = (server.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome;
+    if (originalTeamshareUrl === undefined) delete process.env.TEAMSHARE_URL;
+    else process.env.TEAMSHARE_URL = originalTeamshareUrl;
+  });
+
+  function writeConfig(extra: Record<string, string> = {}) {
+    writeFileSync(
+      join(home, '.teamshare.json'),
+      JSON.stringify({
+        url: `http://127.0.0.1:${port}`,
+        token: 'tok_secret_value',
+        name: 'Priya',
+        email: 'priya@team.com',
+        ...extra,
+      }),
+    );
+  }
+
+  it('fails with a remedy when ~/.teamshare.json is missing', async () => {
+    const { exitCode, output } = await runDoctor();
+    expect(exitCode).toBe(1);
+    expect(output).toContain('.teamshare.json');
+    expect(output).toContain('/teamshare-setup');
+  });
+
+  it('fails when the config is missing a required key', async () => {
+    writeFileSync(join(home, '.teamshare.json'), JSON.stringify({ url: 'http://x', token: 't', name: 'A' }));
+    const { exitCode, output } = await runDoctor();
+    expect(exitCode).toBe(1);
+    expect(output).toContain('/teamshare-setup');
+  });
+
+  it('passes end-to-end against a reachable, correctly-configured server, and never prints the token', async () => {
+    writeConfig();
+    process.env.TEAMSHARE_URL = `http://127.0.0.1:${port}`;
+    const { exitCode, output } = await runDoctor();
+    expect(exitCode).toBe(0);
+    expect(output).not.toContain('tok_secret_value');
+    expect(output).toContain('priya@team.com');
+    expect(output).toContain('/health');
+    expect(output).toMatch(/0 unread/);
+  });
+
+  it('flags a 401 on /unread and points to /teamshare-setup', async () => {
+    writeConfig();
+    respondUnread = (res) => { res.writeHead(401); res.end('{}'); };
+    const { exitCode, output } = await runDoctor();
+    expect(exitCode).toBe(1);
+    expect(output).toContain('401');
+    expect(output).toContain('/teamshare-setup');
+  });
+
+  it('flags a 400 on /unread and points to git config', async () => {
+    writeConfig();
+    respondUnread = (res) => { res.writeHead(400); res.end('{}'); };
+    const { exitCode, output } = await runDoctor();
+    expect(exitCode).toBe(1);
+    expect(output).toContain('400');
+    expect(output.toLowerCase()).toContain('git config');
+  });
+
+  it('reports an unexpected status code verbatim rather than mislabeling it', async () => {
+    writeConfig();
+    respondUnread = (res) => { res.writeHead(503); res.end('{}'); };
+    const { exitCode, output } = await runDoctor();
+    expect(exitCode).toBe(1);
+    expect(output).toContain('503');
+  });
+
+  it('reports the URL tried when the server is unreachable', async () => {
+    writeConfig({ url: 'http://127.0.0.1:1' });
+    const { exitCode, output } = await runDoctor();
+    expect(exitCode).toBe(1);
+    expect(output).toContain('http://127.0.0.1:1');
+  });
+
+  it('warns when TEAMSHARE_URL is unset and the configured server is not the localhost default', async () => {
+    // The known split: the session-start digest reads the URL straight out
+    // of the config file and keeps working, but Claude Code resolves the MCP
+    // server's URL from TEAMSHARE_URL at startup — so the tools silently
+    // fail to connect. This is the whole reason doctor exists.
+    writeConfig();
+    const { exitCode, output } = await runDoctor();
+    expect(exitCode).toBe(1);
+    expect(output).toContain('TEAMSHARE_URL');
+  });
+
+  it('is satisfied when TEAMSHARE_URL is set, regardless of value', async () => {
+    writeConfig();
+    process.env.TEAMSHARE_URL = `http://127.0.0.1:${port}`;
+    const { output } = await runDoctor();
+    expect(output).toContain('TEAMSHARE_URL is set');
   });
 });
 

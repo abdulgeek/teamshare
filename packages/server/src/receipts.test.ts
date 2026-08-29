@@ -49,21 +49,36 @@ describe('getReceipts', () => {
   it('excludes the sender from every bucket', () => {
     const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, T0);
     const r = getReceipts(db, id, NOW, 14)!;
-    const all = [...r.viewed, ...r.dismissed, ...r.unseen];
+    const unseenEmails = r.unseen.map((u) => u.email);
+    const all = [...r.viewed, ...r.dismissed, ...unseenEmails];
     expect(all).not.toContain('adnan@team.com');
-    expect(r.unseen.sort()).toEqual(['priya@team.com', 'sam@team.com']);
+    expect(unseenEmails.sort()).toEqual(['priya@team.com', 'sam@team.com']);
   });
 
   it('counts a member who joined later as unseen', () => {
     const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, T0);
     upsertMember(db, 'newbie@team.com', 'Newbie', NOW);
-    expect(getReceipts(db, id, NOW, 14)!.unseen).toContain('newbie@team.com');
+    expect(getReceipts(db, id, NOW, 14)!.unseen.map((u) => u.email)).toContain('newbie@team.com');
   });
 
   it('drops a removed member from the denominator', () => {
     const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, T0);
     removeMember(db, 'sam@team.com');
-    expect(getReceipts(db, id, NOW, 14)!.unseen).toEqual(['priya@team.com']);
+    expect(getReceipts(db, id, NOW, 14)!.unseen.map((u) => u.email)).toEqual(['priya@team.com']);
+  });
+
+  it("pairs each unseen member with their last_seen, so a quiet member's silence is visible", () => {
+    // Distinguishing "hasn't read it yet" from "hasn't connected in two
+    // weeks" is the whole point: both would otherwise render identically as
+    // just an email in the unseen list.
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, T0);
+    // Sam reconnects (touching last_seen) without viewing or dismissing.
+    upsertMember(db, 'sam@team.com', 'Sam', NOW);
+    const r = getReceipts(db, id, NOW, 14)!;
+    const sam = r.unseen.find((u) => u.email === 'sam@team.com');
+    const priya = r.unseen.find((u) => u.email === 'priya@team.com');
+    expect(sam?.last_seen).toBe(NOW);
+    expect(priya?.last_seen).toBe(T0); // never reconnected since joining
   });
 
   it('flags an expired share', () => {

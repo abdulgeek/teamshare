@@ -46,7 +46,8 @@ export function authenticate(db: Db, req: Request): AuthResult {
     PLACEHOLDER.test(name) ||
     !EMAIL.test(email) ||
     name.length > MAX_NAME ||
-    hasControlChar(name)
+    hasControlChar(name) ||
+    hasControlChar(email)
   ) {
     return {
       ok: false,

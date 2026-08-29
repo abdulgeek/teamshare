@@ -75,11 +75,18 @@ function readConfig(db: Db, key: string): string | undefined {
   return row?.value;
 }
 
-export function setToken(db: Db, token: string): void {
+function setToken(db: Db, token: string): void {
   db.prepare(
     `INSERT INTO config (key, value) VALUES ('team_token', ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
   ).run(token);
+}
+
+// Lets a caller (the `serve` CLI path) tell whether a token already existed
+// BEFORE calling getOrCreateToken, which would otherwise mint one and erase
+// that distinction — the print-once behavior depends on checking this first.
+export function hasToken(db: Db): boolean {
+  return readConfig(db, 'team_token') !== undefined;
 }
 
 export function getOrCreateToken(db: Db): string {

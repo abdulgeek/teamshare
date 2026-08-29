@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Server } from 'node:http';
+import type { Request } from 'express';
 import { openDb, getOrCreateToken, upsertMember, listMembers, type Db } from './db.js';
 import { createShare } from './shares.js';
 import { createApp } from './app.js';
+import { authenticate } from './http.js';
 
 let db: Db;
 let server: Server;
@@ -60,6 +62,28 @@ describe('auth', () => {
       headers: headers({ 'X-Teamshare-Email': 'not-an-email' }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('rejects a control character in the email with 400, same as it would for the name', () => {
+    // The EMAIL regex's \s class already blocks newlines, but other control
+    // characters (e.g. a bare SOH) are neither \s nor excluded by [^\s@], so
+    // without an explicit check they would sail through where an equivalent
+    // character in the name is already rejected — an accidental asymmetry.
+    // Tested against authenticate() directly: fetch/undici (and Node's own
+    // HTTP parser) already refuse to transmit a raw control character in a
+    // header value at all, so a real end-to-end request can never exercise
+    // this path — the check still belongs in authenticate() as defense in
+    // depth against any caller that hands it headers a browser wouldn't.
+    const req = {
+      headers: {
+        authorization: `Bearer ${token}`,
+        'x-teamshare-email': 'p\x01@t.com',
+        'x-teamshare-name': 'Priya',
+      },
+    } as unknown as Request;
+    const result = authenticate(db, req);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.status).toBe(400);
   });
 
   it('rejects an unsubstituted ${user_config...} placeholder with 400', async () => {

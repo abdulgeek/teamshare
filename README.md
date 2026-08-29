@@ -45,8 +45,10 @@ WARNING: serve plain HTTP only on a trusted network. Put TLS in front for anythi
 ```
 
 Copy that token before it scrolls off — it's stored in the database but never
-printed again. Send it to your team along with the server's URL. Useful
-flags:
+printed again: every subsequent `serve` against the same `--db` file prints
+a short "already configured" line instead, and points to `rotate-token` as
+the only way to see a new one. Send the first token to your team along with
+the server's URL. Useful flags:
 
 ```bash
 node packages/server/dist/cli.js serve --port 8787 --db /path/to/teamshare.db --expiry-days 14
@@ -176,6 +178,42 @@ token once and invalidates the old one; every teammate must re-run
 stop counting against `notified` totals and the unseen side of `receipts` —
 without it, a share can look forever unread by someone who no longer works
 here.
+
+## Diagnosing a silent connection (`teamshare doctor`)
+
+Every delivery failure described above in "Deploy notes" is silent by
+design: the SessionStart hook exits 0 without a word on timeout, DNS
+failure, connection refused, or any non-2xx response other than 400/401.
+The `share` tool's reported `notified` count is derived from everyone who
+has ever connected, so it always looks like sharing worked, even if nobody
+is actually receiving anything. There's no other way for an engineer to
+check — so run:
+
+```bash
+npx teamshare doctor
+# from a checkout of this repo instead: node packages/server/dist/cli.js doctor
+```
+
+This works from a machine that only has the plugin installed (it needs no
+local server, no database, nothing beyond the `~/.teamshare.json` written by
+`/teamshare-setup`). It checks, and tells you the remedy for each problem it
+finds:
+
+- Whether `~/.teamshare.json` exists and has all four required keys.
+- The identity this machine would present (name and lowercased email) — so a
+  stale or wrong git identity is visible before it causes confusion.
+- Whether the configured server answers `GET /health` at all.
+- What `GET /unread` returns with this machine's credentials: 200 (and how
+  many shares are unread), 401 (token rejected), 400 (identity malformed), or
+  any other status code, verbatim.
+- Whether `TEAMSHARE_URL` is exported when the configured server isn't the
+  `http://localhost:8787` default — the split described above, where the
+  digest keeps working from `~/.teamshare.json` while the MCP tools silently
+  fail to connect because Claude Code resolves their server address from the
+  environment instead.
+
+It exits `0` when every check passes and `1` otherwise, and never prints the
+team token.
 
 ## Trust model
 

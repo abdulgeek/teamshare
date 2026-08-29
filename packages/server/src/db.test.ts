@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  openDb, getOrCreateToken, rotateToken, upsertMember,
+  openDb, getOrCreateToken, hasToken, rotateToken, upsertMember,
   listMembers, removeMember, normalizeEmail, type Db,
 } from './db.js';
 
@@ -31,6 +31,24 @@ describe('token', () => {
     const b = rotateToken(db);
     expect(b).not.toBe(a);
     expect(getOrCreateToken(db)).toBe(b);
+  });
+});
+
+describe('hasToken', () => {
+  // Lets a caller (the `serve` CLI path) distinguish "first ever run" from
+  // "already configured" BEFORE calling getOrCreateToken, which would
+  // otherwise mint one and erase that distinction — this is what makes the
+  // "print the token exactly once" behavior possible.
+  it('is false before any token exists and true once one has been created', () => {
+    expect(hasToken(db)).toBe(false);
+    getOrCreateToken(db);
+    expect(hasToken(db)).toBe(true);
+  });
+
+  it('stays true across rotation', () => {
+    getOrCreateToken(db);
+    rotateToken(db);
+    expect(hasToken(db)).toBe(true);
   });
 });
 

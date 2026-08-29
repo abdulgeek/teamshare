@@ -4,13 +4,23 @@ import { expiryCutoff } from './unread.js';
 
 export type ReceiptStatus = 'viewed' | 'dismissed';
 
+// A member who has never opened or dismissed a share, paired with when they
+// were last seen at all — the fact that distinguishes "hasn't read it yet"
+// from "hasn't connected in two weeks". members.last_seen is maintained on
+// every authenticated request (see http.ts touchMember), so this is always
+// current as of this member's last contact with the server.
+export interface UnseenMember {
+  email: string;
+  last_seen: string;
+}
+
 export interface ReceiptSummary {
   share_id: string;
   expired: boolean;
   stale: boolean;
   viewed: string[];
   dismissed: string[];
-  unseen: string[];
+  unseen: UnseenMember[];
 }
 
 export function recordReceipt(
@@ -48,14 +58,14 @@ export function getReceipts(
 
   const viewed: string[] = [];
   const dismissed: string[] = [];
-  const unseen: string[] = [];
+  const unseen: UnseenMember[] = [];
 
   for (const member of listMembers(db)) {
     if (member.email === share.sender_email) continue; // sender never appears
     const status = byEmail.get(member.email);
     if (status === 'viewed') viewed.push(member.email);
     else if (status === 'dismissed') dismissed.push(member.email);
-    else unseen.push(member.email);
+    else unseen.push({ email: member.email, last_seen: member.last_seen });
   }
 
   return {

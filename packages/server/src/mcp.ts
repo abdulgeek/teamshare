@@ -13,8 +13,13 @@ import { getReceipts, recordReceipt } from './receipts.js';
 // Stated with its safety limit intact wherever a connected agent is told it
 // may resolve a reference a share names. teamshare stores no Jira/GitHub/
 // Slack credentials and gains no new fields for this — it only uses tools
-// the reader already has. Kept in one constant so read_share's tool
-// description and the SessionStart hook never drift apart on the wording.
+// the reader already has. The SessionStart hook
+// (packages/plugin/hooks/session-start.mjs) hardcodes this same prose as a
+// deliberate, hand-maintained copy — it lives in another package and must
+// stay dependency-free (no import of this module or anything else from
+// teamshare-server), so it cannot reference this constant directly. Nothing
+// links the two mechanically: if this wording changes, update that copy by
+// hand in the same change.
 export const REFERENCE_RESOLUTION_RULE = [
   'If a share names a ticket, pull request, issue, or commit and the user asks for more detail about',
   'it, you may look it up with the tools this user already has (Jira, GitHub, Slack, and so on).',
@@ -43,9 +48,34 @@ function fenceTag(): string {
 }
 
 // Defence in depth: neutralise literal fence-looking text so a block cannot
-// even appear to close early.
+// even appear to close early. This is NOT the real security boundary — the
+// unpredictable per-render tag in wrapUntrusted is — but a teammate's share
+// text still shouldn't be able to visually masquerade as a fence line.
+//
+// packages/plugin/hooks/session-start.mjs hardcodes an identical copy of this
+// function (same regexes, same replacement string) because that hook is a
+// dependency-free script in another package and cannot import this module.
+// Nothing enforces the two staying in sync — if either pattern below changes,
+// update the other file by hand in the same change.
+//
+// The dash-lookalike fence pattern must not be defeated by: a single dash
+// (hence 1+, not 2+); non-ASCII dash glyphs a teammate could paste in place
+// of "-" (figure dash, en dash, em dash, horizontal bar); or non-whitespace
+// filler between the marker words, e.g. "END-UNTRUSTED" or
+// "END_OF_UNTRUSTED". It also redacts a literal `<teamshare-unread>` /
+// `</teamshare-unread>` tag, forgeable from share text, that could otherwise
+// appear to close the hook's digest wrapper early.
+const DASH = '\\-\\u2012\\u2013\\u2014\\u2015'; // -, figure dash, en dash, em dash, horizontal bar
+const FENCE_LOOKALIKE = new RegExp(
+  `[${DASH}]+\\s*(?:BEGIN|END)(?:[\\s_${DASH}]|OF)*UNTRUSTED[^\\n]*`,
+  'gi',
+);
+const TEAMSHARE_UNREAD_TAG = /<\/?\s*teamshare-unread\b[^>]*>/gi;
+
 export function neutralizeFences(text: string): string {
-  return text.replace(/-{2,}\s*(?:BEGIN|END)\s+UNTRUSTED[^\n]*/gi, '[redacted fence marker]');
+  return text
+    .replace(FENCE_LOOKALIKE, '[redacted fence marker]')
+    .replace(TEAMSHARE_UNREAD_TAG, '[redacted fence marker]');
 }
 
 export function wrapUntrusted(label: string, body: string): string {
@@ -65,6 +95,23 @@ function ok(text: string) {
 
 function fail(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true };
+}
+
+// Human-readable "how long ago" for a member's last_seen, so `receipts` can
+// distinguish "hasn't read it yet" (recently seen, just hasn't answered)
+// from "hasn't connected in two weeks" (a member who may never see it).
+function formatSince(nowIso: string, thenIso: string): string {
+  const ms = Date.parse(nowIso) - Date.parse(thenIso);
+  if (!Number.isFinite(ms)) return 'unknown';
+  if (ms < 60_000) return 'just now';
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `${days}d ago`;
+  const weeks = Math.floor(days / 7);
+  return `${weeks}w ago`;
 }
 
 function renderDigest(digest: Digest): string {
@@ -197,7 +244,8 @@ export function buildMcpServer(ctx: {
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      const summary = getReceipts(db, id, now(), expiryDays);
+      const nowIso = now();
+      const summary = getReceipts(db, id, nowIso, expiryDays);
       if (!summary) return fail(`no share with id ${id}`);
       // The stale prefix wins over expired: staleness is the author's
       // deliberate act and the more informative fact when both are true.
@@ -206,7 +254,15 @@ export function buildMcpServer(ctx: {
         : summary.expired
           ? 'expired — no longer being surfaced. '
           : '';
-      const unseen = summary.unseen.length ? summary.unseen.join(', ') : 'nobody';
+      // Naming each unseen member with how long since they last connected
+      // tells "hasn't read it yet" (recently seen) apart from "hasn't
+      // connected in two weeks" (may never see it) — both currently render
+      // identically as just an email in the list.
+      const unseen = summary.unseen.length
+        ? summary.unseen
+            .map((u) => `${u.email} (last seen ${formatSince(nowIso, u.last_seen)})`)
+            .join(', ')
+        : 'nobody';
       return ok(
         `${prefix}${summary.viewed.length} viewed, ${summary.dismissed.length} dismissed. ` +
           `Not yet seen by: ${unseen}.`,

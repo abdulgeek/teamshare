@@ -29,10 +29,35 @@ function loadConfig() {
 }
 
 // Defence in depth: neutralise literal fence-looking text so a share cannot
-// forge a fence boundary of its own. Identical pattern to the server's
-// neutralizeFences in packages/server/src/mcp.ts.
+// forge a fence boundary of its own. This is NOT the real security boundary —
+// the unpredictable per-render tag below is — but a teammate's share text
+// still shouldn't be able to visually masquerade as a fence line.
+//
+// This is a deliberate, hand-maintained copy of packages/server/src/mcp.ts's
+// neutralizeFences (same regexes, same replacement string). This hook is a
+// dependency-free script in another package — it cannot import that module or
+// anything else from teamshare-server — so it hardcodes the same logic
+// instead. Nothing enforces the two staying in sync: if either pattern below
+// changes, update the other file by hand in the same change.
+//
+// The dash-lookalike fence pattern must not be defeated by: a single dash
+// (hence 1+, not 2+); non-ASCII dash glyphs a teammate could paste in place
+// of "-" (figure dash, en dash, em dash, horizontal bar); or non-whitespace
+// filler between the marker words, e.g. "END-UNTRUSTED" or
+// "END_OF_UNTRUSTED". It also redacts a literal `<teamshare-unread>` /
+// `</teamshare-unread>` tag, forgeable from share text, that could otherwise
+// appear to close this hook's digest wrapper early.
+const DASH = '\\-\\u2012\\u2013\\u2014\\u2015'; // -, figure dash, en dash, em dash, horizontal bar
+const FENCE_LOOKALIKE = new RegExp(
+  `[${DASH}]+\\s*(?:BEGIN|END)(?:[\\s_${DASH}]|OF)*UNTRUSTED[^\\n]*`,
+  'gi',
+);
+const TEAMSHARE_UNREAD_TAG = /<\/?\s*teamshare-unread\b[^>]*>/gi;
+
 function neutralizeFences(text) {
-  return String(text).replace(/-{2,}\s*(?:BEGIN|END)\s+UNTRUSTED[^\n]*/gi, '[redacted fence marker]');
+  return String(text)
+    .replace(FENCE_LOOKALIKE, '[redacted fence marker]')
+    .replace(TEAMSHARE_UNREAD_TAG, '[redacted fence marker]');
 }
 
 function render(digest) {
