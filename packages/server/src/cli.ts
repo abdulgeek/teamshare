@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, openSync, closeSync, unlinkSync, writeSync, read
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { createApp } from './app.js';
 import { getOrCreateToken, hasToken, openDb, removeMember, rotateToken } from './db.js';
 
@@ -118,7 +119,8 @@ export function formatServeBanner(opts: {
     );
   } else {
     lines.push(
-      'Team token (share with teammates, they run /teamshare-setup):',
+      'Team token (share with teammates — for Claude Code they install the plugin and are',
+      'prompted for it; for other assistants, run `teamshare connect`):',
       '',
       `  ${token}`,
       '',
@@ -171,6 +173,52 @@ function readTeamshareConfig(): { config: TeamshareConfig | null; path: string }
   };
 }
 
+// Identity must be deterministic per machine, not per directory — the same
+// rule as headers.sh / session-start.mjs's gitIdentity() in the plugin
+// package (a deliberate, hand-maintained duplicate; nothing enforces the
+// three staying in sync, so update the others by hand if this changes).
+// Resolving from the *current* cwd let a repo-local git identity diverge
+// from the global one the plugin's helper resolves, which silently
+// misattributed receipts in live testing. So:
+//   1. Prefer `git config --global --get user.name` / `user.email`.
+//   2. Run git with cwd forced to the home directory — never doctor's own
+//      cwd — so a repo-local config can never influence the result,
+//      including in the plain-`--get` fallback below (which otherwise reads
+//      local scope too).
+//   3. If the global value is empty, fall back to plain `git config --get`,
+//      still executed from the home directory, so all three call sites agree.
+function gitIdentity(): { name: string; email: string } | null {
+  const home = homedir();
+  const run = (args: string[]): string => {
+    try {
+      return execFileSync('git', args, {
+        cwd: home,
+        timeout: 1500,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+        .toString('utf8')
+        .trim();
+    } catch {
+      // No git binary, no repo at `home`, or the key isn't set: treat as empty.
+      return '';
+    }
+  };
+
+  let name = run(['config', '--global', '--get', 'user.name']);
+  let email = run(['config', '--global', '--get', 'user.email']);
+  if (!name) name = run(['config', '--get', 'user.name']);
+  if (!email) email = run(['config', '--get', 'user.email']);
+
+  if (name && email) return { name, email };
+  return null;
+}
+
+// Same fallback shape as the plugin: prefer the resolved git identity, and
+// fall back to ~/.teamshare.json's name/email only when git yields nothing.
+function resolveIdentity(config: TeamshareConfig | null): { name: string; email: string } | null {
+  return gitIdentity() || (config ? { name: config.name, email: config.email } : null);
+}
+
 // Generous relative to the SessionStart hook's 1.5s budget on purpose: a PaaS
 // cold start can blow past the hook's budget while the server is otherwise
 // fine, and doctor exists specifically to tell those two situations apart.
@@ -203,10 +251,17 @@ export async function runDoctor(): Promise<{ exitCode: number; output: string }>
     ok(`${configPath} present with all required keys`);
   }
 
-  if (config) {
-    lines.push(`[INFO] identity this machine would present: ${config.name} <${config.email.trim().toLowerCase()}>`);
+  const identity = resolveIdentity(config);
+  if (identity) {
+    lines.push(
+      `[INFO] identity this machine would present: ${identity.name.trim()} <${identity.email.trim().toLowerCase()}>`,
+    );
   } else {
-    lines.push('[INFO] identity: unknown — no usable config to read it from');
+    problem(
+      'identity unresolved — no git user.name/user.email and no usable ~/.teamshare.json. Run:\n' +
+        '  git config --global user.name "Your Name"\n' +
+        '  git config --global user.email "you@example.com"',
+    );
   }
 
   if (config) {

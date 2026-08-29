@@ -28,27 +28,50 @@ function readConfigFile() {
   }
 }
 
-// Same resolution order as headers.sh: git config first (the normal,
-// zero-setup path), then the legacy config file. A machine without git, or a
-// directory that is not a repo, must degrade silently — never throw.
+// Same resolution order and rule as headers.sh — this is a deliberate,
+// hand-maintained duplicate (see the neutralizeFences comment below for why
+// this hook can't import a shared module). Nothing enforces the two staying
+// in sync: if this changes, update headers.sh by hand in the same change.
+//
+// Identity must be deterministic per machine, not per directory. A naive
+// `git config --get` run with the hook's own cwd (the user's project) can
+// pick up a *repo-local* identity, while headers.sh — invoked by Claude Code
+// with cwd set to the plugin directory — would resolve the *global* one for
+// the same person. That mismatch silently attributes receipts to the wrong
+// person and leaves the real reader's share reappearing forever (found via
+// live testing). So:
+//   1. Prefer `git config --global --get user.name` / `user.email`.
+//   2. Run git with cwd forced to the home directory — never the hook's
+//      actual cwd — so a repo-local config can never influence the result,
+//      including in the plain-`--get` fallback below (which otherwise reads
+//      local scope too).
+//   3. If the global value is empty, fall back to plain `git config --get`,
+//      still executed from the home directory, so both sides still agree.
+// A machine without git, or with neither value set, must degrade silently —
+// never throw.
 function gitIdentity() {
-  try {
-    const name = execFileSync('git', ['config', '--get', 'user.name'], {
-      timeout: GIT_TIMEOUT_MS,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .toString('utf8')
-      .trim();
-    const email = execFileSync('git', ['config', '--get', 'user.email'], {
-      timeout: GIT_TIMEOUT_MS,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .toString('utf8')
-      .trim();
-    if (name && email) return { name, email };
-  } catch {
-    // No git binary, not a repo, or identity unset: fall through.
+  const home = homedir();
+  function run(args) {
+    try {
+      return execFileSync('git', args, {
+        cwd: home,
+        timeout: GIT_TIMEOUT_MS,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+        .toString('utf8')
+        .trim();
+    } catch {
+      // No git binary, no repo at `home`, or the key isn't set: treat as empty.
+      return '';
+    }
   }
+
+  let name = run(['config', '--global', '--get', 'user.name']);
+  let email = run(['config', '--global', '--get', 'user.email']);
+  if (!name) name = run(['config', '--get', 'user.name']);
+  if (!email) email = run(['config', '--get', 'user.email']);
+
+  if (name && email) return { name, email };
   return null;
 }
 

@@ -6,12 +6,27 @@
 # this helper's process, so the token is not available here by design — this
 # script must never try to source or forward it.
 #
-# Identity resolves in this order:
-#   1. `git config user.name` / `user.email` — the normal path, zero setup.
-#   2. ~/.teamshare.json's name/email, if that file exists and has both — keeps
-#      --plugin-dir development and existing installs working.
-#   3. Neither yields both values — emit exactly {} so the server rejects
-#      cleanly with 400 rather than half-authenticating.
+# Identity must be deterministic per machine, not per directory. Claude Code
+# invokes this helper with cwd set to the plugin directory (not the user's
+# project), so a naive `git config --get` here would resolve a *different*
+# identity than session-start.mjs, which runs with cwd = the user's project
+# and can pick up a *repo-local* git identity. That mismatch silently
+# attributes receipts to the wrong person and leaves the real reader's share
+# reappearing forever (found via live testing). So identity resolves in this
+# order — the same rule, hand-duplicated in session-start.mjs's gitIdentity();
+# if this changes, update that file by hand in the same change:
+#   1. Prefer `git config --global --get user.name` / `user.email`.
+#   2. Run git with cwd forced to the home directory — never this script's
+#      actual cwd — so a repo-local config can never influence the result,
+#      including in the plain-`--get` fallback below (which otherwise reads
+#      local scope too).
+#   3. If the global value is empty, fall back to plain `git config --get`,
+#      still executed from the home directory, so both sides still agree.
+#   4. If neither yields both values, fall back to ~/.teamshare.json's
+#      name/email, if that file exists and has both — keeps --plugin-dir
+#      development and existing installs working.
+#   5. Still nothing — emit exactly {} so the server rejects cleanly with 400
+#      rather than half-authenticating.
 #
 # Stdout is a single JSON object and nothing else; any stray output corrupts
 # the header map Claude Code merges this into.
@@ -24,19 +39,26 @@ const os = require("node:os");
 const path = require("node:path");
 
 function gitIdentity() {
-  try {
-    const name = execFileSync("git", ["config", "--get", "user.name"], {
-      timeout: 1500,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).toString("utf8").trim();
-    const email = execFileSync("git", ["config", "--get", "user.email"], {
-      timeout: 1500,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).toString("utf8").trim();
-    if (name && email) return { name, email };
-  } catch {
-    // No git binary, not a repo, or identity unset: fall through.
+  const home = os.homedir();
+  function run(args) {
+    try {
+      return execFileSync("git", args, {
+        cwd: home,
+        timeout: 1500,
+        stdio: ["ignore", "pipe", "ignore"],
+      }).toString("utf8").trim();
+    } catch {
+      // No git binary, no repo at `home`, or the key is not set: treat as empty.
+      return "";
+    }
   }
+
+  let name = run(["config", "--global", "--get", "user.name"]);
+  let email = run(["config", "--global", "--get", "user.email"]);
+  if (!name) name = run(["config", "--get", "user.name"]);
+  if (!email) email = run(["config", "--get", "user.email"]);
+
+  if (name && email) return { name, email };
   return null;
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -9,6 +9,7 @@ import http from 'node:http';
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), 'session-start.mjs');
 
 let home;
+let repo;
 let server;
 let port;
 let respond;
@@ -16,6 +17,7 @@ let lastRequestHeaders;
 
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), 'ts-home-'));
+  repo = undefined;
   lastRequestHeaders = null;
   respond = (res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -32,6 +34,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await new Promise((r) => server.close(r));
   rmSync(home, { recursive: true, force: true });
+  if (repo) rmSync(repo, { recursive: true, force: true });
 });
 
 function writeConfig(extra = {}) {
@@ -53,6 +56,23 @@ function writeGitIdentity(name, email) {
   return path;
 }
 
+// A throwaway repo with its own LOCAL git identity, distinct from whatever
+// global identity a test sets up via writeGitIdentity(). This stands in for
+// the user's real project — the hook's actual cwd in production — which is
+// exactly the directory a repo-local `user.email` can leak in from if git is
+// ever invoked with that cwd instead of the home directory. Uses execFileSync
+// because these are one-off local `git` calls with no server interaction —
+// the execFileSync-deadlock concern above is specific to running HOOK itself
+// while the mock server needs to answer it, not to this setup step.
+function initRepoWithLocalIdentity(name, email) {
+  const dir = mkdtempSync(join(tmpdir(), 'ts-repo-'));
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(dir, '.gitconfig-unused') };
+  execFileSync('git', ['init', '-q'], { cwd: dir, env });
+  execFileSync('git', ['config', 'user.name', name], { cwd: dir, env });
+  execFileSync('git', ['config', 'user.email', email], { cwd: dir, env });
+  return dir;
+}
+
 // NOTE: deliberately async (spawn), not execFileSync. The mock HTTP server
 // above lives in this same process/event loop. execFileSync blocks that
 // event loop until the child exits, so the server could never accept or
@@ -65,13 +85,18 @@ function writeGitIdentity(name, email) {
 // machine: GIT_CONFIG_NOSYSTEM disables /etc/gitconfig, and GIT_CONFIG_GLOBAL
 // points at a file that does not exist by default (so `git config --get`
 // finds nothing) unless a test overrides it — e.g. via writeGitIdentity() —
-// to simulate a machine that *does* have git identity configured. cwd is the
-// temp home itself, which is never a git repository, so no repo-local
-// .git/config can leak in either.
-function runHook(payload = { hook_event_name: 'SessionStart', source: 'startup' }, extraEnv = {}) {
+// to simulate a machine that *does* have git identity configured. cwd
+// defaults to the temp home itself, which is never a git repository, so no
+// repo-local .git/config can leak in by default. A test may pass a different
+// `cwd` (see initRepoWithLocalIdentity) to simulate the hook actually running
+// inside the user's project, as it does in production — the fix under test
+// is that this must not change the resolved identity, because the hook's own
+// git invocation always forces its *own* cwd to the home directory
+// regardless of the process's cwd.
+function runHook(payload = { hook_event_name: 'SessionStart', source: 'startup' }, extraEnv = {}, cwd = home) {
   return new Promise((resolve, reject) => {
     const child = spawn('node', [HOOK], {
-      cwd: home,
+      cwd,
       env: {
         ...process.env,
         HOME: home,
@@ -311,6 +336,45 @@ describe('session-start hook', () => {
     it('with neither env nor config file, prints nothing, makes no request, and exits 0', async () => {
       expect((await runHook()).trim()).toBe('');
       expect(lastRequestHeaders).toBeNull();
+    });
+  });
+
+  describe('deterministic identity resolution', () => {
+    it('resolves the global git identity even when run from inside a repo with a different local identity', async () => {
+      // The bug this guards against (found via live testing): the hook runs
+      // with cwd = the user's project, while headers.sh is invoked by Claude
+      // Code with cwd = the plugin directory. If either resolved a
+      // repo-local `user.email` instead of forcing resolution to the global
+      // one, the two processes would disagree about who the user is —
+      // misattributing receipts and leaving the real reader's share
+      // reappearing forever.
+      const globalGitConfig = writeGitIdentity('Global Person', 'Global@Team.com');
+      repo = initRepoWithLocalIdentity('Local Person', 'local@repo.com');
+
+      respond = (res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ total: 0, shares: [] }));
+      };
+
+      // No writeConfig(): url/token come only from CLAUDE_PLUGIN_OPTION_*
+      // env. Crucially, the hook process itself runs with cwd = repo — the
+      // same relationship production has between the hook and the user's
+      // project — which is exactly what the fix must render irrelevant to
+      // the resolved identity.
+      await runHook(
+        { hook_event_name: 'SessionStart', source: 'startup' },
+        {
+          CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL: `http://127.0.0.1:${port}`,
+          CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN: 'tok_env',
+          GIT_CONFIG_GLOBAL: globalGitConfig,
+        },
+        repo,
+      );
+
+      expect(lastRequestHeaders).not.toBeNull();
+      // Must match the GLOBAL identity, never the repo-local one.
+      expect(lastRequestHeaders['x-teamshare-email']).toBe('global@team.com');
+      expect(lastRequestHeaders['x-teamshare-name']).toBe('Global Person');
     });
   });
 });
