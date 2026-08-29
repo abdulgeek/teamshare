@@ -276,8 +276,14 @@ the `list_recent_backups_command` Terraform output.)
 
 ### Restoring a backup
 
-**A backup nobody has restored is not yet a backup.** Test this procedure
-once, on purpose, before you ever need it under pressure — restore into a
+**A backup nobody has restored is not yet a backup.**
+
+This procedure has been tested end to end against the live instance
+(2026-08-29): a canary share was published *after* a backup was taken, the
+backup was restored by these exact steps, and the canary was confirmed gone
+afterwards with the service healthy — proving the database was genuinely
+replaced rather than the restore silently no-opping. Re-test it yourself
+after any change to this stack, before you ever need it under pressure — restore into a
 scratch instance if you want zero risk to the live database, or do a real
 restore during a low-traffic window if you're confident. Either way, confirm
 you can actually get data back out, not just that uploads are landing in S3.
