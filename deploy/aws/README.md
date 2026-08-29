@@ -162,6 +162,16 @@ aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
 
 ## Attaching a stable Elastic IP
 
+**Verified 2026-08-29:** the instance was deliberately stopped and started to
+test this. Its public IP changed (44.223.81.180 → 100.54.34.193),
+`teamshare-hostname.service` regenerated the Caddyfile on boot, Caddy issued a
+fresh Let's Encrypt certificate for the new hostname, and the server was back
+on `200` within 25 seconds with the database intact — no intervention. Before
+that unit existed, this same stop/start would have left Caddy serving a
+certificate for a hostname that no longer resolved here: a silent, total
+outage. Clients still hold the old URL and must reconnect, which is the half
+an Elastic IP fixes.
+
 The initial deployment has **no Elastic IP** — the account was at its quota
 (every address in use by other p3m infrastructure), so the instance uses its
 auto-assigned public IP. A reboot keeps that IP; a **stop/start changes it**,
