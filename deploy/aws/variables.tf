@@ -108,3 +108,34 @@ variable "use_elastic_ip" {
   type        = bool
   default     = true
 }
+
+variable "signup_secret" {
+  description = <<-EOT
+    The instance's signup secret, gating self-serve `POST /teams` (see
+    packages/server — teamshare is multi-team now: any team lead runs the
+    standalone `teamshare-team.mjs create-team` script against this URL,
+    authenticated by this secret, and gets their own team and token back with
+    no AWS/Terraform/SSM access at all). Set once here, at first deploy, and
+    share it with the org through whatever channel you'd otherwise have used
+    to hand out tokens one by one — that's the point of this variable.
+
+    Left null (the default), the server generates a random one on first boot
+    instead, but that value is deliberately never logged anywhere (see the
+    design doc's §Creating a team), so the only way to read it back is `teamshare
+    signup-secret --show` over SSM (see the break-glass command in
+    outputs.tf) — recoverable, but back to the exact SSM ritual this feature
+    exists to remove for everyone except the operator doing initial setup.
+    Setting it explicitly here instead means it lives in your Terraform
+    state/vars (protect that file accordingly) and a lost copy is a
+    `terraform apply` away from being visible again, not a support ticket.
+
+    Rotating this secret (e.g. after it leaks) means picking a new value here
+    and re-applying — the systemd unit's `Environment=` line is the only place
+    on the instance it's stored. This does not affect any team's own token;
+    each team rotates that independently and self-serve, via
+    `POST /teams/rotate`.
+  EOT
+  type        = string
+  default     = null
+  sensitive   = true
+}

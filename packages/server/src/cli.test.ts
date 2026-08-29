@@ -640,7 +640,7 @@ describe('rotate-token on a migrated database genuinely invalidates the old toke
 // database directly, the same "operator already has filesystem access"
 // authority rotate-token/remove-member rely on above.
 describe('create-team (break-glass CLI, local database only)', () => {
-  it('creates a team, prints the token exactly once with the password-manager warning, and the fallback doctor line when no --url is given', async () => {
+  it('creates a team, prints the token exactly once with the password-manager warning, and the fallback doctor line (env-var form, never positional) when no --url is given', async () => {
     const dbPath = join(tmp(), 'teamshare.db');
     const chunks: string[] = [];
     const original = process.stdout.write.bind(process.stdout);
@@ -655,7 +655,13 @@ describe('create-team (break-glass CLI, local database only)', () => {
     expect(out).toContain('Rocket Squad');
     expect(out.toLowerCase()).toContain('shown once');
     expect(out.toLowerCase()).toContain('password manager');
-    expect(out).toContain('teamshare doctor <url>');
+    // The fallback re-verify line must use TEAMSHARE_URL/TEAMSHARE_TOKEN, not
+    // positional arguments — the token here is real and freshly minted, so a
+    // positional suggestion would be advice that puts a credential into
+    // shell history/`ps` output the moment someone followed it.
+    expect(out).toContain('TEAMSHARE_URL=<url> TEAMSHARE_TOKEN=');
+    expect(out).toContain('teamshare doctor');
+    expect(out).not.toContain('teamshare doctor <url>');
     expect(out).toContain('/plugin install teamshare');
     expect(out).toContain('git config --global user.name');
 
@@ -901,7 +907,7 @@ describe('doctor', () => {
     }
   });
 
-  describe('resolving a server URL/token from three sources', () => {
+  describe('resolving a server URL/token from four sources', () => {
     it('explicit command-line arguments win over ~/.teamshare.json, which is never even consulted', async () => {
       writeGitConfig('Explicit User', 'explicit@example.com');
       // A stale legacy config pointing at an unreachable port — if this were
@@ -912,6 +918,63 @@ describe('doctor', () => {
       expect(output).toContain('given on the command line');
       expect(output).not.toContain('127.0.0.1:1');
       expect(output).not.toContain('explicit_token_value');
+    });
+
+    // TEAMSHARE_URL/TEAMSHARE_TOKEN: the fix for the inconsistency where
+    // teamshare-team.mjs suggested `teamshare doctor <url> <token>` — a
+    // positional re-verify command that puts a freshly minted token into
+    // shell history and `ps` output, the exact thing the design's "secrets
+    // never touch a command line" rule forbids. These give that suggestion
+    // a safe form to use instead. Passed as an explicit `env` object (never
+    // mutating the real process.env) so these tests can't leak into others.
+    describe('TEAMSHARE_URL / TEAMSHARE_TOKEN environment variables', () => {
+      it('wins over ~/.teamshare.json, which is never even consulted, and ranks below explicit arguments', async () => {
+        writeGitConfig('Env User', 'env@example.com');
+        // A stale legacy config pointing at an unreachable port — if this
+        // were read at all, the health check would fail against port 1.
+        writeConfig({ url: 'http://127.0.0.1:1' });
+        const { exitCode, output } = await runDoctor(undefined, undefined, {
+          TEAMSHARE_URL: `http://127.0.0.1:${port}`,
+          TEAMSHARE_TOKEN: 'env_token_value',
+        });
+        expect(exitCode).toBe(0);
+        expect(output).toContain('TEAMSHARE_URL/TEAMSHARE_TOKEN from the environment');
+        expect(output).not.toContain('127.0.0.1:1');
+        expect(output).not.toContain('env_token_value');
+      });
+
+      it('explicit positional arguments still win over the environment variables', async () => {
+        writeGitConfig('Positional User', 'positional@example.com');
+        const { exitCode, output } = await runDoctor(`http://127.0.0.1:${port}`, 'explicit_token_value', {
+          TEAMSHARE_URL: 'http://127.0.0.1:1',
+          TEAMSHARE_TOKEN: 'env_token_value',
+        });
+        expect(exitCode).toBe(0);
+        expect(output).toContain('given on the command line');
+        expect(output).not.toContain('127.0.0.1:1');
+        expect(output).not.toContain('env_token_value');
+      });
+
+      it('is a [PROBLEM], not a silent fall-through, when only one of the pair is set', async () => {
+        const { exitCode, output } = await runDoctor(undefined, undefined, {
+          TEAMSHARE_URL: `http://127.0.0.1:${port}`,
+        });
+        expect(exitCode).toBe(1);
+        expect(output).toContain('[PROBLEM]');
+        expect(output).toContain('TEAMSHARE_URL');
+        expect(output).toContain('TEAMSHARE_TOKEN');
+      });
+
+      it('never prints the token even when it fails verification', async () => {
+        respondUnread = (res) => { res.writeHead(401); res.end('{}'); };
+        writeGitConfig('Env User', 'env@example.com');
+        const { exitCode, output } = await runDoctor(undefined, undefined, {
+          TEAMSHARE_URL: `http://127.0.0.1:${port}`,
+          TEAMSHARE_TOKEN: 'env_token_value',
+        });
+        expect(exitCode).toBe(1);
+        expect(output).not.toContain('env_token_value');
+      });
     });
 
     it('uses ~/.teamshare.json when it is present (already covered above by the end-to-end pass)', async () => {

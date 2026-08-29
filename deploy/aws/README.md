@@ -1,8 +1,9 @@
 # teamshare — AWS deployment
 
-Terraform for a single, durable, always-on home for the team's `teamshare`
-server: one shared SQLite database, one team token, everyone's agent reads
-the same context. This directory is **author-only** output — it was written
+Terraform for a single, durable, always-on home for `teamshare` —
+multi-team: one shared SQLite database can host any number of independent
+teams, each invisible to the others, every team's agents reading their own
+shared context. This directory is **author-only** output — it was written
 and validated (`init`/`validate`/`fmt`) but never applied. Review it, then run
 `terraform apply` yourself.
 
@@ -26,8 +27,9 @@ IP is the only stable address.
 
 ## Why one EC2 instance, not Lambda/Fargate/App Runner
 
-teamshare stores **all** team state — the team token, members, shares, read
-receipts — in **one SQLite file**, and its own spec requires **exactly one
+teamshare stores **all** state for every team it hosts — each team's token,
+members, shares, read receipts — in **one SQLite file**, and its own spec
+requires **exactly one
 writer process on a real local disk**; it explicitly warns that SQLite's WAL
 mode misbehaves on network filesystems (EFS, NFS, etc.). That constraint
 rules out every horizontally-scalable AWS compute option:
@@ -82,6 +84,12 @@ process binds. This is called out again in the systemd unit
 
 ## Deploying
 
+Before the first `apply`, decide on a **signup secret** — see "Onboarding:
+teams create themselves" below. Set it in `terraform.tfvars` (`signup_secret
+= "..."`) if you want it recoverable from your own Terraform vars; leave it
+unset and the server generates one on first boot instead, at the cost of the
+break-glass SSM path being the only way to read it back later.
+
 ```bash
 cd deploy/aws
 terraform init
@@ -106,18 +114,75 @@ after `apply` finishes before hitting the HTTPS URL.
 Terraform prints, on success:
 - `elastic_ip` — the static IP.
 - `url` — `https://<ip>.sslip.io`.
-- `ssm_read_team_token_command` — see below.
+- `ssm_read_team_token_command` / `ssm_show_signup_secret_command` —
+  break-glass only, see below. **Neither is the way to onboard a team** —
+  that's the next section.
 
-## Retrieving the team token
+## Onboarding: teams create themselves
 
-The team token is generated **on the instance**, the first time the server
-starts, and is printed exactly once to stdout — which, under systemd, lands
-in the journal. It is never in Terraform state, never in this repo, and
-never transmitted anywhere by this Terraform. Read it via SSM (no SSH key
-exists on this box at all):
+teamshare is multi-team: this one server can host any number of independent
+teams, invisible to each other (see the root README's "Trust model"). Getting
+a team onto it needs **no AWS account, no Terraform, no SSH/SSM access** —
+that's the entire point of this design, and the two SSM outputs above are
+break-glass fallbacks for when it doesn't apply, not the normal path.
+
+**The operator does one thing, once:** choose the signup secret (the
+`signup_secret` Terraform variable, above) and share it with the org through
+whatever channel you'd otherwise have used to hand out tokens individually —
+Slack, a wiki page, however you'd announce any other new internal tool. That
+single secret replaces distributing a token per team.
+
+**A team lead creates their own team** with the standalone script — the real
+two commands, needing nothing beyond `curl` and `node`:
 
 ```bash
-# 1. Submit the command (this is exactly the `ssm_read_team_token_command` output)
+curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
+node teamshare-team.mjs create-team https://<ip>.sslip.io "<your team name>"
+```
+
+The signup secret is never a command-line argument — that would land it in
+shell history and `ps` output. It's read from `TEAMSHARE_SIGNUP_SECRET` in
+the environment, or, on a real terminal, prompted for with the input hidden.
+This prints the new **team token exactly once** (save it in a password
+manager immediately — it cannot be recovered later, only rotated away),
+verifies it against the live server, and prints the same join instructions
+as the root README's "Connect: Claude Code" — paste those into Slack for the
+team.
+
+**Rotation is the remedy for a lost or leaked token, and teams self-serve
+it** — no operator involvement:
+
+```bash
+node teamshare-team.mjs rotate-team https://<ip>.sslip.io
+```
+
+Same env-var-or-prompt rule, this time for the team's *current* token
+(required to authenticate the rotation). This invalidates the old token
+immediately; every teammate on that team must reconnect with the new value.
+If a token is genuinely gone rather than merely leaked — so there's nothing
+left to authenticate a self-serve rotation with — that's what the operator
+break-glass path below is for.
+
+## Break-glass: recovering a secret or token via SSM
+
+These two Terraform outputs cover the cases self-serve can't — there's no
+SSH key on this box at all, so both go over SSM Session Manager:
+
+- **`ssm_show_signup_secret_command`** — if `signup_secret` was left unset at
+  deploy time, the server generated one on first boot, and that value is
+  deliberately never logged anywhere (see the design doc's §Creating a
+  team). This reads it back directly off the box. Not needed at all if you
+  set `signup_secret` explicitly in Terraform.
+- **`ssm_read_team_token_command`** — reads the *original* pre-multi-team
+  token out of journal history: the one plaintext token this server ever
+  printed unprompted, on its very first boot, before multi-team existed. It
+  now belongs to the team named `default` (created during migration). Useful
+  only if that team's lead lost their token before ever rotating it
+  themselves — normal rotation is `rotate-team` above, not this.
+
+```bash
+# 1. Submit the command (either output above works the same way — this
+#    example uses ssm_read_team_token_command)
 CMD_ID=$(aws ssm send-command \
   --instance-ids <instance-id-from-output> \
   --document-name "AWS-RunShellScript" \
@@ -133,19 +198,24 @@ aws ssm get-command-invocation \
   --query "StandardOutputContent" --output text
 ```
 
-If you ever need a fresh token instead (e.g. suspected leak), SSM in a
-`rotate-token` run the same way:
+If a team's token is genuinely lost (not leaked — actually gone, so
+`rotate-team` above has nothing left to authenticate with), the operator can
+force a new one directly on the box instead. This is the same `rotate-token`
+the root README documents, run over SSM because there's no SSH key here —
+`--team` names which team, and is required once this instance hosts more
+than one:
 
 ```bash
 aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
-  --parameters 'commands=["systemctl stop teamshare","sudo -u teamshare /usr/local/bin/node /opt/teamshare/packages/server/dist/cli.js rotate-token --db /var/lib/teamshare/teamshare.db","systemctl start teamshare"]' \
+  --parameters 'commands=["systemctl stop teamshare","sudo -u teamshare /usr/local/bin/node /opt/teamshare/packages/server/dist/cli.js rotate-token --team \"<name>\" --db /var/lib/teamshare/teamshare.db","systemctl start teamshare"]' \
   --region us-east-1
 ```
 
 ## How teammates connect
 
 - **Claude Code**: install the teamshare plugin and, when prompted, supply
-  the server URL (`https://<ip>.sslip.io`) and the team token from above.
+  the server URL (`https://<ip>.sslip.io`) and the team token their lead got
+  back from `create-team`, above.
 - **Everything else** (Cursor, VS Code, Windsurf, Gemini CLI, Cline, Zed,
   Continue, or any other MCP-capable assistant): no install needed — download
   `teamshare-connect.mjs` from the repo root and run it directly with plain
@@ -158,7 +228,10 @@ aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
   This writes the connection into that assistant's own config; no clone, no
   `pnpm install`, no build step. Run `teamshare doctor` (or the equivalent
   `node teamshare-connect.mjs` invocation — see the root README) any time to
-  verify a given machine can actually reach the server.
+  verify a given machine can actually reach the server. Right after
+  `create-team`/`rotate-team` mints a token, prefer the env-var form —
+  `TEAMSHARE_URL=... TEAMSHARE_TOKEN=... teamshare doctor` — over pasting
+  that real token as a positional argument.
 
 ## The Elastic IP (attached)
 
@@ -203,8 +276,9 @@ aws ssm send-command --instance-ids "$(terraform output -raw instance_id)" \
 ## Guard against accidental destruction
 
 The instance carries `lifecycle { prevent_destroy = true }`, because its root
-volume holds the team's entire shared memory — every share, receipt, member,
-and the team token. Combined with `user_data_replace_on_change`, editing
+volume holds every team's entire shared memory — every share, receipt,
+member, and token, for every team on this instance. Combined with
+`user_data_replace_on_change`, editing
 `user_data.sh.tpl` and running `terraform apply` would otherwise replace the
 box and silently wipe all of it.
 
@@ -234,9 +308,10 @@ means teammates must reconnect. Avoid stopping the instance; reboot instead.
 
 ## Backing up the database
 
-**The SQLite file at `/var/lib/teamshare/teamshare.db` is the entire team's
-shared memory** — every share, every read receipt, the team token itself.
-There is exactly one copy, on one EBS volume, on one instance. If that volume
+**The SQLite file at `/var/lib/teamshare/teamshare.db` is the entire shared
+memory for every team on this instance** — every share, every read receipt,
+every team's token. There is exactly one copy, on one EBS volume, on one
+instance. If that volume
 dies, this is gone with no recovery — so backups are automated, not manual.
 
 ### How it works
@@ -392,7 +467,7 @@ terraform destroy
 ```
 
 **This permanently deletes the EC2 instance and its EBS volume — which means
-every share, every read receipt, and the team token, gone, with no recovery
-short of a backup you took yourself per the section above.** There is no
+every team's shares, read receipts, and tokens, gone, with no recovery short
+of a backup you took yourself per the section above.** There is no
 snapshot or recycle bin here. Take a backup first if there is any chance you
 might want this data again.

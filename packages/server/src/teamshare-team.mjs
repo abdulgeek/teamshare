@@ -272,7 +272,11 @@ export async function verifyTeam(opts) {
   if (!identity) {
     lines.push(
       '[INFO] skipped the /unread check — no git identity resolved on this machine. Set it, then run: ' +
-        `teamshare doctor ${url} ${token}`,
+        // Env-var form, never positional: `token` here is a real, freshly
+        // minted credential, and doctor now accepts TEAMSHARE_URL/
+        // TEAMSHARE_TOKEN precisely so this suggestion doesn't put it into
+        // shell history or `ps` output the moment someone follows it.
+        `TEAMSHARE_URL=${url} TEAMSHARE_TOKEN=${token} teamshare doctor`,
     );
     return { healthy, lines };
   }
@@ -383,7 +387,9 @@ export function formatCreateOutput(opts) {
     '',
     ...verify.lines,
     '',
-    `Re-verify anytime with: teamshare doctor ${url} ${team.token}`,
+    // Env-var form, never positional — see the comment in verifyTeam() above,
+    // where this same fix was made for the identical suggestion.
+    `Re-verify anytime with: TEAMSHARE_URL=${url} TEAMSHARE_TOKEN=${team.token} teamshare doctor`,
     '',
     'If this token is ever lost or leaked, the only remedy is rotation — it invalidates the old',
     `token immediately: node teamshare-team.mjs rotate-team ${url}`,
@@ -409,7 +415,9 @@ export function formatRotateOutput(opts) {
     '',
     ...verify.lines,
     '',
-    `Re-verify anytime with: teamshare doctor ${url} ${team.token}`,
+    // Env-var form, never positional — see the comment in verifyTeam() above,
+    // where this same fix was made for the identical suggestion.
+    `Re-verify anytime with: TEAMSHARE_URL=${url} TEAMSHARE_TOKEN=${team.token} teamshare doctor`,
     '',
     formatJoinInstructions({ url, token: team.token }),
   ];

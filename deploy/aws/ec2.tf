@@ -33,6 +33,14 @@ resource "aws_instance" "teamshare" {
     node_version  = var.node_version
     pnpm_version  = var.pnpm_version
     caddy_version = var.caddy_version
+    # Threaded straight into the teamshare.service unit's Environment= line
+    # (user_data.sh.tpl) so `serve` picks it up as TEAMSHARE_SIGNUP_SECRET on
+    # every boot — see variables.tf (signup_secret) for why this replaces
+    # handing out per-team tokens via SSM. Left as an empty string when the
+    # variable is null: cli.ts treats an empty value the same as unset and
+    # falls back to generating one on first boot, so this is never a syntax
+    # hazard, just a documented no-op.
+    signup_secret = coalesce(var.signup_secret, "")
     # Base64, not raw text: this goes through templatefile()'s own ${...}
     # interpolation, and the backup script uses plenty of shell $-syntax of
     # its own. Base64 has no `$` or `{` in it, so there is nothing for

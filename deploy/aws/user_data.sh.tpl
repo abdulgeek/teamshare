@@ -116,6 +116,7 @@ Type=simple
 User=teamshare
 Group=teamshare
 WorkingDirectory=/opt/teamshare
+Environment=TEAMSHARE_SIGNUP_SECRET=${signup_secret}
 ExecStart=/usr/local/bin/node /opt/teamshare/packages/server/dist/cli.js serve --port 8787 --host 127.0.0.1 --db /var/lib/teamshare/teamshare.db
 Restart=always
 RestartSec=3
@@ -129,6 +130,15 @@ UNIT
 # Caddy reaches it over 127.0.0.1, and it is never reachable from another
 # interface even if the security group below were ever loosened. Being
 # explicit here documents that intent at the place an operator will read it.
+#
+# NOTE on the signup secret: `Environment=TEAMSHARE_SIGNUP_SECRET=` above is
+# templated from the Terraform variable of the same name (variables.tf) — set
+# it there, once, and share it with the org; that's what replaces handing out
+# per-team tokens individually. Left unset (the variable's default), this
+# renders as an empty value, which `teamshare serve` treats exactly like the
+# variable never being set at all: it generates one on first boot instead
+# (recoverable only via `teamshare signup-secret --show` over SSM — see
+# deploy/aws/README.md's break-glass section).
 
 cat > /etc/systemd/system/caddy.service <<'UNIT'
 [Unit]

@@ -280,7 +280,13 @@ describe('createTeamOverHttp / rotateTeamOverHttp / verifyTeam against a real lo
     const verify = await verifyTeam({ url: base, token: created.token, identity: null });
     expect(verify.lines.some((l) => l.includes('[OK]') && l.includes('/health'))).toBe(true);
     expect(verify.lines.some((l) => l.toLowerCase().includes('skipped'))).toBe(true);
-    expect(verify.lines.some((l) => l.includes('teamshare doctor'))).toBe(true);
+    // Env-var form, never positional — the re-verify suggestion here carries
+    // a real token, and doctor now accepts TEAMSHARE_URL/TEAMSHARE_TOKEN so
+    // following this advice never puts it into shell history or `ps` output.
+    expect(
+      verify.lines.some((l) => l.includes(`TEAMSHARE_URL=${base} TEAMSHARE_TOKEN=${created.token} teamshare doctor`)),
+    ).toBe(true);
+    expect(verify.lines.some((l) => l.includes(`teamshare doctor ${base} ${created.token}`))).toBe(false);
   });
 
   it('verifyTeam reports [PROBLEM] when the token has already been invalidated', async () => {
@@ -368,7 +374,11 @@ describe('formatCreateOutput / formatRotateOutput', () => {
     const out = formatCreateOutput({ url: 'https://ts.example.com', team, verify });
     expect(out.toLowerCase()).toContain('shown once');
     expect(out).toContain('[OK] server reachable');
-    expect(out).toContain('teamshare doctor https://ts.example.com ts_new_token');
+    // Env-var form, never positional: doctor now accepts TEAMSHARE_URL/
+    // TEAMSHARE_TOKEN precisely so this re-verify suggestion (which contains
+    // a real token) doesn't put it into shell history or `ps` output.
+    expect(out).toContain('TEAMSHARE_URL=https://ts.example.com TEAMSHARE_TOKEN=ts_new_token teamshare doctor');
+    expect(out).not.toContain('teamshare doctor https://ts.example.com ts_new_token');
     expect(out).toContain('rotate-team');
     expect(out).toContain('/plugin install teamshare');
   });
@@ -379,6 +389,9 @@ describe('formatCreateOutput / formatRotateOutput', () => {
     expect(out.toLowerCase()).toContain('reconnect');
     expect(out.toLowerCase()).toContain('shown once');
     expect(out).toContain('/plugin install teamshare');
+    // Same env-var fix as formatCreateOutput's re-verify line, above.
+    expect(out).toContain('TEAMSHARE_URL=https://ts.example.com TEAMSHARE_TOKEN=ts_new_token teamshare doctor');
+    expect(out).not.toContain('teamshare doctor https://ts.example.com ts_new_token');
   });
 });
 

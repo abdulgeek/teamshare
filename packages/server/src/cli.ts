@@ -202,6 +202,12 @@ Usage:
   teamshare connect <server-url> <team-token> [--only cursor,codex,...] [--dry-run] [--force] [--show-token]
   teamshare connect --list
 
+doctor also accepts the server URL/token as TEAMSHARE_URL / TEAMSHARE_TOKEN in
+the environment instead of positional arguments — the form to use whenever a
+token would otherwise land in shell history or \`ps\` output, e.g. right after
+\`create-team\`/\`rotate-team\` mint one. Both must be set together, or neither;
+the positional form still works exactly as before and takes priority.
+
 This server hosts multiple teams. The normal way to create one is to POST to
 /teams (gated by the instance signup secret) — see
 node teamshare-team.mjs create-team <server-url> "<name>" (standalone, no
@@ -471,24 +477,56 @@ interface ServerResolution {
   problem: boolean;
 }
 
-// Resolves a server URL/token from the three sources doctor supports, tried
+// Resolves a server URL/token from the four sources doctor supports, tried
 // in this order, and explains which one it used (or why none worked):
 //   1. Explicit `teamshare doctor <server-url> <team-token>` arguments.
-//   2. ~/.teamshare.json, if the file is present (dev / --plugin-dir /
+//   2. TEAMSHARE_URL / TEAMSHARE_TOKEN in the environment — the fix for a
+//      real inconsistency: the standalone create-team/rotate-team script
+//      (teamshare-team.mjs) keeps its own secrets out of argv on purpose
+//      (env var or an interactive prompt) but then suggested re-verifying
+//      with `teamshare doctor <url> <token>` — positional arguments, which
+//      is exactly what the design's "secrets never touch a command line"
+//      rule forbids (shell history, `ps` output). This is the env-var
+//      equivalent doctor needed for that suggestion to actually be safe to
+//      follow. The positional form (#1) is untouched — it's documented
+//      elsewhere and a pinned test guards it.
+//   3. ~/.teamshare.json, if the file is present (dev / --plugin-dir /
 //      legacy installs).
-//   3. Any assistant config `teamshare connect` knows about that already has
+//   4. Any assistant config `teamshare connect` knows about that already has
 //      a teamshare entry (Claude Code's plugin install writes neither of the
 //      above — its values live in Claude Code's own settings, which this
 //      process cannot read — so this is how doctor still finds *something*
 //      to test on the most common setup today).
 // Never treats "nothing found" as a broken install — see the guidance text
 // below, which is the whole point of this rewrite.
-function resolveServer(explicitUrl?: string, explicitToken?: string): ServerResolution {
+function resolveServer(
+  explicitUrl?: string,
+  explicitToken?: string,
+  env: NodeJS.ProcessEnv = process.env,
+): ServerResolution {
   const lines: string[] = [];
 
   if (explicitUrl && explicitToken) {
     lines.push('[OK] using the server URL and token given on the command line');
     return { server: { url: explicitUrl, token: explicitToken }, legacyConfig: null, lines, problem: false };
+  }
+
+  const envUrl = (env.TEAMSHARE_URL ?? '').trim();
+  const envToken = (env.TEAMSHARE_TOKEN ?? '').trim();
+  if (envUrl || envToken) {
+    // Partial pairs are rejected rather than silently falling through to the
+    // next source, the same rule main() already applies to the positional
+    // form — a half-set pair is far more likely a mistake (forgot to export
+    // one) than an intentional "ignore the environment" signal.
+    if (!envUrl || !envToken) {
+      lines.push(
+        '[PROBLEM] TEAMSHARE_URL and TEAMSHARE_TOKEN must both be set, or neither — set whichever is ' +
+          'missing, or unset both to fall back to ~/.teamshare.json / assistant configs',
+      );
+      return { server: null, legacyConfig: null, lines, problem: true };
+    }
+    lines.push('[OK] using TEAMSHARE_URL/TEAMSHARE_TOKEN from the environment');
+    return { server: { url: envUrl, token: envToken }, legacyConfig: null, lines, problem: false };
   }
 
   const { config: legacyConfig, path: legacyPath, exists: legacyExists } = readTeamshareConfig();
@@ -558,6 +596,7 @@ function resolveServer(explicitUrl?: string, explicitToken?: string): ServerReso
 export async function runDoctor(
   explicitUrl?: string,
   explicitToken?: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<{ exitCode: number; output: string }> {
   const lines: string[] = [];
   let healthy = true;
@@ -567,7 +606,7 @@ export async function runDoctor(
   };
   const ok = (msg: string) => lines.push(`[OK] ${msg}`);
 
-  const resolution = resolveServer(explicitUrl, explicitToken);
+  const resolution = resolveServer(explicitUrl, explicitToken, env);
   lines.push(...resolution.lines);
   if (resolution.problem) healthy = false;
   const server = resolution.server;
@@ -791,16 +830,25 @@ export async function main(argv: string[]): Promise<void> {
     ];
 
     // §Surfaces: every surface ends by verifying, or at minimum prints the
-    // literal `teamshare doctor <url> <token>` line — this CLI has no
-    // reliable way to know the running server's own URL (it only ever
-    // touched the database file), so a genuine live check only happens when
-    // the operator supplies one with --url; runDoctor is the exact same
-    // check `teamshare doctor` itself runs, reused rather than re-implemented.
+    // literal `teamshare doctor` re-verify line — this CLI has no reliable
+    // way to know the running server's own URL (it only ever touched the
+    // database file), so a genuine live check only happens when the operator
+    // supplies one with --url; runDoctor is the exact same check `teamshare
+    // doctor` itself runs, reused rather than re-implemented. The fallback
+    // line uses the TEAMSHARE_URL/TEAMSHARE_TOKEN env-var form, never
+    // positional arguments — the same fix as teamshare-team.mjs's own
+    // suggestion, and for the same reason: this line contains a real,
+    // freshly minted token, and printing it as a positional argument here
+    // would be advice that puts a credential into shell history/`ps` output
+    // the moment someone follows it.
     if (args.createTeamUrl) {
       const { output } = await runDoctor(args.createTeamUrl, token);
       lines.push('Verifying the new token against the live server:', '', output.trimEnd(), '');
     } else {
-      lines.push(`Verify it works once you know the server URL: teamshare doctor <url> ${token}`, '');
+      lines.push(
+        `Verify it works once you know the server URL: TEAMSHARE_URL=<url> TEAMSHARE_TOKEN=${token} teamshare doctor`,
+        '',
+      );
     }
 
     lines.push(formatJoinInstructions({ url: args.createTeamUrl ?? '<url>', token }));
