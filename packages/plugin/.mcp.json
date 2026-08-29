@@ -2,7 +2,8 @@
   "mcpServers": {
     "teamshare": {
       "type": "http",
-      "url": "${TEAMSHARE_URL:-http://localhost:8787}/mcp",
+      "url": "${user_config.TEAMSHARE_URL}/mcp",
+      "headers": { "Authorization": "Bearer ${user_config.TEAMSHARE_TOKEN}" },
       "headersHelper": "\"${CLAUDE_PLUGIN_ROOT}/headers.sh\""
     }
   }

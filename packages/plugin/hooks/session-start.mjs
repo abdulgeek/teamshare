@@ -5,8 +5,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 const TIMEOUT_MS = 1500;
+const GIT_TIMEOUT_MS = 1500;
 // The digest is re-injected on these sources only; compact/fork must not
 // re-ask about shares the user already declined this session.
 const ALLOWED_SOURCES = new Set(['startup', 'resume', 'clear']);
@@ -17,15 +19,58 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-function loadConfig() {
+function readConfigFile() {
   try {
     const raw = readFileSync(join(homedir(), '.teamshare.json'), 'utf8');
-    const cfg = JSON.parse(raw);
-    if (!cfg.url || !cfg.token || !cfg.email || !cfg.name) return null;
-    return cfg;
+    return JSON.parse(raw);
   } catch {
     return null;
   }
+}
+
+// Same resolution order as headers.sh: git config first (the normal,
+// zero-setup path), then the legacy config file. A machine without git, or a
+// directory that is not a repo, must degrade silently — never throw.
+function gitIdentity() {
+  try {
+    const name = execFileSync('git', ['config', '--get', 'user.name'], {
+      timeout: GIT_TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString('utf8')
+      .trim();
+    const email = execFileSync('git', ['config', '--get', 'user.email'], {
+      timeout: GIT_TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString('utf8')
+      .trim();
+    if (name && email) return { name, email };
+  } catch {
+    // No git binary, not a repo, or identity unset: fall through.
+  }
+  return null;
+}
+
+// Config resolves in this order:
+//   1. CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL / _TOKEN — set by Claude Code once
+//      the plugin's userConfig prompts have been answered. This is the
+//      installed-plugin path and takes precedence over the config file.
+//   2. ~/.teamshare.json — the dev (--plugin-dir) / legacy fallback.
+// Identity (name/email) always tries git config first, then the config file,
+// independent of where url/token came from.
+function loadConfig() {
+  const fileCfg = readConfigFile();
+
+  const url = process.env.CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL || fileCfg?.url;
+  const token = process.env.CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN || fileCfg?.token;
+  if (!url || !token) return null;
+
+  const identity =
+    gitIdentity() || (fileCfg?.name && fileCfg?.email ? { name: fileCfg.name, email: fileCfg.email } : null);
+  if (!identity) return null;
+
+  return { url, token, name: identity.name, email: identity.email };
 }
 
 // Defence in depth: neutralise literal fence-looking text so a share cannot

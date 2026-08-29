@@ -1,11 +1,27 @@
 ---
-description: Connect this machine to your team's teamshare server
+description: Repair or dev-configure this machine's teamshare identity (not needed for a normal install)
 argument-hint: "[server-url] [team-token]"
 ---
 
 # teamshare setup
 
-Connect this machine to the team's teamshare server by writing `~/.teamshare.json`.
+**This is not part of a normal install.** Running `/plugin install teamshare`
+already prompts for the server URL and team token and stores them for you —
+the MCP connection and the session-start digest both pick those up
+automatically, with no file and no command required.
+
+Use this command only for two cases:
+
+- **Development via `claude --plugin-dir`**, where there is no plugin install
+  step to prompt you, so `~/.teamshare.json` is the only way to supply
+  config.
+- **Repairing a machine** whose stored values are wrong — e.g. the digest
+  reports "server rejected this machine" and re-running `/plugin configure
+  teamshare` isn't available or didn't fix it.
+
+In either case, this command connects the machine by writing
+`~/.teamshare.json`, which both `headers.sh` and the session-start hook treat
+as a fallback whenever `CLAUDE_PLUGIN_OPTION_*` env vars aren't present.
 
 ## Steps
 
@@ -78,22 +94,9 @@ Connect this machine to the team's teamshare server by writing `~/.teamshare.jso
      Don't call this "unreachable": delete `~/.teamshare.json.new` and report
      the actual code to the user.
 
-4. Confirm to the user: the URL, the identity that will appear on their shares,
-   and that the MCP connection picks this up on the **next** session (the
-   current session's connection was configured at startup).
-
-   If the URL is anything other than the default `http://localhost:8787`, there's
-   one more thing to tell the user. The MCP connection and the session-start
-   digest resolve the server address in two different ways — the digest reads
-   `~/.teamshare.json` directly, but Claude Code itself resolves the teamshare
-   MCP server's URL from the environment at startup, and the two can't be
-   unified today. So the user also needs to export `TEAMSHARE_URL` in their
-   shell profile, or the digest will keep working while the teamshare tools
-   silently fail to connect:
-
-   ```bash
-   export TEAMSHARE_URL=<their-url>
-   ```
+4. Confirm to the user: the URL, the identity that will appear on their
+   shares, and that both the session-start digest and (for a `--plugin-dir`
+   dev setup) the MCP connection pick this up on the **next** session.
 
 ## Rules
 

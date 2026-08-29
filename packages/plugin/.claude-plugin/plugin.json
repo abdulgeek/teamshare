@@ -3,5 +3,18 @@
   "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start.",
   "version": "0.1.0",
   "author": { "name": "teamshare" },
-  "keywords": ["team", "context", "memory", "collaboration"]
+  "keywords": ["team", "context", "memory", "collaboration"],
+  "userConfig": {
+    "TEAMSHARE_URL": {
+      "type": "string",
+      "title": "Server URL",
+      "description": "The origin of your team's teamshare server, no path — e.g. http://localhost:8787 or https://teamshare.your-company.com."
+    },
+    "TEAMSHARE_TOKEN": {
+      "type": "string",
+      "title": "Team token",
+      "description": "The team token for your teamshare server. The person who ran `teamshare serve` has it.",
+      "sensitive": true
+    }
+  }
 }
