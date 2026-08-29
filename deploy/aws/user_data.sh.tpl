@@ -1,0 +1,132 @@
+#!/bin/bash
+# Templated by Terraform (ec2.tf) — every dollar-brace placeholder below is
+# substituted by `templatefile()` before this ever reaches the instance, not
+# by bash.
+set -euxo pipefail
+
+exec > >(tee -a /var/log/teamshare-bootstrap.log) 2>&1
+echo "=== teamshare bootstrap starting $(date -u) ==="
+
+# ---------------------------------------------------------------------------
+# 1. Build prerequisites for the better-sqlite3 native module.
+# ---------------------------------------------------------------------------
+dnf install -y gcc-c++ make python3 git tar
+
+# ---------------------------------------------------------------------------
+# 2. Node 20, pinned, from the official tarball. Deliberately NOT
+#    `dnf install nodejs` — the distro package drifts and does not guarantee
+#    the >= 20 the app requires.
+# ---------------------------------------------------------------------------
+mkdir -p /opt/node
+curl -fsSL "https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-arm64.tar.xz" -o /tmp/node.tar.xz
+tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1
+rm -f /tmp/node.tar.xz
+
+for bin in node npm npx corepack; do
+  ln -sf "/opt/node/bin/$bin" "/usr/local/bin/$bin"
+done
+
+# ---------------------------------------------------------------------------
+# 3. pnpm via corepack, pinned to match this repo's pnpm-lock.yaml
+#    (lockfileVersion 9.0). --install-directory makes the shim location
+#    explicit rather than depending on corepack's default placement logic.
+# ---------------------------------------------------------------------------
+/usr/local/bin/corepack enable --install-directory=/usr/local/bin
+/usr/local/bin/corepack prepare "pnpm@${pnpm_version}" --activate
+
+# ---------------------------------------------------------------------------
+# 4. Clone and build teamshare.
+# ---------------------------------------------------------------------------
+rm -rf /opt/teamshare
+git clone --depth 1 "${repo_url}" /opt/teamshare
+cd /opt/teamshare
+/usr/local/bin/pnpm install --frozen-lockfile
+/usr/local/bin/pnpm --filter teamshare-server build
+
+# ---------------------------------------------------------------------------
+# 5. Dedicated unprivileged system user + database directory. The database is
+#    the entire team's shared memory — see deploy/aws/README.md for backups.
+# ---------------------------------------------------------------------------
+id -u teamshare >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin teamshare
+mkdir -p /var/lib/teamshare
+chown -R teamshare:teamshare /var/lib/teamshare
+chmod 750 /var/lib/teamshare
+
+# ---------------------------------------------------------------------------
+# 6. Caddy: pinned official release binary, no third-party dnf repo.
+# ---------------------------------------------------------------------------
+curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v${caddy_version}/caddy_${caddy_version}_linux_arm64.tar.gz" -o /tmp/caddy.tar.gz
+tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
+install -m 0755 /tmp/caddy /usr/local/bin/caddy
+rm -f /tmp/caddy.tar.gz /tmp/caddy
+# Belt-and-suspenders alongside the unit's AmbientCapabilities below; harmless
+# if libcap's setcap isn't present on the image.
+setcap 'cap_net_bind_service=+ep' /usr/local/bin/caddy || true
+
+id -u caddy >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin caddy
+mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
+chown -R caddy:caddy /var/lib/caddy /var/log/caddy
+
+cat > /etc/caddy/Caddyfile <<'CADDYFILE'
+${hostname} {
+    reverse_proxy 127.0.0.1:8787
+}
+CADDYFILE
+
+# ---------------------------------------------------------------------------
+# 7. systemd units. Both Restart=always and enabled at boot, so the whole
+#    stack comes back on its own after a reboot or a crash.
+# ---------------------------------------------------------------------------
+cat > /etc/systemd/system/teamshare.service <<'UNIT'
+[Unit]
+Description=teamshare MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=teamshare
+Group=teamshare
+WorkingDirectory=/opt/teamshare
+ExecStart=/usr/local/bin/node /opt/teamshare/packages/server/dist/cli.js serve --port 8787 --db /var/lib/teamshare/teamshare.db
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+# NOTE on binding: the teamshare CLI's `serve` command has no --host/bind
+# flag — it calls Express's app.listen(port) with no host argument, which
+# binds every interface (0.0.0.0), not just localhost. Exposure is therefore
+# controlled entirely by the security group: only 80 and 443 are open, so
+# port 8787 is never reachable from outside the instance even though the
+# process itself is listening on all interfaces. Caddy reaches it over
+# 127.0.0.1 regardless.
+
+cat > /etc/systemd/system/caddy.service <<'UNIT'
+[Unit]
+Description=Caddy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+Restart=always
+RestartSec=3
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now teamshare.service
+systemctl enable --now caddy.service
+
+echo "=== teamshare bootstrap finished $(date -u) ==="

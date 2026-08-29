@@ -103,6 +103,12 @@ speaks plain HTTP and says so on startup. That's fine on a local network;
 anywhere else, terminate TLS with your platform's proxy (Fly.io and Railway
 both do this for you automatically) before exposing the port.
 
+**Prefer to run this on your own AWS account instead of a PaaS?** See
+[`deploy/aws/`](deploy/aws/README.md) for a Terraform stack that provisions a
+single always-on EC2 instance (SQLite needs exactly one writer on a real
+disk — no Lambda, no Fargate+EFS, no autoscaling), a persistent EBS volume,
+and Caddy with automatic TLS via `sslip.io` — no domain required.
+
 ## Identity: set your global git config first
 
 Every share and every read receipt is attributed to whoever's git identity
