@@ -166,7 +166,16 @@ Node script — `teamshare-connect.mjs` at the repo root — that imports
 nothing outside Node's own builtins. It never touches `better-sqlite3` or any
 other native module (that's only needed to *run the server*, not to connect
 a client to one). Grab that one file — from a checkout of this repo, or as a
-single downloaded file on its own — and run it directly:
+single downloaded file on its own — and run it directly.
+
+Nothing checked out? Two lines, and you're connected:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-connect.mjs -o teamshare-connect.mjs
+node teamshare-connect.mjs <server-url> <team-token>
+```
+
+From a checkout, the root launcher is the same thing with a shorter path:
 
 ```bash
 node teamshare-connect.mjs <server-url> <team-token>
