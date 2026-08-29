@@ -349,3 +349,26 @@ teamshare/
 TypeScript throughout; pnpm workspaces; `@modelcontextprotocol/sdk` ^1.30.0;
 `better-sqlite3` **^12.11.1** (v13 segfaults on Node 20); zod ^4; vitest ^4.
 Node ≥ 20.
+
+---
+
+## 13. v1.1 — verified install-simplification facts
+
+Verified hands-on against Claude Code 2.1.251 while removing install friction.
+These supersede parts of §3.2 and retire the `TEAMSHARE_URL` split entirely.
+
+| Fact | Verified behavior |
+|---|---|
+| `userConfig` prompts at install | `claude plugin install <p>` prompts for each declared `userConfig` entry; `--config KEY=value` sets them non-interactively. Each entry needs a `title`. |
+| `${user_config.*}` in `.mcp.json` | Expands in `url` AND in static `headers` values. So the server URL and the team token both come from install-time prompts — **no env var, no shell profile, no `~/.teamshare.json`**. |
+| `CLAUDE_PLUGIN_OPTION_<KEY>` in hooks | **Available**, once the value is actually configured. An earlier probe suggested otherwise only because nothing had been set. This is what lets the SessionStart hook read the URL and token with no config file. |
+| `CLAUDE_PLUGIN_OPTION_*` in `headersHelper` | **Not** available — Claude Code scrubs credential-shaped env vars from the helper's environment (observed values arriving redacted). The helper therefore cannot supply the token. |
+| static `headers` + `headersHelper` merge | They **merge**: helper output is layered over the static map. Confirmed live receiving `Authorization` from `${user_config.TEAMSHARE_TOKEN}` alongside `X-Teamshare-Name`/`X-Teamshare-Email` emitted by the helper from `git config`. |
+
+**Consequence — the install collapses.** The team token rides in static
+headers from a prompt; identity is derived from `git config` by the helper,
+so the engineer never types their name or email; the URL comes from the same
+prompt. `/teamshare-setup`, `~/.teamshare.json`, and the `TEAMSHARE_URL`
+environment variable all become unnecessary for a normal install. The config
+file is retained only as a fallback for `--plugin-dir` development, where no
+`userConfig` values exist.
