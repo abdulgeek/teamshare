@@ -158,4 +158,45 @@ systemctl daemon-reload
 systemctl enable --now teamshare.service
 systemctl enable --now caddy.service
 
+# ---------------------------------------------------------------------------
+# 8. Automated S3 backups. The backup logic lives in exactly one place —
+#    deploy/aws/files/teamshare-backup.sh — and is embedded here verbatim via
+#    a base64-encoded Terraform variable (ec2.tf), never through this
+#    template's own $${...} interpolation. That means the copy written to
+#    /usr/local/bin below is byte-for-byte the same script an operator can
+#    ship straight to this instance over SSM without touching user_data at
+#    all (see deploy/aws/README.md for that command and the restore
+#    procedure). The script installs its own runtime dependency (sqlite3) on
+#    first run, so nothing else needs to happen here.
+# ---------------------------------------------------------------------------
+echo '${backup_script_b64}' | base64 -d > /usr/local/bin/teamshare-backup.sh
+chmod 0750 /usr/local/bin/teamshare-backup.sh
+chown root:root /usr/local/bin/teamshare-backup.sh
+
+cat > /etc/systemd/system/teamshare-backup.service <<'UNIT'
+[Unit]
+Description=teamshare SQLite database backup to S3
+After=teamshare.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/teamshare-backup.sh
+UNIT
+
+cat > /etc/systemd/system/teamshare-backup.timer <<'UNIT'
+[Unit]
+Description=Run teamshare-backup.service daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=teamshare-backup.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now teamshare-backup.timer
+
 echo "=== teamshare bootstrap finished $(date -u) ==="

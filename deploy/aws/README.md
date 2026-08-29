@@ -15,6 +15,7 @@ and validated (`init`/`validate`/`fmt`) but never applied. Review it, then run
 | 1x Elastic IP (associated) | Stable address for TLS | ~$3.60 (AWS bills all public IPv4 addresses hourly since Feb 2024, attached or not) |
 | Dedicated VPC, subnet, IGW, route table | Network path (see below) | $0 |
 | Security group, IAM role/instance profile | Access control, SSM | $0 |
+| S3 bucket (versioned, encrypted) | Daily database backups | pennies — a few KB/day, lifecycle-managed (see below) |
 
 **Total: roughly $15–20/month**, before data transfer (usage-dependent, and
 small for an internal team tool).
@@ -165,11 +166,25 @@ The instance carries `lifecycle { prevent_destroy = true }`, because its root
 volume holds the team's entire shared memory — every share, receipt, member,
 and the team token. Combined with `user_data_replace_on_change`, editing
 `user_data.sh.tpl` and running `terraform apply` would otherwise replace the
-box and silently wipe all of it. With the guard, that apply fails loudly
-instead.
+box and silently wipe all of it.
 
-To intentionally rebuild or tear down: back up the database (below), delete
-the `lifecycle` block in `ec2.tf`, then apply or destroy.
+The same `lifecycle` block also sets `ignore_changes = [user_data]`. Since
+`user_data.sh.tpl` is expected to keep gaining setup steps over time (the S3
+backup automation added here is the first), that attribute will keep
+differing from the template's rendered output on every future `apply` from
+now on. Without `ignore_changes`, *every* such `apply` — even one only
+touching unrelated resources, like an S3 bucket that has nothing to do with
+the instance — would attempt to replace this box, which `prevent_destroy`
+then turns into a hard error blocking the entire apply. `ignore_changes`
+keeps the actual guarantee (this instance is never replaced by routine
+`apply`) without that collateral damage.
+
+To intentionally rebuild the box: back up the database (below), remove
+**both** `prevent_destroy` and `ignore_changes = [user_data]` from the
+`lifecycle` block in `ec2.tf` (removing only `prevent_destroy` isn't enough —
+the rebuild would otherwise boot with today's already-ignored `user_data`
+instead of the current template), apply, then restore. To tear the whole
+stack down: remove the block and run `terraform destroy`.
 
 Note also that this deployment uses the instance's auto-assigned public IP
 rather than an Elastic IP (the account is at its EIP quota — every address is
@@ -181,30 +196,148 @@ means teammates must reconnect. Avoid stopping the instance; reboot instead.
 
 **The SQLite file at `/var/lib/teamshare/teamshare.db` is the entire team's
 shared memory** — every share, every read receipt, the team token itself.
-There is exactly one copy, on one EBS volume, on one instance. Back it up
-regularly; an EBS snapshot alone is a reasonable belt-and-suspenders addition
-but isn't a substitute for an application-level backup, since the app's
-WAL/SHM side files need to be in a consistent state relative to the main
-file. The safest copy is a brief-stop-then-copy, via SSM (no SSH needed):
+There is exactly one copy, on one EBS volume, on one instance. If that volume
+dies, this is gone with no recovery — so backups are automated, not manual.
+
+### How it works
+
+A `teamshare-backup.timer` (installed by `user_data.sh.tpl`, enabled at boot)
+runs `teamshare-backup.service` once a day. `Persistent=true` means a run
+that was missed because the instance was stopped fires as soon as it's back
+up. Each run:
+
+1. Takes a **SQLite online backup** (`sqlite3 ... ".backup <dest>"`) into a
+   temp file — never a raw `cp`. teamshare holds the database open in WAL
+   mode; copying the file directly can grab a torn, inconsistent snapshot
+   mid-write. The online backup API is safe against a live writer.
+2. Runs `PRAGMA integrity_check` against the temp copy and **aborts without
+   uploading** if it doesn't come back `ok`. An unverified backup looks like
+   protection and isn't.
+3. Uploads to `s3://<bucket>/teamshare/YYYY/MM/DD/teamshare-<UTC timestamp>.db`
+   in the bucket from the `backup_bucket` output (`teamshare-backups-<this
+   account's ID>` — see `backup.tf`).
+4. Deletes the temp file.
+
+The bucket blocks all public access, encrypts everything by default (SSE-S3),
+and has versioning on. A lifecycle rule expires noncurrent object versions
+after 90 days and aborts abandoned multipart uploads after 7, so it doesn't
+grow without bound. The instance's IAM role can only `PutObject`/`GetObject`
+on this bucket's objects and `ListBucket` on the bucket itself — nothing
+wider.
+
+The **entire backup script is one file**,
+[`deploy/aws/files/teamshare-backup.sh`](files/teamshare-backup.sh) — it's
+embedded verbatim into `user_data.sh.tpl` (base64, so it never passes through
+Terraform's own `${...}` templating and can't drift from this copy) and can
+also be delivered as-is to the *already-running* instance over SSM, without
+touching `user_data` or replacing the box:
+
+```bash
+# Base64 the script (one line, no embedded quotes/backslashes to escape —
+# same trick user_data.sh.tpl uses) and write a small SSM parameters file
+# rather than hand-escaping shell-inside-JSON on the command line.
+B64=$(base64 < deploy/aws/files/teamshare-backup.sh | tr -d '\n')
+printf '{"commands":["echo %s | base64 -d > /usr/local/bin/teamshare-backup.sh","chmod 0750 /usr/local/bin/teamshare-backup.sh","/usr/local/bin/teamshare-backup.sh"]}' \
+  "$B64" > /tmp/deliver-teamshare-backup.json
+
+aws ssm send-command \
+  --instance-ids i-06218a66d9378d97b \
+  --document-name "AWS-RunShellScript" \
+  --parameters file:///tmp/deliver-teamshare-backup.json \
+  --region us-east-1 \
+  --query "Command.CommandId" --output text
+
+rm -f /tmp/deliver-teamshare-backup.json
+```
+
+This writes the exact same bytes to `/usr/local/bin/teamshare-backup.sh` that
+`user_data.sh.tpl` would have written on first boot, then runs it once
+immediately (useful to confirm it works right after wiring it up, ahead of
+its first scheduled run).
+
+Check that a run actually happened, and see any failures, with:
 
 ```bash
 aws ssm send-command \
-  --instance-ids <instance-id> \
+  --instance-ids i-06218a66d9378d97b \
   --document-name "AWS-RunShellScript" \
-  --parameters 'commands=[
-    "systemctl stop teamshare",
-    "cp -a /var/lib/teamshare/teamshare.db /var/lib/teamshare/teamshare.db.bak-$(date +%Y%m%d%H%M%S)",
-    "systemctl start teamshare"
-  ]' \
+  --parameters 'commands=["journalctl -u teamshare-backup --no-pager -n 50"]' \
   --region us-east-1
 ```
 
-The stop/copy/start window is sub-second for a database this size, so it is
-not a meaningful availability concern. Copy the resulting `.bak-*` file
-somewhere durable (S3, your laptop via `aws ssm start-session` + a file
-transfer plugin, etc.) — this Terraform doesn't provision an S3 bucket or
-schedule for that, since neither was in scope; add one if you want automated
-offsite backups.
+### Listing backups
+
+```bash
+aws s3 ls s3://teamshare-backups-<account-id>/teamshare/ --recursive --region us-east-1 | sort | tail -n 20
+```
+
+(This exact command, with the real bucket name filled in, is also printed as
+the `list_recent_backups_command` Terraform output.)
+
+### Restoring a backup
+
+**A backup nobody has restored is not yet a backup.** Test this procedure
+once, on purpose, before you ever need it under pressure — restore into a
+scratch instance if you want zero risk to the live database, or do a real
+restore during a low-traffic window if you're confident. Either way, confirm
+you can actually get data back out, not just that uploads are landing in S3.
+
+The service **must be stopped before the swap** — otherwise the live process
+can write to `teamshare.db` (or leave WAL/SHM files around) while you're
+replacing it underneath it, corrupting the result. There's no SSH key on
+this box, so do it over an SSM Session Manager shell — this avoids
+hand-escaping shell commands inside JSON, and lets you watch each step:
+
+```bash
+# 1. Open an interactive shell on the instance (no SSH key needed)
+aws ssm start-session --target i-06218a66d9378d97b --region us-east-1
+
+# --- everything below runs *inside* that session, as root ---
+
+# 2. Pick a backup key from the listing above, e.g.:
+BUCKET="teamshare-backups-<account-id>"   # from the backup_bucket output
+KEY="teamshare/2026/08/29/teamshare-20260829T030000Z.db"
+
+# 3. Stop the service first — nothing may write to teamshare.db during the swap.
+systemctl stop teamshare
+
+# 4. Fetch the chosen backup to a scratch path.
+aws s3 cp "s3://${BUCKET}/${KEY}" /tmp/teamshare-restore.db --region us-east-1
+
+# 5. Verify its integrity before trusting it — do not skip this.
+INTEGRITY=$(sqlite3 /tmp/teamshare-restore.db "PRAGMA integrity_check;")
+[ "$INTEGRITY" = "ok" ] || { echo "INTEGRITY CHECK FAILED: $INTEGRITY"; exit 1; }
+echo "integrity check passed"
+
+# 6. Keep the current live database in case this restore itself is a mistake.
+cp -a /var/lib/teamshare/teamshare.db "/var/lib/teamshare/teamshare.db.pre-restore-$(date +%Y%m%d%H%M%S)"
+
+# 7. Clear any leftover WAL/SHM siblings from the *previous* live database.
+#    A `.backup` copy is fully checkpointed into one file with nothing
+#    pending, so stale WAL/SHM files next to it would otherwise be replayed
+#    against the wrong base file on next start.
+rm -f /var/lib/teamshare/teamshare.db-wal /var/lib/teamshare/teamshare.db-shm
+
+# 8. Replace the live database with the verified backup.
+mv /tmp/teamshare-restore.db /var/lib/teamshare/teamshare.db
+chown teamshare:teamshare /var/lib/teamshare/teamshare.db
+
+# 9. Restart and confirm.
+systemctl start teamshare
+sleep 2
+systemctl is-active teamshare   # must print "active" before you tell anyone this is done
+journalctl -u teamshare --no-pager -n 20   # sanity-check it came up cleanly
+
+# 10. Leave the session
+exit
+```
+
+If you need this to run non-interactively instead (e.g. from a script), the
+same nine commands can be sent as one `aws ssm send-command` by putting them
+in a local JSON file — e.g. `{"commands": ["systemctl stop teamshare", "aws s3 cp ...", ...]}`
+— and passing `--parameters file://restore-params.json`, which avoids the
+inline shell-inside-JSON escaping that typing the array directly on the
+command line would require.
 
 ## Tearing it down
 
