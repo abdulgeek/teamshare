@@ -5,7 +5,15 @@ import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createApp } from './app.js';
-import { getOrCreateToken, hasToken, openDb, removeMember, rotateToken } from './db.js';
+import {
+  getOrCreateDefaultTeamId,
+  getOrCreateToken,
+  hasToken,
+  makeTeamScope,
+  openDb,
+  removeMember,
+  rotateToken,
+} from './db.js';
 import {
   runConnect,
   listTargets,
@@ -549,7 +557,11 @@ export async function main(argv: string[]): Promise<void> {
       return;
     }
     const db = openDb(args.dbPath);
-    const removed = removeMember(db, args.email);
+    // Stage-1 compatibility: still a single-team instance, so scope to that
+    // sole team. Real `--team` selection is the next stage's job (see the
+    // design doc's Rotation section).
+    const scope = makeTeamScope(db, getOrCreateDefaultTeamId(db));
+    const removed = removeMember(scope, args.email);
     db.close();
     if (!removed) {
       process.exitCode = 1;

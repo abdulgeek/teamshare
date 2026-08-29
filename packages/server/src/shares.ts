@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { normalizeEmail, type Db } from './db.js';
+import { normalizeEmail, type TeamScope } from './db.js';
 
 export type Priority = 'fyi' | 'heads-up' | 'blocking';
 export const PRIORITIES: readonly Priority[] = ['fyi', 'heads-up', 'blocking'];
@@ -93,7 +93,7 @@ function rowToShare(row: Record<string, unknown>): ShareRow {
 }
 
 export function createShare(
-  db: Db,
+  scope: TeamScope,
   senderEmail: string,
   input: ShareInput,
   nowIso: string,
@@ -105,40 +105,45 @@ export function createShare(
   const id = `shr_${randomBytes(6).toString('hex')}`;
   const { what, why, action, tags, priority } = result.value;
 
-  db.prepare(
-    `INSERT INTO shares (id, sender_email, what, why, action, tags, priority, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, sender, what, why, action, JSON.stringify(tags), priority, nowIso);
+  scope.db
+    .prepare(
+      `INSERT INTO shares (id, team_id, sender_email, what, why, action, tags, priority, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(id, scope.teamId, sender, what, why, action, JSON.stringify(tags), priority, nowIso);
 
-  const row = db
-    .prepare('SELECT COUNT(*) AS n FROM members WHERE email != ?')
-    .get(sender) as { n: number };
+  const row = scope.db
+    .prepare('SELECT COUNT(*) AS n FROM members WHERE team_id = ? AND email != ?')
+    .get(scope.teamId, sender) as { n: number };
 
   return { id, notified: row.n };
 }
 
-export function getShare(db: Db, id: string): ShareRow | undefined {
-  const row = db.prepare('SELECT * FROM shares WHERE id = ?').get(id) as
-    | Record<string, unknown>
-    | undefined;
+export function getShare(scope: TeamScope, id: string): ShareRow | undefined {
+  const row = scope.db
+    .prepare('SELECT * FROM shares WHERE team_id = ? AND id = ?')
+    .get(scope.teamId, id) as Record<string, unknown> | undefined;
   return row ? rowToShare(row) : undefined;
 }
 
 export function listShares(
-  db: Db,
+  scope: TeamScope,
   opts: { tag?: string; sender?: string; limit?: number },
 ): ShareRow[] {
-  const clauses: string[] = [];
-  const params: unknown[] = [];
+  // team_id is seeded into the WHERE clause itself, never appended to the
+  // optional predicate list — so a caller passing no filters at all still
+  // gets `WHERE team_id = ?`, never a clause-free scan of every team's shares.
+  const clauses: string[] = ['team_id = ?'];
+  const params: unknown[] = [scope.teamId];
 
   if (opts.sender) {
     clauses.push('sender_email = ?');
     params.push(normalizeEmail(opts.sender));
   }
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const where = `WHERE ${clauses.join(' AND ')}`;
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
 
-  const rows = db
+  const rows = scope.db
     .prepare(`SELECT * FROM shares ${where} ORDER BY created_at DESC, id DESC LIMIT ?`)
     .all(...params, limit) as Record<string, unknown>[];
 
@@ -148,18 +153,22 @@ export function listShares(
   return tag ? shares.filter((s) => s.tags.includes(tag)) : shares;
 }
 
-// Hard delete, author only. Removes the share AND every receipt for it, so
-// it disappears from unread/list_shares/receipts/read_share as if it had
-// never been sent — for the case where a share leaked something sensitive
-// or was simply wrong, where "hide it" is not good enough.
-export function retractShare(db: Db, id: string, callerEmail: string): ShareActionResult {
-  const share = getShare(db, id);
+// Hard delete, author only. Removes the share; the receipts FK's
+// ON DELETE CASCADE removes every receipt for it, so it disappears from
+// unread/list_shares/receipts/read_share as if it had never been sent — for
+// the case where a share leaked something sensitive or was simply wrong,
+// where "hide it" is not good enough.
+export function retractShare(scope: TeamScope, id: string, callerEmail: string): ShareActionResult {
+  const share = getShare(scope, id);
+  // getShare is scoped in SQL, so a foreign team's share id and a genuinely
+  // nonexistent one both land here as `undefined` — same message either way.
+  // The author-mismatch message below is therefore unreachable for another
+  // team's share (it would otherwise confirm the id exists somewhere).
   if (!share) return { ok: false, error: `no share with id ${id}` };
   if (share.sender_email !== normalizeEmail(callerEmail)) {
     return { ok: false, error: 'only the author can retract a share' };
   }
-  db.prepare('DELETE FROM receipts WHERE share_id = ?').run(id);
-  db.prepare('DELETE FROM shares WHERE id = ?').run(id);
+  scope.db.prepare('DELETE FROM shares WHERE team_id = ? AND id = ?').run(scope.teamId, id);
   return { ok: true };
 }
 
@@ -167,17 +176,19 @@ export function retractShare(db: Db, id: string, callerEmail: string): ShareActi
 // everyone but stays in history via listShares/getShare. Idempotent: marking
 // an already-stale share leaves its original stale_at untouched.
 export function markStale(
-  db: Db,
+  scope: TeamScope,
   id: string,
   callerEmail: string,
   nowIso: string,
 ): ShareActionResult {
-  const share = getShare(db, id);
+  const share = getShare(scope, id);
   if (!share) return { ok: false, error: `no share with id ${id}` };
   if (share.sender_email !== normalizeEmail(callerEmail)) {
     return { ok: false, error: 'only the author can mark a share stale' };
   }
   if (share.stale_at) return { ok: true };
-  db.prepare('UPDATE shares SET stale_at = ? WHERE id = ?').run(nowIso, id);
+  scope.db
+    .prepare('UPDATE shares SET stale_at = ? WHERE team_id = ? AND id = ?')
+    .run(nowIso, scope.teamId, id);
   return { ok: true };
 }

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { AppOptions } from './app.js';
-import type { Db } from './db.js';
+import { getOrCreateDefaultTeamId, makeTeamScope, type TeamScope } from './db.js';
 import { authenticate, touchMember, type Identity } from './http.js';
 import { CAPS, createShare, getShare, listShares, markStale, retractShare, validateShare } from './shares.js';
 import { getUnread, type Digest } from './unread.js';
@@ -127,12 +127,12 @@ function renderDigest(digest: Digest): string {
 }
 
 export function buildMcpServer(ctx: {
-  db: Db;
+  scope: TeamScope;
   identity: Identity;
   expiryDays: number;
   now: () => string;
 }): McpServer {
-  const { db, identity, expiryDays, now } = ctx;
+  const { scope, identity, expiryDays, now } = ctx;
   const server = new McpServer(
     { name: 'teamshare', version: '0.1.0' },
     { instructions: SERVER_INSTRUCTIONS },
@@ -156,7 +156,7 @@ export function buildMcpServer(ctx: {
       const input = { what, why, action, tags, priority };
       const check = validateShare(input);
       if (!check.ok) return fail(check.error);
-      const { id, notified } = createShare(db, identity.email, input, now());
+      const { id, notified } = createShare(scope, identity.email, input, now());
       return ok(JSON.stringify({ id, notified }));
     },
   );
@@ -169,7 +169,7 @@ export function buildMcpServer(ctx: {
       inputSchema: {},
     },
     async () => {
-      const digest = getUnread(db, identity.email, now(), expiryDays);
+      const digest = getUnread(scope, identity.email, now(), expiryDays);
       return ok(renderDigest(digest));
     },
   );
@@ -182,9 +182,9 @@ export function buildMcpServer(ctx: {
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      const share = getShare(db, id);
+      const share = getShare(scope, id);
       if (!share) return fail(`no share with id ${id}`);
-      recordReceipt(db, id, identity.email, 'viewed', now());
+      recordReceipt(scope, id, identity.email, 'viewed', now());
       const body = [
         `WHAT:   ${share.what}`,
         share.why ? `WHY:    ${share.why}` : null,
@@ -209,8 +209,8 @@ export function buildMcpServer(ctx: {
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      if (!getShare(db, id)) return fail(`no share with id ${id}`);
-      recordReceipt(db, id, identity.email, 'dismissed', now());
+      if (!getShare(scope, id)) return fail(`no share with id ${id}`);
+      recordReceipt(scope, id, identity.email, 'dismissed', now());
       return ok(`acknowledged ${id}`);
     },
   );
@@ -227,7 +227,7 @@ export function buildMcpServer(ctx: {
       },
     },
     async ({ tag, sender, limit }) => {
-      const shares = listShares(db, { tag, sender, limit });
+      const shares = listShares(scope, { tag, sender, limit });
       if (shares.length === 0) return ok('No shares match.');
       const lines = shares.map(
         (s) => `- [${s.id}] ${s.priority} from ${s.sender_email} (${s.created_at}): ${s.what}`,
@@ -245,7 +245,7 @@ export function buildMcpServer(ctx: {
     },
     async ({ id }) => {
       const nowIso = now();
-      const summary = getReceipts(db, id, nowIso, expiryDays);
+      const summary = getReceipts(scope, id, nowIso, expiryDays);
       if (!summary) return fail(`no share with id ${id}`);
       // The stale prefix wins over expired: staleness is the author's
       // deliberate act and the more informative fact when both are true.
@@ -281,7 +281,7 @@ export function buildMcpServer(ctx: {
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      const result = retractShare(db, id, identity.email);
+      const result = retractShare(scope, id, identity.email);
       if (!result.ok) return fail(result.error);
       return ok(`retracted ${id}`);
     },
@@ -298,7 +298,7 @@ export function buildMcpServer(ctx: {
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      const result = markStale(db, id, identity.email, now());
+      const result = markStale(scope, id, identity.email, now());
       if (!result.ok) return fail(result.error);
       return ok(`marked ${id} stale`);
     },
@@ -318,10 +318,14 @@ export function registerMcpRoute(app: express.Express, opts: AppOptions): void {
       return;
     }
     const nowIso = now();
-    touchMember(db, auth.identity, nowIso);
+    // Stage-1 compatibility: this server still models exactly one team, so
+    // every request scopes to that sole team. Real per-team resolution from
+    // auth is the next stage; see db.ts's getOrCreateDefaultTeamId.
+    const scope = makeTeamScope(db, getOrCreateDefaultTeamId(db));
+    touchMember(scope, auth.identity, nowIso);
 
     // Stateless: a fresh server + transport per request (verified pattern).
-    const server = buildMcpServer({ db, identity: auth.identity, expiryDays, now });
+    const server = buildMcpServer({ scope, identity: auth.identity, expiryDays, now });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

@@ -1,12 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Server } from 'node:http';
 import type { Request } from 'express';
-import { openDb, getOrCreateToken, upsertMember, listMembers, type Db } from './db.js';
+import {
+  openDb, getOrCreateToken, upsertMember, listMembers, getOrCreateDefaultTeamId, makeTeamScope,
+  type Db, type TeamScope,
+} from './db.js';
 import { createShare } from './shares.js';
 import { createApp } from './app.js';
 import { authenticate } from './http.js';
 
 let db: Db;
+let scope: TeamScope;
 let server: Server;
 let base: string;
 let token: string;
@@ -15,7 +19,8 @@ const NOW = '2026-08-29T00:00:00.000Z';
 beforeEach(async () => {
   db = openDb(':memory:');
   token = getOrCreateToken(db);
-  upsertMember(db, 'adnan@team.com', 'Adnan', NOW);
+  scope = makeTeamScope(db, getOrCreateDefaultTeamId(db));
+  upsertMember(scope, 'adnan@team.com', 'Adnan', NOW);
   const app = createApp({ db, expiryDays: 14, now: () => NOW });
   server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -100,16 +105,16 @@ describe('auth', () => {
 describe('GET /unread', () => {
   it('registers the caller as a member on first contact', async () => {
     await fetch(`${base}/unread`, { headers: headers() });
-    expect(listMembers(db).map((m) => m.email)).toContain('priya@team.com');
+    expect(listMembers(scope).map((m) => m.email)).toContain('priya@team.com');
   });
 
   it('lowercases the identity email', async () => {
     await fetch(`${base}/unread`, { headers: headers({ 'X-Teamshare-Email': 'Priya@Team.COM' }) });
-    expect(listMembers(db).map((m) => m.email)).toContain('priya@team.com');
+    expect(listMembers(scope).map((m) => m.email)).toContain('priya@team.com');
   });
 
   it('returns the canonical digest shape', async () => {
-    createShare(db, 'adnan@team.com', { what: 'Auth refactor.', priority: 'blocking' }, NOW);
+    createShare(scope, 'adnan@team.com', { what: 'Auth refactor.', priority: 'blocking' }, NOW);
     const res = await fetch(`${base}/unread`, { headers: headers() });
     expect(res.status).toBe(200);
     const body = await res.json();

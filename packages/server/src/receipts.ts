@@ -1,4 +1,4 @@
-import { listMembers, normalizeEmail, type Db } from './db.js';
+import { listMembers, normalizeEmail, type TeamScope } from './db.js';
 import { getShare } from './shares.js';
 import { expiryCutoff } from './unread.js';
 
@@ -23,44 +23,55 @@ export interface ReceiptSummary {
   unseen: UnseenMember[];
 }
 
+// Ownership is checked in the same statement as the write — the INSERT's
+// source rows are gated by `WHERE EXISTS (... shares WHERE team_id = ? AND
+// id = ?)` — rather than trusting a separate, earlier existence check. If
+// the share belongs to another team (or doesn't exist at all), the SELECT
+// contributes zero rows, nothing is written, and this reports false; a
+// caller that forgot to check `getShare` first still cannot record a
+// cross-team receipt.
 export function recordReceipt(
-  db: Db,
+  scope: TeamScope,
   shareId: string,
   memberEmail: string,
   status: ReceiptStatus,
   nowIso: string,
-): void {
+): boolean {
   const email = normalizeEmail(memberEmail);
   // 'viewed' outranks 'dismissed': a later dismissal must not erase that the
   // member actually read the share.
-  db.prepare(
-    `INSERT INTO receipts (share_id, member_email, status, at)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(share_id, member_email) DO UPDATE SET
-       status = CASE WHEN receipts.status = 'viewed' THEN 'viewed' ELSE excluded.status END,
-       at     = excluded.at`,
-  ).run(shareId, email, status, nowIso);
+  const info = scope.db
+    .prepare(
+      `INSERT INTO receipts (team_id, share_id, member_email, status, at)
+       SELECT ?, ?, ?, ?, ?
+       WHERE EXISTS (SELECT 1 FROM shares WHERE team_id = ? AND id = ?)
+       ON CONFLICT(team_id, share_id, member_email) DO UPDATE SET
+         status = CASE WHEN receipts.status = 'viewed' THEN 'viewed' ELSE excluded.status END,
+         at     = excluded.at`,
+    )
+    .run(scope.teamId, shareId, email, status, nowIso, scope.teamId, shareId);
+  return info.changes > 0;
 }
 
 export function getReceipts(
-  db: Db,
+  scope: TeamScope,
   shareId: string,
   nowIso: string,
   expiryDays: number,
 ): ReceiptSummary | undefined {
-  const share = getShare(db, shareId);
+  const share = getShare(scope, shareId);
   if (!share) return undefined;
 
-  const rows = db
-    .prepare('SELECT member_email, status FROM receipts WHERE share_id = ?')
-    .all(shareId) as { member_email: string; status: ReceiptStatus }[];
+  const rows = scope.db
+    .prepare('SELECT member_email, status FROM receipts WHERE team_id = ? AND share_id = ?')
+    .all(scope.teamId, shareId) as { member_email: string; status: ReceiptStatus }[];
   const byEmail = new Map(rows.map((r) => [r.member_email, r.status]));
 
   const viewed: string[] = [];
   const dismissed: string[] = [];
   const unseen: UnseenMember[] = [];
 
-  for (const member of listMembers(db)) {
+  for (const member of listMembers(scope)) {
     if (member.email === share.sender_email) continue; // sender never appears
     const status = byEmail.get(member.email);
     if (status === 'viewed') viewed.push(member.email);

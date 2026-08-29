@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Server } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { openDb, getOrCreateToken, upsertMember, type Db } from './db.js';
+import { openDb, getOrCreateToken, upsertMember, getOrCreateDefaultTeamId, makeTeamScope, type Db } from './db.js';
 import { createApp } from './app.js';
 
 let db: Db;
@@ -36,9 +36,10 @@ function textOf(result: { content: unknown }): string {
 beforeEach(async () => {
   db = openDb(':memory:');
   token = getOrCreateToken(db);
-  upsertMember(db, 'adnan@team.com', 'Adnan', NOW);
-  upsertMember(db, 'priya@team.com', 'Priya', NOW);
-  upsertMember(db, 'sam@team.com', 'Sam', NOW);
+  const scope = makeTeamScope(db, getOrCreateDefaultTeamId(db));
+  upsertMember(scope, 'adnan@team.com', 'Adnan', NOW);
+  upsertMember(scope, 'priya@team.com', 'Priya', NOW);
+  upsertMember(scope, 'sam@team.com', 'Sam', NOW);
   const app = createApp({ db, expiryDays: 14, now: () => NOW });
   server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));

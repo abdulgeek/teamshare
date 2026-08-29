@@ -1,5 +1,5 @@
 import type { Request } from 'express';
-import { getOrCreateToken, normalizeEmail, upsertMember, type Db } from './db.js';
+import { getOrCreateToken, normalizeEmail, upsertMember, type Db, type TeamScope } from './db.js';
 
 export interface Identity {
   email: string;
@@ -65,6 +65,6 @@ export function authenticate(db: Db, req: Request): AuthResult {
   return { ok: true, identity: { email: normalizeEmail(email), name } };
 }
 
-export function touchMember(db: Db, identity: Identity, nowIso: string): void {
-  upsertMember(db, identity.email, identity.name, nowIso);
+export function touchMember(scope: TeamScope, identity: Identity, nowIso: string): void {
+  upsertMember(scope, identity.email, identity.name, nowIso);
 }

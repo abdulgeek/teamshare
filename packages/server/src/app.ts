@@ -1,5 +1,5 @@
 import express from 'express';
-import type { Db } from './db.js';
+import { getOrCreateDefaultTeamId, makeTeamScope, type Db } from './db.js';
 import { authenticate, touchMember } from './http.js';
 import { getUnread } from './unread.js';
 import { registerMcpRoute } from './mcp.js';
@@ -30,8 +30,12 @@ export function createApp(opts: AppOptions): express.Express {
       return;
     }
     const nowIso = now();
-    touchMember(db, auth.identity, nowIso);
-    res.json(getUnread(db, auth.identity.email, nowIso, expiryDays));
+    // Stage-1 compatibility: this server still models exactly one team, so
+    // every request scopes to that sole team. Real per-team resolution from
+    // auth is the next stage; see db.ts's getOrCreateDefaultTeamId.
+    const scope = makeTeamScope(db, getOrCreateDefaultTeamId(db));
+    touchMember(scope, auth.identity, nowIso);
+    res.json(getUnread(scope, auth.identity.email, nowIso, expiryDays));
   });
 
   registerMcpRoute(app, opts);
