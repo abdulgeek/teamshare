@@ -8,6 +8,12 @@ importers:
 
   .: {}
 
+  packages/plugin:
+    devDependencies:
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@types/node@20.19.43)(vite@8.2.2(@types/node@20.19.43))
+
   packages/server:
     dependencies:
       '@modelcontextprotocol/sdk':
