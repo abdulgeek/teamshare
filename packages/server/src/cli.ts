@@ -6,13 +6,20 @@ import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createApp } from './app.js';
 import { getOrCreateToken, hasToken, openDb, removeMember, rotateToken } from './db.js';
+import { runConnect, listTargets, formatConnectOutput, formatListOutput, type TargetId } from './connect.js';
 
 export interface Args {
-  cmd: 'serve' | 'rotate-token' | 'remove-member' | 'doctor' | 'help';
+  cmd: 'serve' | 'rotate-token' | 'remove-member' | 'doctor' | 'connect' | 'help';
   port: number;
   dbPath: string;
   expiryDays: number;
   email?: string;
+  connectUrl?: string;
+  connectToken?: string;
+  connectOnly?: TargetId[];
+  connectDryRun?: boolean;
+  connectForce?: boolean;
+  connectList?: boolean;
 }
 
 const DEFAULT_DB = join(homedir(), '.teamshare', 'teamshare.db');
@@ -28,12 +35,17 @@ export function parseArgs(argv: string[]): Args {
       first === 'rotate-token' ||
       first === 'remove-member' ||
       first === 'doctor' ||
+      first === 'connect' ||
       first === 'help'
     ) {
       args.cmd = first;
       rest.shift();
       if (args.cmd === 'remove-member' && rest[0] && !rest[0].startsWith('-')) {
         args.email = rest.shift();
+      }
+      if (args.cmd === 'connect') {
+        if (rest[0] && !rest[0].startsWith('-')) args.connectUrl = rest.shift();
+        if (rest[0] && !rest[0].startsWith('-')) args.connectToken = rest.shift();
       }
     } else {
       args.cmd = 'help';
@@ -46,6 +58,13 @@ export function parseArgs(argv: string[]): Args {
     if (flag === '--port' && value) { args.port = Number(value); i++; }
     else if (flag === '--db' && value) { args.dbPath = value; i++; }
     else if (flag === '--expiry-days' && value) { args.expiryDays = Number(value); i++; }
+    else if (flag === '--only' && value) {
+      args.connectOnly = value.split(',').map((s) => s.trim()).filter(Boolean) as TargetId[];
+      i++;
+    }
+    else if (flag === '--dry-run') { args.connectDryRun = true; }
+    else if (flag === '--force') { args.connectForce = true; }
+    else if (flag === '--list') { args.connectList = true; }
   }
 
   return args;
@@ -96,6 +115,10 @@ Usage:
   teamshare rotate-token [--db <path>]
   teamshare remove-member <email> [--db <path>]
   teamshare doctor
+  teamshare connect <server-url> <team-token> [--only cursor,codex,...] [--dry-run] [--force]
+  teamshare connect --list
+
+connect targets: cursor, vscode, windsurf, gemini, cline, codex, zed, continue
 `;
 
 // The exact text `serve` prints on stdout, kept as a pure function so the
@@ -344,6 +367,30 @@ export async function main(argv: string[]): Promise<void> {
     const { exitCode, output } = await runDoctor();
     process.stdout.write(output);
     process.exitCode = exitCode;
+    return;
+  }
+
+  // connect never touches the teamshare database either — it edits *other*
+  // tools' config files, using the real machine's home directory (tests
+  // exercise connect.ts's exported functions directly with an injected
+  // `home`, never through main()).
+  if (args.cmd === 'connect') {
+    if (args.connectList) {
+      process.stdout.write(formatListOutput(listTargets()));
+      return;
+    }
+    if (!args.connectUrl || !args.connectToken) {
+      process.stderr.write('connect needs a <server-url> and <team-token> (or pass --list)\n');
+      process.exitCode = 1;
+      return;
+    }
+    const run = runConnect(args.connectUrl, args.connectToken, {
+      dryRun: args.connectDryRun,
+      force: args.connectForce,
+      only: args.connectOnly,
+    });
+    process.stdout.write(formatConnectOutput(run));
+    if (run.aborted) process.exitCode = 1;
     return;
   }
 

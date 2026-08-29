@@ -43,6 +43,25 @@ describe('parseArgs', () => {
   it('parses doctor', () => {
     expect(parseArgs(['doctor']).cmd).toBe('doctor');
   });
+
+  it('parses connect with a url and token', () => {
+    const a = parseArgs(['connect', 'https://ts.example.com', 'ts_abc123']);
+    expect(a).toMatchObject({ cmd: 'connect', connectUrl: 'https://ts.example.com', connectToken: 'ts_abc123' });
+  });
+
+  it('parses connect --list without requiring a url/token', () => {
+    const a = parseArgs(['connect', '--list']);
+    expect(a).toMatchObject({ cmd: 'connect', connectList: true });
+    expect(a.connectUrl).toBeUndefined();
+    expect(a.connectToken).toBeUndefined();
+  });
+
+  it('parses connect --only, --dry-run, and --force', () => {
+    const a = parseArgs(['connect', 'https://ts.example.com', 'ts_abc123', '--only', 'cursor,codex', '--dry-run', '--force']);
+    expect(a.connectOnly).toEqual(['cursor', 'codex']);
+    expect(a.connectDryRun).toBe(true);
+    expect(a.connectForce).toBe(true);
+  });
 });
 
 describe('help text', () => {
@@ -57,6 +76,38 @@ describe('help text', () => {
       process.stdout.write = original;
     }
     expect(chunks.join('')).toContain('doctor');
+  });
+
+  it('documents connect as a subcommand', async () => {
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['help']);
+    } finally {
+      process.stdout.write = original;
+    }
+    const out = chunks.join('');
+    expect(out).toContain('connect');
+    expect(out).toContain('--list');
+  });
+});
+
+describe('connect wiring in main()', () => {
+  it('errors and exits 1 when connect is called without a url/token or --list', async () => {
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['connect']);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(chunks.join('')).toContain('--list');
   });
 });
 
