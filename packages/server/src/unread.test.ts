@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb, upsertMember, type Db } from './db.js';
-import { createShare } from './shares.js';
+import { createShare, markStale } from './shares.js';
 import { getUnread, UNREAD_LIMIT } from './unread.js';
 
 let db: Db;
@@ -71,5 +71,14 @@ describe('getUnread', () => {
     createShare(db, 'adnan@team.com', { what: 'before-join', priority: 'fyi' }, '2026-08-27T00:00:00.000Z');
     upsertMember(db, 'newbie@team.com', 'Newbie', NOW);
     expect(getUnread(db, 'newbie@team.com', NOW, 14).total).toBe(1);
+  });
+
+  it('excludes a share marked stale, from both total and the list', () => {
+    const a = createShare(db, 'adnan@team.com', { what: 'still fresh', priority: 'fyi' }, NOW);
+    const b = createShare(db, 'adnan@team.com', { what: 'gone stale', priority: 'fyi' }, NOW);
+    markStale(db, b.id, 'adnan@team.com', NOW);
+    const d = getUnread(db, 'priya@team.com', NOW, 14);
+    expect(d.total).toBe(1);
+    expect(d.shares.map((s) => s.id)).toEqual([a.id]);
   });
 });

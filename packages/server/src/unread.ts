@@ -27,6 +27,7 @@ const ORDER = `ORDER BY CASE s.priority WHEN 'blocking' THEN 0 ELSE 1 END, s.cre
 const WHERE_UNREAD = `
   WHERE s.sender_email != ?
     AND s.created_at >= ?
+    AND s.stale_at IS NULL
     AND NOT EXISTS (
       SELECT 1 FROM receipts r WHERE r.share_id = s.id AND r.member_email = ?
     )

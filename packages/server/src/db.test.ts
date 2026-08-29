@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   openDb, getOrCreateToken, rotateToken, upsertMember,
   listMembers, removeMember, normalizeEmail, type Db,
@@ -47,5 +51,79 @@ describe('members', () => {
     expect(removeMember(db, 'A@T.com')).toBe(true);
     expect(removeMember(db, 'a@t.com')).toBe(false);
     expect(listMembers(db)).toHaveLength(0);
+  });
+});
+
+describe('schema migration', () => {
+  // Genuinely exercises the PRAGMA table_info(shares) migration path: builds
+  // a DB file with the OLD (pre-stale_at) schema, closes it, then reopens it
+  // with openDb — the same function a real team's upgrade would call. Do NOT
+  // "prove" this by calling openDb twice on a current-schema DB; that never
+  // touches the ALTER TABLE branch at all.
+  let dir: string;
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('adds stale_at to a database created by an earlier version, keeping existing rows', () => {
+    dir = mkdtempSync(join(tmpdir(), 'teamshare-migration-'));
+    const dbPath = join(dir, 'old.db');
+
+    const old = new Database(dbPath);
+    old.exec(`
+      CREATE TABLE config (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE members (
+        email      TEXT PRIMARY KEY,
+        name       TEXT NOT NULL,
+        first_seen TEXT NOT NULL,
+        last_seen  TEXT NOT NULL
+      );
+      CREATE TABLE shares (
+        id           TEXT PRIMARY KEY,
+        sender_email TEXT NOT NULL,
+        what         TEXT NOT NULL,
+        why          TEXT,
+        action       TEXT,
+        tags         TEXT NOT NULL DEFAULT '[]',
+        priority     TEXT NOT NULL,
+        created_at   TEXT NOT NULL
+      );
+      CREATE TABLE receipts (
+        share_id     TEXT NOT NULL,
+        member_email TEXT NOT NULL,
+        status       TEXT NOT NULL,
+        at           TEXT NOT NULL,
+        PRIMARY KEY (share_id, member_email)
+      );
+    `);
+    old
+      .prepare(
+        `INSERT INTO shares (id, sender_email, what, why, action, tags, priority, created_at)
+         VALUES ('shr_old1', 'adnan@team.com', 'pre-migration share', NULL, NULL, '[]', 'fyi', '2026-08-01T00:00:00.000Z')`,
+      )
+      .run();
+    old.prepare(`INSERT INTO config (key, value) VALUES ('schema_version', '1')`).run();
+    const oldCols = old.prepare('PRAGMA table_info(shares)').all() as { name: string }[];
+    expect(oldCols.some((c) => c.name === 'stale_at')).toBe(false);
+    old.close();
+
+    const migrated = openDb(dbPath);
+    try {
+      const cols = migrated.prepare('PRAGMA table_info(shares)').all() as { name: string }[];
+      expect(cols.some((c) => c.name === 'stale_at')).toBe(true);
+
+      const row = migrated.prepare('SELECT * FROM shares WHERE id = ?').get('shr_old1') as
+        | Record<string, unknown>
+        | undefined;
+      expect(row).toBeDefined();
+      expect(row?.what).toBe('pre-migration share');
+      expect(row?.stale_at).toBeNull();
+    } finally {
+      migrated.close();
+    }
   });
 });

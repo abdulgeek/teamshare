@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS shares (
   action       TEXT,
   tags         TEXT NOT NULL DEFAULT '[]',
   priority     TEXT NOT NULL,
-  created_at   TEXT NOT NULL
+  created_at   TEXT NOT NULL,
+  stale_at     TEXT
 );
 CREATE TABLE IF NOT EXISTS receipts (
   share_id     TEXT NOT NULL,
@@ -51,9 +52,18 @@ export function openDb(path: string): Db {
   if (path !== ':memory:') db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+
+  // CREATE TABLE IF NOT EXISTS above will NOT add a column to a `shares`
+  // table an earlier teamshare version already created. Detect and patch it
+  // so a team upgrading in place doesn't lose their shares.
+  const cols = db.prepare('PRAGMA table_info(shares)').all() as { name: string }[];
+  if (!cols.some((c) => c.name === 'stale_at')) {
+    db.exec('ALTER TABLE shares ADD COLUMN stale_at TEXT');
+  }
+
   db.prepare(
-    `INSERT INTO config (key, value) VALUES ('schema_version', '1')
-     ON CONFLICT(key) DO NOTHING`,
+    `INSERT INTO config (key, value) VALUES ('schema_version', '2')
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
   ).run();
   return db;
 }

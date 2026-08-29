@@ -38,6 +38,7 @@ beforeEach(async () => {
   token = getOrCreateToken(db);
   upsertMember(db, 'adnan@team.com', 'Adnan', NOW);
   upsertMember(db, 'priya@team.com', 'Priya', NOW);
+  upsertMember(db, 'sam@team.com', 'Sam', NOW);
   const app = createApp({ db, expiryDays: 14, now: () => NOW });
   server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -52,12 +53,27 @@ afterEach(async () => {
 });
 
 describe('mcp surface', () => {
-  it('advertises all six tools and the standing instructions', async () => {
+  it('advertises all eight tools and the standing instructions', async () => {
     const client = await connect('adnan@team.com', 'Adnan');
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
-    expect(names).toEqual(['acknowledge', 'list_shares', 'read_share', 'receipts', 'share', 'unread']);
+    expect(names).toEqual([
+      'acknowledge', 'list_shares', 'mark_stale', 'read_share',
+      'receipts', 'retract', 'share', 'unread',
+    ]);
     expect(client.getInstructions()).toContain('unread');
+    expect(client.getInstructions()).toContain('retract');
+    expect(client.getInstructions()).toContain('stale');
     await client.close();
+  });
+
+  it("read_share's tool description states the reference-resolution rule with its safety limit", async () => {
+    const client = await connect('adnan@team.com', 'Adnan');
+    const tools = (await client.listTools()).tools;
+    const readShare = tools.find((t) => t.name === 'read_share');
+    await client.close();
+    expect(readShare?.description).toContain('only resolve well-formed identifiers');
+    expect(readShare?.description).toContain('never send the');
+    expect(readShare?.description).toContain('untrusted input');
   });
 
   it('shares, then surfaces it to a teammate but not the sender', async () => {
@@ -207,5 +223,127 @@ describe('mcp surface', () => {
     expect(out).toContain('BEGIN UNTRUSTED');
     expect(out).toContain('still wrapped');
     expect(() => JSON.parse(out)).toThrow();
+  });
+
+  it('lets the author retract their own share: gone from getShare, listShares, and a teammate unread', async () => {
+    const adnan = await connect('adnan@team.com', 'Adnan');
+    const created = await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'oops leaked secret', priority: 'blocking' },
+    });
+    const id = JSON.parse(textOf(created)).id as string;
+
+    const retracted = await adnan.callTool({ name: 'retract', arguments: { id } });
+    expect(retracted.isError).toBeFalsy();
+    await adnan.close();
+
+    const priya = await connect('priya@team.com', 'Priya');
+    const digest = textOf(await priya.callTool({ name: 'unread', arguments: {} }));
+    expect(digest).toContain('No unread');
+    const list = textOf(await priya.callTool({ name: 'list_shares', arguments: {} }));
+    expect(list).not.toContain(id);
+    const readAttempt = await priya.callTool({ name: 'read_share', arguments: { id } });
+    expect(readAttempt.isError).toBe(true);
+    const receiptsAttempt = await priya.callTool({ name: 'receipts', arguments: { id } });
+    expect(receiptsAttempt.isError).toBe(true);
+    await priya.close();
+  });
+
+  it('rejects a retract attempt from anyone other than the author, and leaves the share present', async () => {
+    const adnan = await connect('adnan@team.com', 'Adnan');
+    const created = await adnan.callTool({
+      name: 'share', arguments: { what: 'mine only', priority: 'fyi' },
+    });
+    const id = JSON.parse(textOf(created)).id as string;
+    await adnan.close();
+
+    const priya = await connect('priya@team.com', 'Priya');
+    const res = await priya.callTool({ name: 'retract', arguments: { id } });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('only the author can retract');
+    await priya.close();
+
+    const adnan2 = await connect('adnan@team.com', 'Adnan');
+    const readBack = await adnan2.callTool({ name: 'read_share', arguments: { id } });
+    expect(readBack.isError).toBeFalsy();
+    await adnan2.close();
+  });
+
+  it('lets the author mark their own share stale: absent from unread (and total), still in list_shares, labelled in read_share', async () => {
+    const adnan = await connect('adnan@team.com', 'Adnan');
+    const created = await adnan.callTool({
+      name: 'share', arguments: { what: 'plan changed', priority: 'heads-up' },
+    });
+    const id = JSON.parse(textOf(created)).id as string;
+
+    const marked = await adnan.callTool({ name: 'mark_stale', arguments: { id } });
+    expect(marked.isError).toBeFalsy();
+    await adnan.close();
+
+    const priya = await connect('priya@team.com', 'Priya');
+    const digest = textOf(await priya.callTool({ name: 'unread', arguments: {} }));
+    expect(digest).toContain('No unread');
+
+    const list = textOf(await priya.callTool({ name: 'list_shares', arguments: {} }));
+    expect(list).toContain(id);
+
+    const read = textOf(await priya.callTool({ name: 'read_share', arguments: { id } }));
+    expect(read).toContain('no longer relevant');
+    expect(read).toContain('marked by its author');
+    await priya.close();
+  });
+
+  it('rejects a mark_stale attempt from anyone other than the author, and it still surfaces as unread', async () => {
+    const adnan = await connect('adnan@team.com', 'Adnan');
+    const created = await adnan.callTool({
+      name: 'share', arguments: { what: 'mine only', priority: 'fyi' },
+    });
+    const id = JSON.parse(textOf(created)).id as string;
+    await adnan.close();
+
+    const priya = await connect('priya@team.com', 'Priya');
+    const res = await priya.callTool({ name: 'mark_stale', arguments: { id } });
+    expect(res.isError).toBe(true);
+    await priya.close();
+
+    const sam = await connect('sam@team.com', 'Sam');
+    const samDigest = textOf(await sam.callTool({ name: 'unread', arguments: {} }));
+    expect(samDigest).toContain(id);
+    await sam.close();
+  });
+
+  it('mark_stale is idempotent', async () => {
+    const adnan = await connect('adnan@team.com', 'Adnan');
+    const created = await adnan.callTool({
+      name: 'share', arguments: { what: 'idempotent check', priority: 'fyi' },
+    });
+    const id = JSON.parse(textOf(created)).id as string;
+
+    const first = await adnan.callTool({ name: 'mark_stale', arguments: { id } });
+    expect(first.isError).toBeFalsy();
+    const second = await adnan.callTool({ name: 'mark_stale', arguments: { id } });
+    expect(second.isError).toBeFalsy();
+    await adnan.close();
+  });
+
+  it("reports a stale share's receipts output with the stale prefix", async () => {
+    const adnan = await connect('adnan@team.com', 'Adnan');
+    const created = await adnan.callTool({
+      name: 'share', arguments: { what: 'old and stale', priority: 'fyi' },
+    });
+    const id = JSON.parse(textOf(created)).id as string;
+    await adnan.callTool({ name: 'mark_stale', arguments: { id } });
+    const receiptsText = textOf(await adnan.callTool({ name: 'receipts', arguments: { id } }));
+    expect(receiptsText).toContain('no longer relevant — no longer being surfaced.');
+    await adnan.close();
+  });
+
+  it('retracting an unknown id is an isError result, same shape as other tools', async () => {
+    const client = await connect('adnan@team.com', 'Adnan');
+    const res = await client.callTool({ name: 'retract', arguments: { id: 'shr_missing' } });
+    expect(res.isError).toBe(true);
+    const markRes = await client.callTool({ name: 'mark_stale', arguments: { id: 'shr_missing' } });
+    expect(markRes.isError).toBe(true);
+    await client.close();
   });
 });

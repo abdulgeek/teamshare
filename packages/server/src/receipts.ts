@@ -7,6 +7,7 @@ export type ReceiptStatus = 'viewed' | 'dismissed';
 export interface ReceiptSummary {
   share_id: string;
   expired: boolean;
+  stale: boolean;
   viewed: string[];
   dismissed: string[];
   unseen: string[];
@@ -60,6 +61,7 @@ export function getReceipts(
   return {
     share_id: shareId,
     expired: share.created_at < expiryCutoff(nowIso, expiryDays),
+    stale: Boolean(share.stale_at),
     viewed,
     dismissed,
     unseen,

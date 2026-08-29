@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb, upsertMember, removeMember, type Db } from './db.js';
-import { createShare } from './shares.js';
+import { createShare, markStale } from './shares.js';
 import { recordReceipt, getReceipts } from './receipts.js';
 
 let db: Db;
@@ -75,5 +75,20 @@ describe('getReceipts', () => {
 
   it('returns undefined for an unknown share', () => {
     expect(getReceipts(db, 'shr_nope', NOW, 14)).toBeUndefined();
+  });
+
+  it('flags a stale share', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, T0);
+    expect(getReceipts(db, id, NOW, 14)!.stale).toBe(false);
+    markStale(db, id, 'adnan@team.com', NOW);
+    expect(getReceipts(db, id, NOW, 14)!.stale).toBe(true);
+  });
+
+  it('flags a share that is both stale and expired as stale (the more informative fact)', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, '2026-08-01T00:00:00.000Z');
+    markStale(db, id, 'adnan@team.com', NOW);
+    const r = getReceipts(db, id, NOW, 14)!;
+    expect(r.stale).toBe(true);
+    expect(r.expired).toBe(true);
   });
 });

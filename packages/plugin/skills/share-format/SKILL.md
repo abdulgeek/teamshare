@@ -32,6 +32,13 @@ Write like a commit message, not an email.
 - Concrete names: files, branches, dates, commands — not "the recent changes."
 - Present tense, active voice.
 
+## References
+
+When the thing being shared has a concrete identifier — a Jira key like
+`PROJ-123`, a PR or issue URL, a commit SHA, a branch name — put it in the
+share text. A bare reference is what lets a teammate's agent look it up
+later, using tools that teammate already has.
+
 ## Examples
 
 **Good:**

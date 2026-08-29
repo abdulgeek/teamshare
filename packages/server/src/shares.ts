@@ -31,11 +31,14 @@ export interface ShareRow {
   tags: string[];
   priority: Priority;
   created_at: string;
+  stale_at: string | null;
 }
 
 export type ValidationResult =
   | { ok: true; value: CleanShare }
   | { ok: false; error: string };
+
+export type ShareActionResult = { ok: true } | { ok: false; error: string };
 
 export function validateShare(input: ShareInput): ValidationResult {
   const what = (input.what ?? '').trim();
@@ -85,6 +88,7 @@ function rowToShare(row: Record<string, unknown>): ShareRow {
     tags: JSON.parse((row.tags as string) || '[]') as string[],
     priority: row.priority as Priority,
     created_at: row.created_at as string,
+    stale_at: (row.stale_at as string | null) ?? null,
   };
 }
 
@@ -142,4 +146,38 @@ export function listShares(
   // Tag filtering happens in JS because tags are stored as a JSON array.
   const tag = opts.tag?.trim().toLowerCase();
   return tag ? shares.filter((s) => s.tags.includes(tag)) : shares;
+}
+
+// Hard delete, author only. Removes the share AND every receipt for it, so
+// it disappears from unread/list_shares/receipts/read_share as if it had
+// never been sent — for the case where a share leaked something sensitive
+// or was simply wrong, where "hide it" is not good enough.
+export function retractShare(db: Db, id: string, callerEmail: string): ShareActionResult {
+  const share = getShare(db, id);
+  if (!share) return { ok: false, error: `no share with id ${id}` };
+  if (share.sender_email !== normalizeEmail(callerEmail)) {
+    return { ok: false, error: 'only the author can retract a share' };
+  }
+  db.prepare('DELETE FROM receipts WHERE share_id = ?').run(id);
+  db.prepare('DELETE FROM shares WHERE id = ?').run(id);
+  return { ok: true };
+}
+
+// Soft, author only. Sets stale_at so the share drops out of `unread` for
+// everyone but stays in history via listShares/getShare. Idempotent: marking
+// an already-stale share leaves its original stale_at untouched.
+export function markStale(
+  db: Db,
+  id: string,
+  callerEmail: string,
+  nowIso: string,
+): ShareActionResult {
+  const share = getShare(db, id);
+  if (!share) return { ok: false, error: `no share with id ${id}` };
+  if (share.sender_email !== normalizeEmail(callerEmail)) {
+    return { ok: false, error: 'only the author can mark a share stale' };
+  }
+  if (share.stale_at) return { ok: true };
+  db.prepare('UPDATE shares SET stale_at = ? WHERE id = ?').run(nowIso, id);
+  return { ok: true };
 }

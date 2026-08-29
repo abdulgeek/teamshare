@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb, upsertMember, type Db } from './db.js';
-import { validateShare, createShare, getShare, listShares } from './shares.js';
+import { validateShare, createShare, getShare, listShares, retractShare, markStale } from './shares.js';
 
 let db: Db;
 const NOW = '2026-08-29T10:00:00.000Z';
@@ -95,5 +95,84 @@ describe('listShares', () => {
     expect(listShares(db, { tag: 'auth' }).map(s => s.what)).toEqual(['first']);
     expect(listShares(db, { sender: 'Priya@Team.com' }).map(s => s.what)).toEqual(['second']);
     expect(listShares(db, { limit: 1 }).map(s => s.what)).toEqual(['second']);
+  });
+
+  it('a fresh share has a null stale_at', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    expect(getShare(db, id)?.stale_at).toBeNull();
+  });
+});
+
+describe('retractShare', () => {
+  it('hard-deletes the share and its receipts when the author retracts', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'secret leak', priority: 'fyi' }, NOW);
+    db.prepare(
+      `INSERT INTO receipts (share_id, member_email, status, at) VALUES (?, ?, ?, ?)`,
+    ).run(id, 'priya@team.com', 'viewed', NOW);
+
+    const result = retractShare(db, id, 'adnan@team.com');
+    expect(result.ok).toBe(true);
+
+    expect(getShare(db, id)).toBeUndefined();
+    expect(listShares(db, {}).map((s) => s.id)).not.toContain(id);
+    const receipts = db.prepare('SELECT * FROM receipts WHERE share_id = ?').all(id);
+    expect(receipts).toHaveLength(0);
+  });
+
+  it('rejects retraction by anyone other than the author, and leaves the share intact', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    const result = retractShare(db, id, 'priya@team.com');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('only the author can retract a share');
+    expect(getShare(db, id)).toBeDefined();
+  });
+
+  it('is case-insensitive when comparing the caller to the author', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    const result = retractShare(db, id, 'Adnan@Team.com');
+    expect(result.ok).toBe(true);
+    expect(getShare(db, id)).toBeUndefined();
+  });
+
+  it('reports an unknown id as an error rather than throwing', () => {
+    const result = retractShare(db, 'shr_missing', 'adnan@team.com');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('shr_missing');
+  });
+});
+
+describe('markStale', () => {
+  it('sets stale_at when the author marks their own share stale', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    const result = markStale(db, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
+    expect(result.ok).toBe(true);
+    expect(getShare(db, id)?.stale_at).toBe('2026-08-30T00:00:00.000Z');
+  });
+
+  it('rejects mark_stale by anyone other than the author', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    const result = markStale(db, id, 'priya@team.com', '2026-08-30T00:00:00.000Z');
+    expect(result.ok).toBe(false);
+    expect(getShare(db, id)?.stale_at).toBeNull();
+  });
+
+  it('is idempotent: marking an already-stale share does not change stale_at', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    markStale(db, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
+    const second = markStale(db, id, 'adnan@team.com', '2026-09-15T00:00:00.000Z');
+    expect(second.ok).toBe(true);
+    expect(getShare(db, id)?.stale_at).toBe('2026-08-30T00:00:00.000Z');
+  });
+
+  it('reports an unknown id as an error rather than throwing', () => {
+    const result = markStale(db, 'shr_missing', 'adnan@team.com', NOW);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('shr_missing');
+  });
+
+  it('still appears in listShares after being marked stale', () => {
+    const { id } = createShare(db, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    markStale(db, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
+    expect(listShares(db, {}).map((s) => s.id)).toContain(id);
   });
 });
