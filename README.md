@@ -162,22 +162,22 @@ development, or to repair a machine whose stored values have gone wrong.
 ## Connect: every other assistant
 
 **No clone, no `pnpm install`, no build.** `teamshare connect` is a plain
-Node script — `packages/server/src/teamshare-connect.mjs` — that imports
+Node script — `teamshare-connect.mjs` at the repo root — that imports
 nothing outside Node's own builtins. It never touches `better-sqlite3` or any
 other native module (that's only needed to *run the server*, not to connect
 a client to one). Grab that one file — from a checkout of this repo, or as a
 single downloaded file on its own — and run it directly:
 
 ```bash
-node packages/server/src/teamshare-connect.mjs <server-url> <team-token>
+node teamshare-connect.mjs <server-url> <team-token>
 ```
 
 ```
-node packages/server/src/teamshare-connect.mjs --list
-node packages/server/src/teamshare-connect.mjs <server-url> <team-token> --only cursor,codex
-node packages/server/src/teamshare-connect.mjs <server-url> <team-token> --dry-run
-node packages/server/src/teamshare-connect.mjs <server-url> <team-token> --force
-node packages/server/src/teamshare-connect.mjs <server-url> <team-token> --show-token
+node teamshare-connect.mjs --list
+node teamshare-connect.mjs <server-url> <team-token> --only cursor,codex
+node teamshare-connect.mjs <server-url> <team-token> --dry-run
+node teamshare-connect.mjs <server-url> <team-token> --force
+node teamshare-connect.mjs <server-url> <team-token> --show-token
 ```
 
 If you've already built the server package (e.g. because you're also running
