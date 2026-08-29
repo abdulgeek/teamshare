@@ -483,7 +483,18 @@ describe('formatJoinInstructions: the honest join text', () => {
     expect(text).toContain('/plugin marketplace add abdulgeek/teamshare');
     expect(text).toContain('/plugin install teamshare');
     expect(text).toContain('Server URL');
-    expect(text).toContain('Team token');
+    // The label pinned here is "Personal token", not "Team token" — this
+    // value is minted for one named person (create-team/rotate-team's admin
+    // token or invite's member token) and must never be posted somewhere the
+    // whole team can see it. The prompt's own field is still titled "Team
+    // token" (packages/plugin/.claude-plugin/plugin.json, deliberately
+    // unchanged — see the design doc's "the client does not change"), so the
+    // text calls that out explicitly rather than pretending it says something
+    // it doesn't.
+    expect(text).toContain('Personal token');
+    expect(text).toContain('still labeled "Team token" in the');
+    expect(text.toLowerCase()).toContain('personal to you');
+    expect(text.toLowerCase()).toContain('must not be shared');
     expect(text.toLowerCase()).toContain('trust this workspace');
     expect(text).toContain('401');
     expect(text).toContain('2.1.238');
@@ -519,7 +530,7 @@ describe('formatJoinInstructions: the honest join text', () => {
     expect(curlLine).toBeGreaterThan(nonClaude);
   });
 
-  it('includes the real token — this text is meant to be pasted into Slack for the whole team to use', () => {
+  it('includes the real token — this text is meant to be pasted (or sent privately) to one specific recipient', () => {
     expect(text).toContain('ts_the_token');
   });
 });

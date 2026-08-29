@@ -133,11 +133,10 @@ shell history and `ps` output. It's read from `TEAMSHARE_SIGNUP_SECRET` in
 the environment, or, on a real terminal, prompted for with the input
 hidden.
 
-On success, this prints your new **team token exactly once** — save it in
+On success, this prints your new **admin token exactly once** — save it in
 a password manager immediately, because it cannot be recovered later, only
 rotated away — then immediately verifies that token against the live
-server (`/health` and `/unread`), so you know it actually works before you
-hand it to anyone:
+server (`/health` and `/members`), so you know it actually works:
 
 ```
 teamshare create-team — success
@@ -146,47 +145,106 @@ Team: Acme Engineering (tm_01a29badda93)
 
 Team token (shown once — this cannot be recovered later; save it in a password manager now):
 
-  ts_78c3ea44e09d31f100afb72dadbd4e82f8debdafb71d1bdb
+  ts_<a long generated value>
 
 Verifying the new token against the live server:
 
 [OK] server reachable at http://127.0.0.1:8799/health
-[OK] http://127.0.0.1:8799/unread returned 200 (0 unread share(s))
+[OK] http://127.0.0.1:8799/members returned 200 (0 known email(s))
 
-Re-verify anytime with: TEAMSHARE_URL=http://127.0.0.1:8799 TEAMSHARE_TOKEN=ts_78c3ea44e09d31f100afb72dadbd4e82f8debdafb71d1bdb teamshare doctor
+Re-verify anytime with: TEAMSHARE_URL=http://127.0.0.1:8799 TEAMSHARE_TOKEN=ts_<...> teamshare doctor
 
 If this token is ever lost or leaked, the only remedy is rotation — it invalidates the old
 token immediately: node teamshare-team.mjs rotate-team <server-url>
+```
 
-Paste this into Slack for your team:
+**This is an admin token, not something to hand out.** It mints invites,
+revokes access, reads the roster, and rotates itself — it grants **no**
+access to shares, receipts, or the digest, for anyone, including you.
+(The command's own output also appends a join-instructions block after
+this, the same boilerplate `invite` prints below — ignore it here: an
+admin token cannot actually authenticate `/unread` or the MCP connection,
+so there is nothing useful to join with yet. `invite` below is what gets
+anyone, including you, an actual working connection.)
+
+### Invite each teammate
+
+There is no longer a single credential to distribute. You mint one
+**personal** token per person — including yourself, if you also want to
+use teamshare day to day, since the admin token above can't:
+
+```bash
+node teamshare-team.mjs invite <server-url> <email> ["<name>"]
+```
+
+This needs the admin token from `create-team` above, resolved the same way
+the signup secret is: `TEAMSHARE_ADMIN_TOKEN` in the environment, or
+prompted for on a real terminal — never a command-line argument. On
+success it prints that person's token once, plus the real join
+instructions described under [the teammate](#the-teammate-once-per-person)
+below, ready to send them directly:
+
+```
+teamshare invite — success
+
+Invited: Sam <sam@example.com>
+
+Personal token for sam@example.com (shown once — this cannot be recovered later; save it in a password manager now):
+
+  tsm_<a long generated value>
+
+Send this token privately to sam@example.com only — never post it in a shared channel or thread with
+others on the team. Whoever holds it can publish shares and record read receipts as this person.
+
+Send this to the person joining — privately (DM, password manager, etc.), never in a shared
+channel or a place the whole team can see it:
+
 --- Joining the team in Claude Code ---
 ...
 ```
 
-That last block is the real join instructions — the same ones described
-under [the teammate](#the-teammate-once-per-person) below — ready to paste
-into Slack as-is.
+**This is one message per person, not one Slack post — and that's the
+point, not a rough edge.** A previous design here let anyone holding one
+shared token claim to be anyone on the team, which made a forged read
+receipt indistinguishable from a genuine one. Under this model, *you* — the
+lead — vouch for each teammate's identity at the moment you mint their
+token: the server binds that token to the email you typed, and everything
+that person does afterward is attributed to it. One extra message per
+person is the cost of a share's sender and a receipt's reader being real,
+checked facts instead of a claim nobody verified.
 
-**If your token is ever lost or leaked, rotation is the remedy, and it's
-self-serve** — no operator needed:
+Already have a checkout, or the server package built? The bundled CLI has a
+local-database equivalent that works without an admin token at all
+(filesystem access to the database already implies that authority) — see
+[Admin](#admin).
+
+**If your admin token is ever lost or leaked, rotation is the remedy, and
+it's self-serve** — no operator needed:
 
 ```bash
 node teamshare-team.mjs rotate-team <server-url>
 ```
 
-This needs the team's *current* token (same env-var-or-prompt rule — never
-a positional argument) and invalidates the old one the instant it runs.
-Every teammate must reconnect with the new value. See
+This needs the team's *current* admin token (same env-var-or-prompt rule —
+never a positional argument) and invalidates the old one the instant it
+runs. **It does not disturb any teammate's connection.** Member tokens
+minted by `invite` are stored independently of the admin token and keep
+working exactly as before — only admin operations (`invite`/`revoke`/
+`roster`/another `rotate-team`) need the new value. (The tool's own success
+message still says "every teammate must reconnect," left over from the
+single-shared-token design — that line is stale; verified directly that an
+already-issued member token keeps authenticating after rotation.) See
 [Admin](#admin) for the operator's break-glass path, for when a team's
-token is gone entirely rather than merely leaked.
+admin token is gone entirely rather than merely leaked.
 
 **Already have teamshare working on this machine and need a second,
 independent team** — e.g. spinning one up for another group? Claude Code
 users can run `/teamshare-create-team` instead; it never prints the token
 into the session transcript, writing it to a local file you open yourself
 instead. This is **not** the first-time path — installing the plugin
-itself prompts for the very token you'd be trying to create, so your first
-team always starts with the standalone script above.
+itself prompts for a personal token from `invite`, not the admin token this
+command creates, so your first team always starts with the standalone
+script above.
 
 ## The teammate (once per person)
 
@@ -213,11 +271,16 @@ Two commands, two prompts:
 
 The install prompts you for two values — **Server URL** (the origin, no
 path, e.g. `http://localhost:8787` or `https://teamshare.your-company.com`)
-and **Team token** (the one your team lead got back from `create-team` and
-pasted into Slack for you). There's no `~/.teamshare.json` to hand-write
-and no environment variable to export — both prompts are stored by Claude
-Code and picked up automatically on your next session, alongside the git
-identity above.
+and a token, still labeled **Team token** in the prompt itself even though
+it isn't one anymore. What you paste there is a token your team lead minted
+**for you specifically**, with `teamshare invite`, and sent to you
+privately — not a value shared across the team. It's bound to your
+identity: every share you publish and every receipt you record is
+attributed to whoever holds it, so treat it like a password and never post
+it somewhere the rest of the team can see it. There's no `~/.teamshare.json`
+to hand-write and no environment variable to export — both prompts are
+stored by Claude Code and picked up automatically on your next session,
+alongside the git identity above.
 
 Two more things have to be true before it works:
 
@@ -397,14 +460,20 @@ team's oldest urgent item never gets buried under a pile of FYIs.
 ## A worked example
 
 **Priya** just got her org's signup secret from the operator. She runs
-`create-team` once, gets a token back, saves it in her password manager,
-and pastes the printed join instructions into the team's Slack channel.
+`create-team` once and gets back an admin token, which she saves in her
+password manager — it's for managing the team, not for using it. To
+actually use teamshare herself, she invites herself too:
+`teamshare-team.mjs invite <server-url> priya@example.com "Priya"`, and
+gets back her own personal token.
 
-The next morning, **Sam** — new to the team — sets his git identity,
-installs the Claude Code plugin, pastes in the server URL and the token
-Priya shared, and restarts Claude Code. Before any of that, Priya had
-already run `/share` to publish `Auth middleware refactor lands Friday.
-Don't touch src/auth this week.` as `blocking`.
+The next morning, **Sam** joins the team. Priya runs
+`teamshare-team.mjs invite <server-url> sam@example.com "Sam"`, gets back a
+token minted specifically for Sam, and sends it to him directly (a DM, not
+the team channel) along with the join instructions the command prints. Sam
+sets his git identity, installs the Claude Code plugin, pastes in the
+server URL and the token Priya sent him, and restarts Claude Code. Before
+any of that, Priya had already run `/share` to publish `Auth middleware
+refactor lands Friday. Don't touch src/auth this week.` as `blocking`.
 
 Sam's first session opens with: *"1 unread team share published by
 teammates: Priya says the auth middleware refactor lands Friday and not to
@@ -422,38 +491,72 @@ says "retract the auth share" — Claude calls `retract`, and it's gone from
 
 ## Admin
 
-**Rotation is the remedy for a lost or leaked token, and it's self-serve —
-teams don't need the operator.** Run this with the team's *current* token
-(same env-var-or-prompt rule as `create-team` — never a positional
-argument):
+Per-person identity commands — the day-to-day admin surface, all
+authenticated with the team's **admin token** (from `create-team`, above)
+and available two ways: the standalone script (`node teamshare-team.mjs
+<cmd> <server-url> ...`, `TEAMSHARE_ADMIN_TOKEN` in the environment — for a
+lead with the admin token but no filesystem access to the server) or the
+bundled CLI's local-database equivalent (`node
+packages/server/dist/cli.js <cmd> ... --db /path/to/teamshare.db` — no
+token needed at all, since filesystem access to the database already
+implies that authority):
+
+```bash
+node teamshare-team.mjs invite <server-url> <email> ["<name>"]
+node teamshare-team.mjs revoke <server-url> <email>
+node teamshare-team.mjs roster <server-url>
+```
+
+`invite` mints a brand-new personal token for one named email — there is no
+redemption step, the printed value *is* that person's credential.
+`revoke` kills **every** live token for an email in one command, on every
+device it was ever issued to — the one-command remedy for a departed
+engineer. `roster` lists who holds a live token and who is still "invited,
+not yet active," with a per-person count of active tokens — useful both as
+"who hasn't set up yet" and as the migration's own progress bar on a
+server that just adopted this design.
+
+**Rotation is the remedy for a lost or leaked admin token, and it's
+self-serve — teams don't need the operator.** Run this with the team's
+*current* admin token (same env-var-or-prompt rule as `create-team` — never
+a positional argument):
 
 ```bash
 node teamshare-team.mjs rotate-team <server-url>
 ```
 
-It invalidates the old token immediately (one authenticated `POST
+It invalidates the old admin token immediately (one authenticated `POST
 /teams/rotate`) and prints the new one exactly once, verified the same way
-`create-team` is. Every teammate must reconnect with it — `/plugin
-configure teamshare` for Claude Code, or `teamshare connect` again for
-everyone else.
+`create-team` is. **No teammate has to do anything** — member tokens
+minted by `invite` are stored independently of the admin token, so
+rotating it only affects admin operations (`invite`/`revoke`/`roster`/
+another `rotate-team`), never anyone's actual connection.
 
 The operator also has a local-database CLI, for two cases self-serve
-rotation can't cover — the team's token is gone entirely (not just
-leaked), or a departed engineer needs removing from the roster:
+rotation can't cover — the team's admin token is gone entirely (not just
+leaked), or a departed engineer needs removing from the historical roster:
 
 ```bash
 node packages/server/dist/cli.js rotate-token --team "<name>" --db /path/to/teamshare.db
 node packages/server/dist/cli.js remove-member <email> --team "<name>" --db /path/to/teamshare.db
+node packages/server/dist/cli.js invite <email> ["<name>"] --team "<name>" --db /path/to/teamshare.db
+node packages/server/dist/cli.js revoke <email> --team "<name>" --db /path/to/teamshare.db
+node packages/server/dist/cli.js roster --team "<name>" --db /path/to/teamshare.db
 ```
 
 `--team` is required once this server hosts more than one team (it's
-inferred, and optional, when there's exactly one); both commands name the
-known teams and refuse to guess if you omit it on a multi-team server.
+inferred, and optional, when there's exactly one); every command above
+names the known teams and refuses to guess if you omit it on a multi-team
+server.
 
-`remove-member` deletes a departed engineer from a team's roster so they
-stop counting against `notified` totals and the unseen side of `receipts` —
-without it, a share can look forever unread by someone who no longer works
-here.
+`remove-member` and `revoke` are different levers: `remove-member` deletes
+a departed engineer from a team's *historical* roster (the `members` rows
+that accumulate once a token is actually used) so they stop counting
+against `notified` totals and the unseen side of `receipts`; `revoke`
+kills their *live tokens* so those devices actually start getting 401s.
+Removing an ex-employee cleanly means both: `revoke` first (so their
+credential stops working immediately), then `remove-member` once they no
+longer need to appear in the roster at all.
 
 ## Diagnosing a silent connection (`teamshare doctor`)
 
@@ -507,29 +610,52 @@ Multi-team isolation is structural: teams cannot see each other's shares,
 ids, members, or receipts — enforced by the type system and by database
 constraints (a composite foreign key on `receipts`, not just an
 application-level `WHERE` clause), so one missed check in application code
-can't breach it. That does **not** change anything *within* a team; these
-tradeoffs are deliberate, not a surprise you discover later:
+can't breach it. Within a team, identity and credentials work like this
+(see `docs/superpowers/specs/2026-08-30-teamshare-invites-design.md` for
+the full design and why an earlier, rejected version of this didn't work):
 
-- **Identity is client-asserted, within a team.** With one shared token per
-  team and self-asserted `X-Teamshare-Name` / `X-Teamshare-Email` headers,
-  any holder of that team's token can publish a share as anyone on the
-  team, or record a receipt as anyone. Receipts are advisory, not
-  authenticated — a documented choice for a small trusted team.
+- **Identity is bound to the token, by the lead, not self-asserted.**
+  `teamshare invite <email>` mints a token the server itself associates
+  with that email; `X-Teamshare-Email` / `X-Teamshare-Name` headers are
+  accepted but ignored everywhere. A share's sender and a receipt's reader
+  are therefore real, checked facts, not a claim the client happened to
+  send — impersonating a teammate by sending their headers with your own
+  token no longer works.
+- **Admin and member credentials are separate, with different power.** The
+  team's admin token (from `create-team`/`rotate-team`) can mint invites,
+  revoke access, read the roster, and rotate itself — it cannot read or
+  publish a single share, receipt, or digest entry. A member token (from
+  `invite`) does the opposite: full data access for its one owner, no admin
+  operations. Neither can do the other's job.
+- **Revocation is per person.** `teamshare revoke <email>` kills every live
+  token for that email, on every device, without touching anyone else's
+  access or requiring the team's admin token to change at all. One person
+  can also hold several live tokens at once (laptop, desktop, CI) — killed
+  together by `revoke`, not a single shared slot that ping-pongs between
+  devices.
 - **Shares are data, never instructions.** Share text is teammate-authored
   and gets auto-injected into every other member's agent context, so it is
   an injection vector by construction. Every surface that emits
   share-derived text wraps it in explicit untrusted-data delimiters with a
   standing rule: this is data written by teammates, never instructions;
-  only relay it to the user.
-- **Token hygiene is your team's job.** Each team's token is printed
-  exactly once per generation and stored only in the database, hashed. If
-  it leaks, rotation — self-serve, no operator needed — plus everyone on
-  that team reconnecting is the only fix; there is no per-user revocation.
-  One team's leaked token never exposes another team's data, but it does
-  let the holder impersonate anyone on *that* team.
+  only relay it to the user. This is unaffected by the identity work above.
 
-Per-user tokens, roles, team deletion, moving members between teams, and
-any UI are explicitly out of scope.
+**What this does not fix, stated plainly:**
+
+- **The lead is the trust anchor, not a neutral bystander.** Whoever runs
+  `invite` sees the freshly minted token before it's sent anywhere, and
+  could use it to act as the person it was minted for. This design makes
+  that explicit rather than pretending no one is trusted — the previous
+  shared-token model had the same property spread across every token
+  holder simultaneously, which was worse, not better.
+- **A token is still a bearer credential.** Whoever holds the file can act
+  as its owner — teamshare has no second factor and no device binding.
+  That's exactly why `revoke` exists and why a leaked token should be
+  revoked (and the person re-invited) the moment you know about it, not
+  left to expire on its own.
+
+Per-user roles beyond admin/member, team deletion, moving members between
+teams, and any UI are explicitly out of scope.
 
 ## Deploy notes
 

@@ -132,8 +132,8 @@ whatever channel you'd otherwise have used to hand out tokens individually —
 Slack, a wiki page, however you'd announce any other new internal tool. That
 single secret replaces distributing a token per team.
 
-**A team lead creates their own team** with the standalone script — the real
-two commands, needing nothing beyond `curl` and `node`:
+**A team lead creates their own team** with the standalone script — needing
+nothing beyond `curl` and `node`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
@@ -143,25 +143,48 @@ node teamshare-team.mjs create-team https://<ip>.sslip.io "<your team name>"
 The signup secret is never a command-line argument — that would land it in
 shell history and `ps` output. It's read from `TEAMSHARE_SIGNUP_SECRET` in
 the environment, or, on a real terminal, prompted for with the input hidden.
-This prints the new **team token exactly once** (save it in a password
-manager immediately — it cannot be recovered later, only rotated away),
-verifies it against the live server, and prints the same join instructions
-as the root README's "Connect: Claude Code" — paste those into Slack for the
-team.
+This prints the new **admin token exactly once** (save it in a password
+manager immediately — it cannot be recovered later, only rotated away) and
+verifies it against the live server. This admin token is not something to
+hand out — it mints invites, revokes access, reads the roster, and rotates
+itself, but grants **no** access to shares, receipts, or the digest, for
+anyone, including the lead.
 
-**Rotation is the remedy for a lost or leaked token, and teams self-serve
-it** — no operator involvement:
+**The step after that is new: the lead invites each member individually,**
+rather than distributing that one token to the whole team:
+
+```bash
+node teamshare-team.mjs invite https://<ip>.sslip.io <email> ["<name>"]
+```
+
+This needs the admin token above, resolved the same way the signup secret
+is — `TEAMSHARE_ADMIN_TOKEN` in the environment, or prompted for on a real
+terminal, never a positional argument. It prints a token minted for that
+one person, plus the same join instructions described in the root README's
+["If you use Claude Code"](../../README.md#if-you-use-claude-code) section
+— send those to that person directly (a DM, not the team channel); the
+printed text says so explicitly, because this value is personal to them,
+not a team-wide credential. See the root README's
+["The team lead"](../../README.md#the-team-lead-once-per-team) and
+["Admin"](../../README.md#admin) sections for `revoke`/`roster` and the
+reasoning behind minting one token per person instead of one for the team.
+
+**Rotation is the remedy for a lost or leaked admin token, and teams
+self-serve it** — no operator involvement:
 
 ```bash
 node teamshare-team.mjs rotate-team https://<ip>.sslip.io
 ```
 
-Same env-var-or-prompt rule, this time for the team's *current* token
-(required to authenticate the rotation). This invalidates the old token
-immediately; every teammate on that team must reconnect with the new value.
-If a token is genuinely gone rather than merely leaked — so there's nothing
-left to authenticate a self-serve rotation with — that's what the operator
-break-glass path below is for.
+Same env-var-or-prompt rule, this time for the team's *current* admin token
+(required to authenticate the rotation). This invalidates the old admin
+token immediately — but **no teammate has to do anything**: member tokens
+minted by `invite` are stored independently of the admin token, so this only
+affects admin operations (`invite`/`revoke`/`roster`/another `rotate-team`),
+never anyone's actual connection. If the admin token is genuinely gone
+rather than merely leaked — so there's nothing left to authenticate a
+self-serve rotation with — that's what the operator break-glass path below
+is for.
 
 ## Break-glass: recovering a secret or token via SSM
 
@@ -198,12 +221,13 @@ aws ssm get-command-invocation \
   --query "StandardOutputContent" --output text
 ```
 
-If a team's token is genuinely lost (not leaked — actually gone, so
+If a team's admin token is genuinely lost (not leaked — actually gone, so
 `rotate-team` above has nothing left to authenticate with), the operator can
 force a new one directly on the box instead. This is the same `rotate-token`
 the root README documents, run over SSM because there's no SSH key here —
 `--team` names which team, and is required once this instance hosts more
-than one:
+than one. As with self-serve rotation, this only replaces the admin
+credential; it does not touch any teammate's personal token from `invite`:
 
 ```bash
 aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
@@ -213,25 +237,31 @@ aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
 
 ## How teammates connect
 
+Every teammate connects with the **personal token their lead minted for
+them with `invite`**, above — never the admin token `create-team`/
+`rotate-team` produced, which doesn't grant data access at all.
+
 - **Claude Code**: install the teamshare plugin and, when prompted, supply
-  the server URL (`https://<ip>.sslip.io`) and the team token their lead got
-  back from `create-team`, above.
+  the server URL (`https://<ip>.sslip.io`) and that personal token. The
+  prompt itself is still labeled "Team token" (a holdover from before this
+  value became personal) — the token that goes there is theirs alone, sent
+  to them privately, not something to post in a shared channel.
 - **Everything else** (Cursor, VS Code, Windsurf, Gemini CLI, Cline, Zed,
   Continue, or any other MCP-capable assistant): no install needed — download
   `teamshare-connect.mjs` from the repo root and run it directly with plain
   Node:
 
   ```bash
-  node teamshare-connect.mjs https://<ip>.sslip.io <team-token>
+  node teamshare-connect.mjs https://<ip>.sslip.io <personal-token>
   ```
 
   This writes the connection into that assistant's own config; no clone, no
   `pnpm install`, no build step. Run `teamshare doctor` (or the equivalent
   `node teamshare-connect.mjs` invocation — see the root README) any time to
   verify a given machine can actually reach the server. Right after
-  `create-team`/`rotate-team` mints a token, prefer the env-var form —
-  `TEAMSHARE_URL=... TEAMSHARE_TOKEN=... teamshare doctor` — over pasting
-  that real token as a positional argument.
+  `invite`/`create-team`/`rotate-team` mints a token, prefer the env-var
+  form — `TEAMSHARE_URL=... TEAMSHARE_TOKEN=... teamshare doctor` — over
+  pasting that real token as a positional argument.
 
 ## The Elastic IP (attached)
 
