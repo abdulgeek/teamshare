@@ -1526,7 +1526,7 @@ describe('mcp surface', () => {
     await expect(client.connect(transport)).rejects.toThrow();
   });
 
-  it('returns the same digest through the fast door and the unread tool', async () => {
+  it('surfaces the same shares through the fast door and the unread tool', async () => {
     const adnan = await connect('adnan@team.com', 'Adnan');
     await adnan.callTool({ name: 'share', arguments: { what: 'parity check', priority: 'fyi' } });
     await adnan.close();
@@ -1539,14 +1539,34 @@ describe('mcp surface', () => {
       },
     });
     const fastDoor = await res.json();
+    expect(fastDoor.total).toBe(1);
 
     const priya = await connect('priya@team.com', 'Priya');
-    const viaTool = JSON.parse(textOf(await priya.callTool({
-      name: 'unread', arguments: { format: 'json' },
-    })));
+    const viaTool = textOf(await priya.callTool({ name: 'unread', arguments: {} }));
     await priya.close();
 
-    expect(viaTool).toEqual(fastDoor);
+    // Both doors surface the same shares...
+    for (const share of fastDoor.shares) {
+      expect(viaTool).toContain(share.id);
+      expect(viaTool).toContain(share.what);
+      expect(viaTool).toContain(share.sender_name);
+    }
+    // ...but the MCP surface always wraps teammate text as untrusted data.
+    expect(viaTool).toContain('BEGIN UNTRUSTED');
+  });
+
+  it('never emits unwrapped share text, even if a caller passes a stray format argument', async () => {
+    const adnan = await connect('adnan@team.com', 'Adnan');
+    await adnan.callTool({ name: 'share', arguments: { what: 'still wrapped', priority: 'fyi' } });
+    await adnan.close();
+
+    const priya = await connect('priya@team.com', 'Priya');
+    const out = textOf(await priya.callTool({ name: 'unread', arguments: { format: 'json' } }));
+    await priya.close();
+
+    expect(out).toContain('BEGIN UNTRUSTED');
+    expect(out).toContain('still wrapped');
+    expect(() => JSON.parse(out)).toThrow();
   });
 });
 ```
@@ -1648,13 +1668,14 @@ export function buildMcpServer(ctx: {
     {
       title: 'Unread team shares',
       description: 'Team shares this user has not viewed or dismissed.',
-      inputSchema: {
-        format: z.enum(['text', 'json']).optional().describe('json returns the raw digest.'),
-      },
+      // No parameters. The MCP surface ALWAYS wraps teammate text as untrusted
+      // data; raw JSON is available only on the GET /unread fast door, which
+      // never feeds text into an agent's instruction context.
+      inputSchema: {},
     },
-    async ({ format }) => {
+    async () => {
       const digest = getUnread(db, identity.email, now(), expiryDays);
-      return ok(format === 'json' ? JSON.stringify(digest) : renderDigest(digest));
+      return ok(renderDigest(digest));
     },
   );
 
