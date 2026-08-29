@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, openSync, closeSync, unlinkSync, writeSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { createApp } from './app.js';
 import { getOrCreateToken, openDb, removeMember, rotateToken } from './db.js';
 
@@ -150,6 +151,9 @@ export async function main(argv: string[]): Promise<void> {
 }
 
 // Run only when invoked as a program, so tests can import this module freely.
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL (not string concatenation) is required: import.meta.url
+// percent-encodes characters like spaces, so a naive `file://${argv[1]}`
+// comparison silently fails on any path containing one.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   void main(process.argv.slice(2));
 }
