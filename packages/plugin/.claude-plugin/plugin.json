@@ -2,8 +2,15 @@
   "name": "teamshare",
   "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start.",
   "version": "0.1.0",
-  "author": { "name": "teamshare" },
-  "keywords": ["team", "context", "memory", "collaboration"],
+  "author": {
+    "name": "teamshare"
+  },
+  "keywords": [
+    "team",
+    "context",
+    "memory",
+    "collaboration"
+  ],
   "userConfig": {
     "TEAMSHARE_URL": {
       "type": "string",
@@ -12,8 +19,8 @@
     },
     "TEAMSHARE_TOKEN": {
       "type": "string",
-      "title": "Team token",
-      "description": "The team token for your teamshare server. The person who ran `teamshare serve` has it.",
+      "title": "Your personal token",
+      "description": "The personal token your team lead sent you (it starts with tsm_). It identifies you specifically, so keep it private: anyone holding it can publish shares and record read receipts as you. If you don't have one, ask your lead to run: teamshare invite <your-email>",
       "sensitive": true
     }
   }
