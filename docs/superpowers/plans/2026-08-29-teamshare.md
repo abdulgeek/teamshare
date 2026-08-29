@@ -142,6 +142,7 @@ dist/
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "pretest": "tsc -p tsconfig.json",
     "test": "vitest run"
   },
   "dependencies": {
@@ -1896,6 +1897,7 @@ Expected: FAIL — cannot resolve `./cli.js`.
 import { existsSync, mkdirSync, openSync, closeSync, unlinkSync, writeSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { createApp } from './app.js';
 import { getOrCreateToken, openDb, removeMember, rotateToken } from './db.js';
 
@@ -1945,12 +1947,18 @@ export function acquireLock(dbPath: string): () => void {
 
   if (existsSync(lockPath)) {
     const pid = Number(readFileSync(lockPath, 'utf8').trim());
+    // pid 0 targets our own process group and never throws, so an empty or
+    // truncated lock file must be treated as stale rather than "alive" —
+    // otherwise a crashed server blocks every restart forever.
+    const plausible = Number.isInteger(pid) && pid > 0;
     let alive = false;
-    try {
-      process.kill(pid, 0);
-      alive = true;
-    } catch {
-      alive = false;
+    if (plausible) {
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
     }
     if (alive) {
       throw new Error(`a teamshare server is already running for ${dbPath} (pid ${pid})`);
@@ -2044,7 +2052,11 @@ export async function main(argv: string[]): Promise<void> {
 }
 
 // Run only when invoked as a program, so tests can import this module freely.
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL (not string concatenation) is required: import.meta.url
+// percent-encodes characters like spaces, so a naive `file://${argv[1]}`
+// comparison silently fails on any path containing one — the CLI would exit 0
+// doing nothing.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   void main(process.argv.slice(2));
 }
 ```
