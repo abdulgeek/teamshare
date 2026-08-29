@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "teamshare": {
+      "type": "http",
+      "url": "${TEAMSHARE_URL:-http://localhost:8787}/mcp",
+      "headersHelper": "${CLAUDE_PLUGIN_ROOT}/headers.sh"
+    }
+  }
+}
