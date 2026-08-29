@@ -14,6 +14,16 @@ export type AuthResult =
 // placeholder must be rejected rather than stored as a member.
 const PLACEHOLDER = /\$\{/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_NAME = 100;
+
+// Control characters (newlines included) would let a name forge a fence line.
+function hasControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
+}
 
 function headerValue(req: Request, name: string): string {
   const v = req.headers[name.toLowerCase()];
@@ -29,7 +39,15 @@ export function authenticate(db: Db, req: Request): AuthResult {
 
   const email = headerValue(req, 'x-teamshare-email');
   const name = headerValue(req, 'x-teamshare-name');
-  if (!email || !name || PLACEHOLDER.test(email) || PLACEHOLDER.test(name) || !EMAIL.test(email)) {
+  if (
+    !email ||
+    !name ||
+    PLACEHOLDER.test(email) ||
+    PLACEHOLDER.test(name) ||
+    !EMAIL.test(email) ||
+    name.length > MAX_NAME ||
+    hasControlChar(name)
+  ) {
     return {
       ok: false,
       status: 400,
