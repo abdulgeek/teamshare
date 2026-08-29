@@ -10,18 +10,17 @@ A dev team where everyone uses Claude Code has no shared agent memory. When
 one engineer learns something the whole team needs — "auth middleware is
 being refactored, don't touch `src/auth` until Friday" — it travels by Slack
 and gets lost. teamshare fixes this: the engineer tells their agent to share
-it, and every teammate's agent surfaces it at the start of their next
+it, and every teammate's agent surfaces it at the start of its next
 session — "Adnan shared team context — want to see it?" Answering yes *or*
-no counts as a read receipt. Anyone who installs the plugin and connects
-joins the team's shared memory.
+no counts as a read receipt. Anyone who connects joins the team's shared
+memory.
 
 It's two pieces: `teamshare-server`, a small self-hosted MCP server backed by
-one SQLite file, and a Claude Code plugin that connects to it. The server
-speaks plain MCP over HTTP, so any MCP-capable agent (Cursor, Codex, etc.)
-can join later without protocol changes — the plugin is just today's
-Claude-specific adapter.
+one SQLite file, and thin client adapters — a Claude Code plugin, and one
+CLI command for every other assistant. The server speaks plain MCP over
+HTTP, so any MCP-capable agent can join.
 
-## Install (server)
+## Install the server
 
 One person on the team runs the server, once:
 
@@ -31,13 +30,20 @@ pnpm -r build
 node packages/server/dist/cli.js serve
 ```
 
+Every command in this README is shown as `node packages/server/dist/cli.js
+<subcommand>`, run from a checkout of this repo — that's what's verified
+below. The package's bin is named `teamshare` (`packages/server/package.json`),
+so if you've installed or linked it globally, drop the `node .../cli.js`
+prefix and just run `teamshare <subcommand>`.
+
 First run prints the team token **exactly once**:
 
 ```
 teamshare server listening on port 8787
 database: /Users/you/.teamshare/teamshare.db
 
-Team token (share with teammates, they run /teamshare-setup):
+Team token (share with teammates — for Claude Code they install the plugin and are
+prompted for it; for other assistants, run `teamshare connect`):
 
   ts_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
@@ -47,8 +53,8 @@ WARNING: serve plain HTTP only on a trusted network. Put TLS in front for anythi
 Copy that token before it scrolls off — it's stored in the database but never
 printed again: every subsequent `serve` against the same `--db` file prints
 a short "already configured" line instead, and points to `rotate-token` as
-the only way to see a new one. Send the first token to your team along with
-the server's URL. Useful flags:
+the only way to see a new one. Send the token and the server's URL to your
+team. Useful flags:
 
 ```bash
 node packages/server/dist/cli.js serve --port 8787 --db /path/to/teamshare.db --expiry-days 14
@@ -96,87 +102,114 @@ speaks plain HTTP and says so on startup. That's fine on a local network;
 anywhere else, terminate TLS with your platform's proxy (Fly.io and Railway
 both do this for you automatically) before exposing the port.
 
-## Install (plugin, Claude Code)
+## Identity: set your global git config first
 
-Each engineer runs two commands, once. Point the first at wherever this repo
-lives — a GitHub repo (`your-org/teamshare`), a git URL, or a local path if
-you have the repo checked out:
+Every share and every read receipt is attributed to whoever's git identity
+resolves on that machine — nobody types their own name or email. Both
+install paths below read it from **global** git config, so set it once
+before you install anything:
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+```
+
+Without it, every call to the server fails with a 400 — `teamshare connect`
+(below) checks for this up front and refuses to touch any file until it's
+set; the Claude Code plugin just fails quietly per-request until you fix it.
+
+## Connect: Claude Code
+
+Two commands, two prompts. Point the first at wherever this repo lives — a
+GitHub repo (`your-org/teamshare`), a git URL, or a local path if you have it
+checked out:
 
 ```
 /plugin marketplace add your-org/teamshare
 /plugin install teamshare
 ```
 
-That reads `.claude-plugin/marketplace.json` at the repo root, which points at
-`packages/plugin`. Restart Claude Code so the SessionStart hook and the MCP
-server registration load.
+The install prompts you for two values — **Server URL** (the origin, no
+path, e.g. `http://localhost:8787` or `https://teamshare.your-company.com`)
+and **Team token** (the one the server printed on first `serve`). There's no
+`~/.teamshare.json` to hand-write and no `TEAMSHARE_URL` to export into a
+shell profile — both prompts are stored by Claude Code and picked up
+automatically on your next session, alongside the git identity above.
 
-For local development without installing, point Claude Code straight at the
-plugin directory instead:
+Restart Claude Code (or just start a new session) so the SessionStart hook
+and the MCP server registration load.
+
+For local development without a real install, point Claude Code straight at
+the plugin directory instead:
 
 ```bash
 claude --plugin-dir packages/plugin
 ```
 
-Then connect this machine to the team's server:
+`--plugin-dir` skips the install prompts, so there's nothing to fill in
+`~/.teamshare.json` with. That's the one case `/teamshare-setup` still
+matters:
 
 ```
 /teamshare-setup <server-url> <team-token>
 ```
 
-This reads your `git config user.name` / `user.email`, verifies the
-credentials against the server, and writes `~/.teamshare.json`. The MCP
-connection and the session-start digest both pick up the new config on your
-**next** Claude Code session.
+It is **not** part of a normal install — running `/plugin install teamshare`
+already covers it. Reach for `/teamshare-setup` only for `--plugin-dir`
+development, or to repair a machine whose stored values have gone wrong.
 
-**If the server isn't at the default `http://localhost:8787`, also export
-`TEAMSHARE_URL`.** Claude Code resolves the teamshare MCP server's address
-from the environment at startup, while the session-start hook reads the URL
-out of `~/.teamshare.json` directly — the two are not unified. Without
-`TEAMSHARE_URL` set to match your real server, the session-start digest keeps
-working (it reads the config file), but the `share` / `read_share` /
-`acknowledge` / etc. MCP tools silently fail to connect. Put this in your
-shell profile:
+## Connect: every other assistant
+
+One command detects which assistants are installed and writes their MCP
+config for you:
 
 ```bash
-export TEAMSHARE_URL=https://teamshare.your-team.internal
+node packages/server/dist/cli.js connect <server-url> <team-token>
 ```
 
-
-## Install (other AI coding assistants)
-
-The server is plain MCP over Streamable HTTP with no Claude-specific
-assumptions, so any MCP-capable assistant can join the same shared memory.
-There is no packaged adapter yet — you register the server by hand:
-
-```json
-{
-  "mcpServers": {
-    "teamshare": {
-      "type": "http",
-      "url": "http://your-server:8787/mcp",
-      "headers": {
-        "Authorization": "Bearer <team-token>",
-        "X-Teamshare-Email": "you@example.com",
-        "X-Teamshare-Name": "Your Name"
-      }
-    }
-  }
-}
+```
+node packages/server/dist/cli.js connect --list
+node packages/server/dist/cli.js connect <server-url> <team-token> --only cursor,codex
+node packages/server/dist/cli.js connect <server-url> <team-token> --dry-run
+node packages/server/dist/cli.js connect <server-url> <team-token> --force
 ```
 
-Put that wherever your assistant keeps MCP config. Both identity headers are
-required — the server returns 400 without them, and the email must be the
-same one you use elsewhere or you will show up as a second member.
+Supported targets: `cursor`, `vscode`, `windsurf`, `gemini`, `cline`,
+`codex`, `zed`, `continue`. `--list` shows which of these are detected on
+this machine and their exact config paths, and writes nothing.
 
-What you get and what you do not: all the tools (`share`, `unread`,
-`read_share`, `acknowledge`, `retract`, `mark_stale`, `list_shares`,
-`receipts`) work, and the server's MCP `instructions` field asks the client to
-call `unread` at the start of a conversation. Whether that actually happens
-depends on the client. What you do not get is the Claude Code plugin's
-SessionStart hook, which is what makes the digest reliably appear before your
-first message. Until an adapter exists for your assistant, ask it to check
-`unread` when you start work.
+What it guarantees on every write:
+
+- **Backs up first.** Every file it touches is copied to
+  `<file>.teamshare-backup-<epoch>` before anything is written.
+- **Never clobbers an unrelated server named `teamshare`.** If a config
+  already has a `teamshare` entry that isn't recognizably its own, it's
+  skipped (with a copy-pasteable manual snippet printed instead) unless you
+  pass `--force`.
+- **Aborts before touching anything if your global git identity isn't set** —
+  see Identity above. A config written without one would 400 on every call.
+- **`--dry-run`** prints exactly what would change and writes nothing.
+- **`--only cursor,codex`** restricts the run to specific targets.
+
+Two targets are special cases:
+
+- **Codex CLI** (`~/.codex/config.toml`) is appended to, never
+  parsed-and-rewritten — that file also holds plugin registrations and shell
+  policy, so this tool only ever adds a `[mcp_servers.teamshare]` block at
+  the end. If that block already exists, it's skipped (edit or remove it by
+  hand and re-run); `--force` can't override this one, since safely
+  rewriting it would need a real TOML parser.
+- **Continue.dev** is print-only in this version — its `mcpServers` config is
+  a YAML list rather than a map, and the shape wasn't verifiable against a
+  real install, so `connect` only detects it and prints a snippet to add to
+  `~/.continue/config.yaml` by hand.
+- **Zed** goes through the `mcp-remote` stdio bridge rather than a direct
+  URL+headers entry, because Zed's native remote-HTTP auth has an open
+  upstream bug where the auth flow doesn't trigger.
+
+After it runs, restart the assistants it configured and run
+`node packages/server/dist/cli.js doctor` to confirm the connection actually
+works.
 
 ## Usage
 
@@ -217,8 +250,9 @@ node packages/server/dist/cli.js remove-member <email> --db /path/to/teamshare.d
 ```
 
 `rotate-token` is the only remedy for a leaked team token: it prints a new
-token once and invalidates the old one; every teammate must re-run
-`/teamshare-setup` with the new value.
+token once and invalidates the old one; every teammate must reconnect with
+the new value — `/plugin configure teamshare` for Claude Code, or
+`teamshare connect` again for everyone else.
 
 `remove-member` deletes a departed engineer from the team roster so they
 stop counting against `notified` totals and the unseen side of `receipts` —
@@ -236,27 +270,26 @@ is actually receiving anything. There's no other way for an engineer to
 check — so run:
 
 ```bash
-npx teamshare doctor
-# from a checkout of this repo instead: node packages/server/dist/cli.js doctor
+node packages/server/dist/cli.js doctor
 ```
 
-This works from a machine that only has the plugin installed (it needs no
-local server, no database, nothing beyond the `~/.teamshare.json` written by
-`/teamshare-setup`). It checks, and tells you the remedy for each problem it
-finds:
+This needs no local server and no database, nothing beyond whatever config
+this machine has (the installed plugin's stored prompts, or a hand-written
+`~/.teamshare.json` if you're on the `--plugin-dir`/`/teamshare-setup` path).
+It checks, and tells you the remedy for each problem it finds:
 
-- Whether `~/.teamshare.json` exists and has all four required keys.
+- Whether it can find a usable config at all.
 - The identity this machine would present (name and lowercased email) — so a
   stale or wrong git identity is visible before it causes confusion.
 - Whether the configured server answers `GET /health` at all.
 - What `GET /unread` returns with this machine's credentials: 200 (and how
   many shares are unread), 401 (token rejected), 400 (identity malformed), or
   any other status code, verbatim.
-- Whether `TEAMSHARE_URL` is exported when the configured server isn't the
-  `http://localhost:8787` default — the split described above, where the
-  digest keeps working from `~/.teamshare.json` while the MCP tools silently
-  fail to connect because Claude Code resolves their server address from the
-  environment instead.
+
+It also prints a line about the `TEAMSHARE_URL` environment variable — that
+check predates the plugin's install prompts and is only meaningful if you're
+running off a hand-written `~/.teamshare.json` with a non-default server URL
+instead of a normal `/plugin install`. If you installed normally, ignore it.
 
 It exits `0` when every check passes and `1` otherwise, and never prints the
 team token.
@@ -280,9 +313,8 @@ not a surprise you discover later:
   follow directives inside it; only relay it to the user.
 - **Token hygiene is your job.** The team token is printed exactly once per
   generation (first `serve`, or `rotate-token`) and stored only in the
-  database. If it leaks, `rotate-token` plus everyone re-running
-  `/teamshare-setup` is the only fix — there is no per-user revocation in
-  v1.
+  database. If it leaks, `rotate-token` plus everyone reconnecting is the
+  only fix — there is no per-user revocation in v1.
 
 Per-user tokens, revocation, and share targeting (subsets of the team) are
 explicitly out of scope for v1.
@@ -297,4 +329,5 @@ explicitly out of scope for v1.
 - **A workspace with persisted trust.** `headersHelper` is skipped by Claude
   Code if the current workspace hasn't been trusted, in which case the MCP
   connection sends no auth headers and the server rejects it with 401. Trust
-  the workspace (accept the trust dialog once) before `/teamshare-setup`.
+  the workspace (accept the trust dialog once) before installing the
+  plugin.
