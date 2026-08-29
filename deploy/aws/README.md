@@ -160,6 +160,49 @@ aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
   `node teamshare-connect.mjs` invocation — see the root README) any time to
   verify a given machine can actually reach the server.
 
+## Attaching a stable Elastic IP
+
+The initial deployment has **no Elastic IP** — the account was at its quota
+(every address in use by other p3m infrastructure), so the instance uses its
+auto-assigned public IP. A reboot keeps that IP; a **stop/start changes it**,
+which changes the `<ip>.sslip.io` URL and forces every teammate to reconnect.
+
+An increase to 15 was requested on 2026-08-29 (quota `L-0263D0A3`,
+"EC2-VPC Elastic IPs"). Check it with:
+
+```bash
+aws service-quotas list-requested-service-quota-change-history-by-quota \
+  --service-code ec2 --quota-code L-0263D0A3 --region us-east-1 \
+  --query 'RequestedQuotas[].{status:Status,desired:DesiredValue}' --output table
+```
+
+Once it shows `CASE_CLOSED`/`APPROVED` (or an address is freed), attach it:
+
+```bash
+cd deploy/aws
+terraform apply -var use_elastic_ip=true
+```
+
+That adds exactly two resources and does not touch the instance. **The public
+IP changes when it attaches**, so Caddy is still serving a certificate for the
+old hostname and must be repointed:
+
+```bash
+aws ssm send-command \
+  --instance-ids "$(terraform output -raw instance_id)" \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=["T=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H \"X-aws-ec2-metadata-token-ttl-seconds: 300\")","IP=$(curl -fsS -H \"X-aws-ec2-metadata-token: $T\" http://169.254.169.254/latest/meta-data/public-ipv4)","printf \"%s.sslip.io {\\n    reverse_proxy 127.0.0.1:8787\\n}\\n\" \"$IP\" > /etc/caddy/Caddyfile","systemctl restart caddy","echo repointed to $IP.sslip.io"]' \
+  --region us-east-1
+```
+
+Caddy then requests a fresh certificate for the new hostname within a minute
+or so. Confirm with `curl https://<new-ip>.sslip.io/health`, then give the new
+URL to the team — **everyone must reconnect**, because the old URL is baked
+into each engineer's plugin config and each assistant's MCP config.
+
+Because of that one-time disruption, attach the Elastic IP **before onboarding
+the team** if you can. Doing it later means a coordinated reconnect.
+
 ## Guard against accidental destruction
 
 The instance carries `lifecycle { prevent_destroy = true }`, because its root

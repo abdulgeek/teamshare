@@ -90,3 +90,17 @@ variable "availability_zone" {
   type        = string
   default     = "us-east-1a"
 }
+
+variable "use_elastic_ip" {
+  description = <<-EOT
+    Attach a stable Elastic IP to the instance.
+
+    Left false for the initial deployment because the account was at its EIP
+    quota (see eip.tf). Flip to true once a quota increase lands or an address
+    is freed — then follow README.md's post-attach steps, because the public
+    IP (and therefore the sslip.io URL and its certificate) changes when it is
+    attached.
+  EOT
+  type        = bool
+  default     = false
+}
