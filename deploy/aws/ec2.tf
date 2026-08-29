@@ -40,7 +40,6 @@ resource "aws_instance" "teamshare" {
     # guaranteed identical to deploy/aws/files/teamshare-backup.sh, the one
     # source of truth also shipped standalone via SSM (see that file and
     # deploy/aws/README.md).
-    backup_script_b64 = filebase64("${path.module}/files/teamshare-backup.sh")
   })
 
   # This is a single stateful instance holding the only copy of the database,

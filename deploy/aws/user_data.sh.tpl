@@ -67,29 +67,35 @@ id -u caddy >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/n
 mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
 chown -R caddy:caddy /var/lib/caddy /var/log/caddy
 
-# The TLS hostname is derived from this instance's own public IPv4, discovered
-# at boot via IMDSv2. It is done here rather than templated in by Terraform
-# because this account is at its Elastic IP quota (all addresses are in use by
-# other p3m infrastructure), so there is no address known ahead of time.
-#
-# Consequence worth knowing: the public IP — and therefore this URL — changes
-# if the instance is ever STOPPED and started again (a reboot keeps it). If
-# that happens, teammates must reconnect against the new URL. See the README.
-IMDS_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 300" || true)
-PUBLIC_IP=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
-  "http://169.254.169.254/latest/meta-data/public-ipv4" || true)
+# The TLS hostname is <public-ip>.sslip.io, derived from this instance's own
+# address. That derivation lives in ONE place — files/teamshare-hostname.sh —
+# which also runs on every subsequent boot via teamshare-hostname.service, so
+# a stop/start (which assigns a new public IP) cannot leave Caddy serving a
+# certificate for a hostname that no longer points here. See that script's
+# header for the full reasoning.
+# Installed straight from the clone at /opt/teamshare — the repo IS the single
+# source of truth, so there is nothing to embed, base64, or keep in sync, and
+# user_data stays well under EC2's 16 KB limit.
+install -m 0750 /opt/teamshare/deploy/aws/files/teamshare-hostname.sh /usr/local/bin/teamshare-hostname.sh
 
-if [ -z "$PUBLIC_IP" ]; then
-  echo "FATAL: could not determine this instance's public IPv4 from IMDS;" >&2
-  echo "Caddy has no hostname to request a certificate for." >&2
-  exit 1
-fi
+cat > /etc/systemd/system/teamshare-hostname.service <<'UNIT'
+[Unit]
+Description=Point Caddy at this instance's current public IP
+After=network-online.target
+Wants=network-online.target
+Before=caddy.service
 
-TEAMSHARE_HOSTNAME="$${PUBLIC_IP}.sslip.io"
-echo "teamshare hostname: $TEAMSHARE_HOSTNAME" > /etc/teamshare-hostname
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/teamshare-hostname.sh
 
-cat > /etc/caddy/Caddyfile <<CADDYFILE
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Writes the initial Caddyfile too, so there is no separate first-boot path.
+/usr/local/bin/teamshare-hostname.sh
 $${TEAMSHARE_HOSTNAME} {
     reverse_proxy 127.0.0.1:8787
 }
@@ -156,12 +162,13 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable --now teamshare.service
+systemctl enable teamshare-hostname.service
 systemctl enable --now caddy.service
 
 # ---------------------------------------------------------------------------
 # 8. Automated S3 backups. The backup logic lives in exactly one place —
-#    deploy/aws/files/teamshare-backup.sh — and is embedded here verbatim via
-#    a base64-encoded Terraform variable (ec2.tf), never through this
+#    deploy/aws/files/teamshare-backup.sh — and is installed straight from the
+#    clone at /opt/teamshare rather than embedded, so the repo is the single
 #    template's own $${...} interpolation. That means the copy written to
 #    /usr/local/bin below is byte-for-byte the same script an operator can
 #    ship straight to this instance over SSM without touching user_data at
@@ -169,9 +176,7 @@ systemctl enable --now caddy.service
 #    procedure). The script installs its own runtime dependency (sqlite3) on
 #    first run, so nothing else needs to happen here.
 # ---------------------------------------------------------------------------
-echo '${backup_script_b64}' | base64 -d > /usr/local/bin/teamshare-backup.sh
-chmod 0750 /usr/local/bin/teamshare-backup.sh
-chown root:root /usr/local/bin/teamshare-backup.sh
+install -o root -g root -m 0750 /opt/teamshare/deploy/aws/files/teamshare-backup.sh /usr/local/bin/teamshare-backup.sh
 
 cat > /etc/systemd/system/teamshare-backup.service <<'UNIT'
 [Unit]
