@@ -39,6 +39,19 @@ resource "aws_instance" "teamshare" {
   # so a user_data change replacing the instance is a deliberate, visible-in-
   # plan event, not a silent in-place mutation of a running box.
   user_data_replace_on_change = true
+
+  # ...and because that replacement DESTROYS the team's entire shared memory
+  # — every share, receipt, member and the team token live in the SQLite file
+  # on this instance's root volume — Terraform is not allowed to do it on its
+  # own. Editing user_data.sh.tpl and running apply will now fail loudly
+  # instead of quietly wiping the database.
+  #
+  # To intentionally rebuild the box: back up the database first (see
+  # README.md), remove this lifecycle block, apply, then restore. To tear the
+  # whole stack down, remove it and run terraform destroy.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Caddy requests a Let's Encrypt certificate for <public-ip>.sslip.io on its

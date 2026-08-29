@@ -159,6 +159,24 @@ aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
   `node teamshare-connect.mjs` invocation — see the root README) any time to
   verify a given machine can actually reach the server.
 
+## Guard against accidental destruction
+
+The instance carries `lifecycle { prevent_destroy = true }`, because its root
+volume holds the team's entire shared memory — every share, receipt, member,
+and the team token. Combined with `user_data_replace_on_change`, editing
+`user_data.sh.tpl` and running `terraform apply` would otherwise replace the
+box and silently wipe all of it. With the guard, that apply fails loudly
+instead.
+
+To intentionally rebuild or tear down: back up the database (below), delete
+the `lifecycle` block in `ec2.tf`, then apply or destroy.
+
+Note also that this deployment uses the instance's auto-assigned public IP
+rather than an Elastic IP (the account is at its EIP quota — every address is
+in use by other p3m infrastructure). A **reboot keeps the IP**, but a
+**stop/start assigns a new one**, which changes the `<ip>.sslip.io` URL and
+means teammates must reconnect. Avoid stopping the instance; reboot instead.
+
 ## Backing up the database
 
 **The SQLite file at `/var/lib/teamshare/teamshare.db` is the entire team's
