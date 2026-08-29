@@ -160,58 +160,45 @@ aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
   `node teamshare-connect.mjs` invocation — see the root README) any time to
   verify a given machine can actually reach the server.
 
-## Attaching a stable Elastic IP
+## The Elastic IP (attached)
 
-**Verified 2026-08-29:** the instance was deliberately stopped and started to
-test this. Its public IP changed (44.223.81.180 → 100.54.34.193),
-`teamshare-hostname.service` regenerated the Caddyfile on boot, Caddy issued a
-fresh Let's Encrypt certificate for the new hostname, and the server was back
-on `200` within 25 seconds with the database intact — no intervention. Before
-that unit existed, this same stop/start would have left Caddy serving a
-certificate for a hostname that no longer resolved here: a silent, total
-outage. Clients still hold the old URL and must reconnect, which is the half
-an Elastic IP fixes.
+The instance has a **stable Elastic IP: `54.90.22.249`**, so its URL —
+`https://54.90.22.249.sslip.io` — does not change. `use_elastic_ip` defaults
+to `true`; setting it back to `false` releases the address and reintroduces
+the fragility below.
 
-The initial deployment has **no Elastic IP** — the account was at its quota
-(every address in use by other p3m infrastructure), so the instance uses its
-auto-assigned public IP. A reboot keeps that IP; a **stop/start changes it**,
-which changes the `<ip>.sslip.io` URL and forces every teammate to reconnect.
+**History, and why the code still guards against this:** the first deployment
+had no Elastic IP because the account was at its quota (all addresses held by
+p3m NAT Gateways and ALBs). An increase to 15 was requested and approved on
+2026-08-29, and the address was attached.
 
-An increase to 15 was requested on 2026-08-29 (quota `L-0263D0A3`,
-"EC2-VPC Elastic IPs"). Check it with:
+Without an Elastic IP, a **stop/start** assigns a new public IP. That is worse
+than it sounds: `user_data` runs `scripts-per-once`, so the Caddyfile's
+hardcoded hostname would never be rewritten, and Caddy would serve a
+certificate for a name that no longer resolved here — a silent, total outage.
+`files/teamshare-hostname.sh` runs on every boot to prevent that, regenerating
+the hostname from instance metadata before Caddy starts.
 
-```bash
-aws service-quotas list-requested-service-quota-change-history-by-quota \
-  --service-code ec2 --quota-code L-0263D0A3 --region us-east-1 \
-  --query 'RequestedQuotas[].{status:Status,desired:DesiredValue}' --output table
-```
+**Both halves were tested for real (2026-08-29):**
 
-Once it shows `CASE_CLOSED`/`APPROVED` (or an address is freed), attach it:
+- *Before* the Elastic IP: the instance was stopped and started, the IP changed
+  (`44.223.81.180` → `100.54.34.193`), the boot unit rewrote the Caddyfile,
+  Caddy issued a fresh certificate, and the server was healthy again in 25
+  seconds unattended — where previously it would simply have died.
+- *After* the Elastic IP: stopped and started again, and the IP **stayed**
+  `54.90.22.249`. Service back in 20 seconds, all three units active, database
+  intact. The URL now survives a stop/start, so teammates never have to
+  reconnect.
 
-```bash
-cd deploy/aws
-terraform apply -var use_elastic_ip=true
-```
-
-That adds exactly two resources and does not touch the instance. **The public
-IP changes when it attaches**, so Caddy is still serving a certificate for the
-old hostname and must be repointed:
+If the address is ever detached or replaced, run the healer to repoint Caddy
+without waiting for a reboot:
 
 ```bash
-aws ssm send-command \
-  --instance-ids "$(terraform output -raw instance_id)" \
+aws ssm send-command --instance-ids "$(terraform output -raw instance_id)" \
   --document-name AWS-RunShellScript \
-  --parameters 'commands=["T=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H \"X-aws-ec2-metadata-token-ttl-seconds: 300\")","IP=$(curl -fsS -H \"X-aws-ec2-metadata-token: $T\" http://169.254.169.254/latest/meta-data/public-ipv4)","printf \"%s.sslip.io {\\n    reverse_proxy 127.0.0.1:8787\\n}\\n\" \"$IP\" > /etc/caddy/Caddyfile","systemctl restart caddy","echo repointed to $IP.sslip.io"]' \
+  --parameters 'commands=["/usr/local/bin/teamshare-hostname.sh"]' \
   --region us-east-1
 ```
-
-Caddy then requests a fresh certificate for the new hostname within a minute
-or so. Confirm with `curl https://<new-ip>.sslip.io/health`, then give the new
-URL to the team — **everyone must reconnect**, because the old URL is baked
-into each engineer's plugin config and each assistant's MCP config.
-
-Because of that one-time disruption, attach the Elastic IP **before onboarding
-the team** if you can. Doing it later means a coordinated reconnect.
 
 ## Guard against accidental destruction
 

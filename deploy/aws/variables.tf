@@ -95,12 +95,16 @@ variable "use_elastic_ip" {
   description = <<-EOT
     Attach a stable Elastic IP to the instance.
 
-    Left false for the initial deployment because the account was at its EIP
-    quota (see eip.tf). Flip to true once a quota increase lands or an address
-    is freed — then follow README.md's post-attach steps, because the public
-    IP (and therefore the sslip.io URL and its certificate) changes when it is
-    attached.
+    Now TRUE by default. It was false for the very first deployment because
+    the account was at its EIP quota; an increase to 15 was approved on
+    2026-08-29 and the address is attached. Without it, a stop/start assigns a
+    new public IP, which changes the <ip>.sslip.io hostname and forces every
+    teammate to reconnect — the server heals itself (see
+    files/teamshare-hostname.sh) but clients cannot.
+
+    Setting this back to false would release the address and reintroduce that
+    fragility.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
