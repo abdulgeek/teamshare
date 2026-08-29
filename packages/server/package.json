@@ -5,8 +5,8 @@
   "bin": { "teamshare": "./dist/cli.js" },
   "engines": { "node": ">=20" },
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp src/teamshare-connect.mjs dist/teamshare-connect.mjs",
-    "pretest": "tsc -p tsconfig.json && cp src/teamshare-connect.mjs dist/teamshare-connect.mjs",
+    "build": "tsc -p tsconfig.json && cp src/teamshare-connect.mjs dist/teamshare-connect.mjs && cp src/teamshare-team.mjs dist/teamshare-team.mjs",
+    "pretest": "tsc -p tsconfig.json && cp src/teamshare-connect.mjs dist/teamshare-connect.mjs && cp src/teamshare-team.mjs dist/teamshare-team.mjs",
     "test": "vitest run"
   },
   "dependencies": {

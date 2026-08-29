@@ -18,6 +18,7 @@ import {
   formatConnectOutput,
   formatListOutput,
   normalizeServerUrl,
+  parseConnectArgv,
   type GitIdentity,
 } from './connect.js';
 
@@ -757,5 +758,44 @@ describe('platform-specific paths: VS Code and Cline are detected on Linux and W
     mkdirSync(join(home, 'Library', 'Application Support', 'Code'), { recursive: true });
     const detected = listTargets(home, 'linux').find((d) => d.id === 'vscode')!;
     expect(detected.installed).toBe(false);
+  });
+});
+
+// Pinned regression: teamshare-team.mjs (a separate file, packages/server/src)
+// adds `create-team`/`rotate-team` as its own two-subcommand argv contract.
+// This block exists so nobody ever "simplifies" by grafting a leading
+// subcommand onto *this* parser's positional `<url> <token>` form instead —
+// that would silently break every documented `node teamshare-connect.mjs
+// <server-url> <team-token>` invocation (README.md, the plugin's
+// `/teamshare-setup`, and this file's own USAGE text), since a real team
+// name or URL could easily collide with a word this parser started treating
+// specially.
+describe('parseConnectArgv: pinned <url> <token> positional contract (never a leading subcommand)', () => {
+  it('treats the first two bare arguments as url and token, in that order', () => {
+    const parsed = parseConnectArgv(['https://ts.example.com', 'ts_abc123']);
+    expect(parsed.url).toBe('https://ts.example.com');
+    expect(parsed.token).toBe('ts_abc123');
+  });
+
+  it('has no subcommand concept at all: a value that looks like one of teamshare-team.mjs\'s verbs is still just the url positional', () => {
+    for (const wouldBeSubcommand of ['create-team', 'rotate-team', 'create', 'rotate']) {
+      const parsed = parseConnectArgv([wouldBeSubcommand, 'ts_abc123']);
+      expect(parsed.url).toBe(wouldBeSubcommand);
+      expect(parsed.token).toBe('ts_abc123');
+      expect((parsed as any).cmd).toBeUndefined();
+    }
+  });
+
+  it('flags still parse after the two positionals, unaffected by their literal values', () => {
+    const parsed = parseConnectArgv(['create-team', 'rotate-team', '--only', 'cursor,codex', '--dry-run']);
+    expect(parsed.url).toBe('create-team');
+    expect(parsed.token).toBe('rotate-team');
+    expect(parsed.only).toEqual(['cursor', 'codex']);
+    expect(parsed.dryRun).toBe(true);
+  });
+
+  it('--list and --help still work exactly as before, independent of url/token', () => {
+    expect(parseConnectArgv(['--list'])).toMatchObject({ list: true, url: undefined, token: undefined });
+    expect(parseConnectArgv(['--help'])).toMatchObject({ help: true });
   });
 });

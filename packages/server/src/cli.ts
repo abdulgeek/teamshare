@@ -6,9 +6,12 @@ import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createApp } from './app.js';
 import {
+  createTeam,
   findTeamByName,
+  generateTeamToken,
   getOrCreateSignupSecret,
   getSignupSecret,
+  hashToken,
   listTeams,
   makeTeamScope,
   openDb,
@@ -16,6 +19,7 @@ import {
   rotateTeamToken,
   type Db,
 } from './db.js';
+import { validateTeamName } from './http.js';
 import {
   runConnect,
   listTargets,
@@ -25,9 +29,18 @@ import {
   normalizeServerUrl,
   type TargetId,
 } from './connect.js';
+import { formatJoinInstructions, formatTokenOnceWarning } from './team.js';
 
 export interface Args {
-  cmd: 'serve' | 'rotate-token' | 'remove-member' | 'doctor' | 'connect' | 'signup-secret' | 'help';
+  cmd:
+    | 'serve'
+    | 'rotate-token'
+    | 'remove-member'
+    | 'create-team'
+    | 'doctor'
+    | 'connect'
+    | 'signup-secret'
+    | 'help';
   port: number;
   host: string;
   dbPath: string;
@@ -54,6 +67,13 @@ export interface Args {
   connectShowToken?: boolean;
   doctorUrl?: string;
   doctorToken?: string;
+  // create-team only: the team name (positional, never a secret — unlike
+  // the signup secret, which this subcommand never even needs, since it
+  // operates on the local database directly). --url is optional and, when
+  // given, upgrades the "print the doctor line" fallback into a genuine
+  // live verification against that server.
+  teamName?: string;
+  createTeamUrl?: string;
 }
 
 const DEFAULT_DB = join(homedir(), '.teamshare', 'teamshare.db');
@@ -75,6 +95,7 @@ export function parseArgs(argv: string[]): Args {
       first === 'serve' ||
       first === 'rotate-token' ||
       first === 'remove-member' ||
+      first === 'create-team' ||
       first === 'doctor' ||
       first === 'connect' ||
       first === 'signup-secret' ||
@@ -84,6 +105,9 @@ export function parseArgs(argv: string[]): Args {
       rest.shift();
       if (args.cmd === 'remove-member' && rest[0] && !rest[0].startsWith('-')) {
         args.email = rest.shift();
+      }
+      if (args.cmd === 'create-team' && rest[0] && !rest[0].startsWith('-')) {
+        args.teamName = rest.shift();
       }
       if (args.cmd === 'connect') {
         if (rest[0] && !rest[0].startsWith('-')) args.connectUrl = rest.shift();
@@ -117,6 +141,7 @@ export function parseArgs(argv: string[]): Args {
     else if (flag === '--list') { args.connectList = true; }
     else if (flag === '--show-token') { args.connectShowToken = true; }
     else if (flag === '--team' && value) { args.team = value; i++; }
+    else if (flag === '--url' && value) { args.createTeamUrl = value; i++; }
     else if (flag === '--signup-secret' && value) { args.signupSecret = value; i++; }
     else if (flag === '--max-teams' && value) { args.maxTeams = Number(value); i++; }
     else if (flag === '--open-signup') { args.openSignup = true; }
@@ -172,16 +197,25 @@ Usage:
   teamshare signup-secret --show [--db <path>]
   teamshare rotate-token [--team <name>] [--db <path>]
   teamshare remove-member <email> [--team <name>] [--db <path>]
+  teamshare create-team "<name>" [--url <server-url>] [--db <path>]
   teamshare doctor [<server-url> <team-token>]
   teamshare connect <server-url> <team-token> [--only cursor,codex,...] [--dry-run] [--force] [--show-token]
   teamshare connect --list
 
-This server hosts multiple teams. A team is created by POSTing to /teams
-(gated by the instance signup secret) — see the design doc for the
-standalone/plugin surfaces that wrap that call; teamshare signup-secret
---show is the break-glass path when that secret is lost. --team <name> is
-required for rotate-token/remove-member whenever more than one team exists;
-it is optional (and inferred) when there is exactly one.
+This server hosts multiple teams. The normal way to create one is to POST to
+/teams (gated by the instance signup secret) — see
+node teamshare-team.mjs create-team <server-url> "<name>" (standalone, no
+install required) for that path. teamshare create-team above is the
+break-glass alternative for when the signup secret itself is lost: it
+operates on the local database directly (no secret needed — filesystem
+access to the database already implies that authority) and, when --url is
+given, verifies the new token against that live server the same way
+teamshare doctor does; without --url it prints the doctor command to run
+once you know the URL. teamshare signup-secret --show remains the
+break-glass path for recovering the secret itself, when the normal HTTP path
+is still preferred. --team <name> is required for rotate-token/remove-member
+whenever more than one team exists; it is optional (and inferred) when there
+is exactly one.
 
 The signup secret is read from --signup-secret or the TEAMSHARE_SIGNUP_SECRET
 environment variable, never a positional argument (so it never ends up in
@@ -722,6 +756,56 @@ export async function main(argv: string[]): Promise<void> {
         ? `Removed ${args.email} from "${resolved.name}"\n`
         : `No member ${args.email} in "${resolved.name}"\n`,
     );
+    return;
+  }
+
+  // §Surfaces: the break-glass path when the instance signup secret is
+  // lost. Unlike POST /teams, this needs no secret at all — filesystem
+  // access to the database is already the higher bar the secret exists to
+  // approximate over HTTP. It operates on the local database directly, the
+  // same "open, act, close" shape as rotate-token/remove-member above (no
+  // acquireLock: that lock is `serve`'s alone, and these break-glass
+  // commands are expected to run fine alongside it, same as the two above).
+  if (args.cmd === 'create-team') {
+    if (!args.teamName) {
+      process.stderr.write('create-team needs a <name>\n');
+      process.exitCode = 1;
+      return;
+    }
+    const nameCheck = validateTeamName(args.teamName);
+    if (!nameCheck.ok) {
+      process.stderr.write(nameCheck.error + '\n');
+      process.exitCode = 1;
+      return;
+    }
+    const db = openDb(args.dbPath);
+    const token = generateTeamToken();
+    const teamId = createTeam(db, nameCheck.value, hashToken(token), new Date().toISOString());
+    db.close();
+
+    const lines = [
+      `Created team "${nameCheck.value}" (${teamId})`,
+      '',
+      formatTokenOnceWarning(token),
+      '',
+    ];
+
+    // §Surfaces: every surface ends by verifying, or at minimum prints the
+    // literal `teamshare doctor <url> <token>` line — this CLI has no
+    // reliable way to know the running server's own URL (it only ever
+    // touched the database file), so a genuine live check only happens when
+    // the operator supplies one with --url; runDoctor is the exact same
+    // check `teamshare doctor` itself runs, reused rather than re-implemented.
+    if (args.createTeamUrl) {
+      const { output } = await runDoctor(args.createTeamUrl, token);
+      lines.push('Verifying the new token against the live server:', '', output.trimEnd(), '');
+    } else {
+      lines.push(`Verify it works once you know the server URL: teamshare doctor <url> ${token}`, '');
+    }
+
+    lines.push(formatJoinInstructions({ url: args.createTeamUrl ?? '<url>', token }));
+
+    process.stdout.write(lines.join('\n') + '\n');
     return;
   }
 

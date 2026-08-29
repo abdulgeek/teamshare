@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import Database from 'better-sqlite3';
 import { parseArgs, acquireLock, formatServeBanner, formatServeStartupBanner, runDoctor, main } from './cli.js';
 import {
-  openDb, hasToken, getOrCreateToken, createTeam, findTeamByName,
+  openDb, hasToken, getOrCreateToken, createTeam, findTeamByName, listTeams,
   getOrCreateSignupSecret, hashToken, makeTeamScope, upsertMember,
 } from './db.js';
 import { createApp } from './app.js';
@@ -67,6 +67,26 @@ describe('parseArgs', () => {
   it('parses serve --signup-secret, --open-signup, and --max-teams', () => {
     const a = parseArgs(['serve', '--signup-secret', 'mysecret', '--open-signup', '--max-teams', '10']);
     expect(a).toMatchObject({ cmd: 'serve', signupSecret: 'mysecret', openSignup: true, maxTeams: 10 });
+  });
+
+  it('parses create-team with a name', () => {
+    const a = parseArgs(['create-team', 'Rocket Squad']);
+    expect(a).toMatchObject({ cmd: 'create-team', teamName: 'Rocket Squad' });
+  });
+
+  it('parses create-team --url for the optional live-verify path', () => {
+    const a = parseArgs(['create-team', 'Rocket Squad', '--url', 'https://ts.example.com']);
+    expect(a).toMatchObject({
+      cmd: 'create-team',
+      teamName: 'Rocket Squad',
+      createTeamUrl: 'https://ts.example.com',
+    });
+  });
+
+  it('parses create-team with no name as having an undefined teamName (main() reports the error)', () => {
+    const a = parseArgs(['create-team']);
+    expect(a.cmd).toBe('create-team');
+    expect(a.teamName).toBeUndefined();
   });
 
   it('parses signup-secret --show', () => {
@@ -137,6 +157,20 @@ describe('help text', () => {
       process.stdout.write = original;
     }
     expect(chunks.join('')).toContain('doctor');
+  });
+
+  it('documents create-team as a subcommand (the break-glass path when the signup secret is lost)', async () => {
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['help']);
+    } finally {
+      process.stdout.write = original;
+    }
+    const out = chunks.join('');
+    expect(out).toContain('create-team');
   });
 
   it('documents connect as a subcommand', async () => {
@@ -597,6 +631,112 @@ describe('rotate-token on a migrated database genuinely invalidates the old toke
       await new Promise<void>((r) => server.close(() => r()));
     } finally {
       verifyDb.close();
+    }
+  });
+});
+
+// §Surfaces: the break-glass path when the instance signup secret is lost.
+// Unlike POST /teams, this never needs a secret — it operates on the local
+// database directly, the same "operator already has filesystem access"
+// authority rotate-token/remove-member rely on above.
+describe('create-team (break-glass CLI, local database only)', () => {
+  it('creates a team, prints the token exactly once with the password-manager warning, and the fallback doctor line when no --url is given', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['create-team', 'Rocket Squad', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+    }
+    const out = chunks.join('');
+    expect(out).toContain('Rocket Squad');
+    expect(out.toLowerCase()).toContain('shown once');
+    expect(out.toLowerCase()).toContain('password manager');
+    expect(out).toContain('teamshare doctor <url>');
+    expect(out).toContain('/plugin install teamshare');
+    expect(out).toContain('git config --global user.name');
+
+    const db = openDb(dbPath);
+    try {
+      expect(findTeamByName(db, 'Rocket Squad')).toBeTruthy();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('genuinely verifies against a live server when --url is given, reusing the exact doctor checks', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+
+    // A separate, already-running server this create-team run will verify
+    // its freshly minted token against — never the live production server.
+    const verifyDb = openDb(':memory:');
+    const app = createApp({ db: verifyDb, expiryDays: 14 });
+    const server = app.listen(0);
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const addr = server.address() as AddressInfo;
+
+    // create-team writes its team into dbPath, and separately verifies the
+    // freshly minted token against whatever --url points at — here, the
+    // standalone server above, never the live production one. The verify
+    // check is expected to report the token doesn't work against *that*
+    // server (it's a different database), which is fine: this test only
+    // needs to prove the live-verify code path genuinely ran the same
+    // checks `teamshare doctor` runs, not that they all pass.
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['create-team', 'Verified Squad', '--db', dbPath, '--url', `http://127.0.0.1:${addr.port}`]);
+    } finally {
+      process.stdout.write = original;
+      await new Promise<void>((r) => server.close(() => r()));
+      verifyDb.close();
+    }
+    const out = chunks.join('');
+    expect(out).toContain('Verifying the new token against the live server');
+    expect(out).toContain('[OK] server reachable');
+  });
+
+  it('errors without creating anything when no name is given', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['create-team', '--db', dbPath]);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(chunks.join('')).toContain('<name>');
+  });
+
+  it('rejects an invalid name (e.g. an unsubstituted placeholder) without creating a team', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['create-team', '${TEAM_NAME}', '--db', dbPath]);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(chunks.join('').toLowerCase()).toContain('placeholder');
+
+    const db = openDb(dbPath);
+    try {
+      expect(listTeams(db)).toEqual([]);
+    } finally {
+      db.close();
     }
   });
 });
