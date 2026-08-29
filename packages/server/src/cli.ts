@@ -6,7 +6,14 @@ import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createApp } from './app.js';
 import { getOrCreateToken, hasToken, openDb, removeMember, rotateToken } from './db.js';
-import { runConnect, listTargets, formatConnectOutput, formatListOutput, type TargetId } from './connect.js';
+import {
+  runConnect,
+  listTargets,
+  discoverConnectedTargets,
+  formatConnectOutput,
+  formatListOutput,
+  type TargetId,
+} from './connect.js';
 
 export interface Args {
   cmd: 'serve' | 'rotate-token' | 'remove-member' | 'doctor' | 'connect' | 'help';
@@ -20,6 +27,8 @@ export interface Args {
   connectDryRun?: boolean;
   connectForce?: boolean;
   connectList?: boolean;
+  doctorUrl?: string;
+  doctorToken?: string;
 }
 
 const DEFAULT_DB = join(homedir(), '.teamshare', 'teamshare.db');
@@ -46,6 +55,13 @@ export function parseArgs(argv: string[]): Args {
       if (args.cmd === 'connect') {
         if (rest[0] && !rest[0].startsWith('-')) args.connectUrl = rest.shift();
         if (rest[0] && !rest[0].startsWith('-')) args.connectToken = rest.shift();
+      }
+      if (args.cmd === 'doctor') {
+        // `teamshare doctor <server-url> <team-token>` always works, needing
+        // nothing installed — this is the highest-priority resolution
+        // source, ahead of ~/.teamshare.json and any assistant config.
+        if (rest[0] && !rest[0].startsWith('-')) args.doctorUrl = rest.shift();
+        if (rest[0] && !rest[0].startsWith('-')) args.doctorToken = rest.shift();
       }
     } else {
       args.cmd = 'help';
@@ -114,7 +130,7 @@ Usage:
   teamshare serve [--port 8787] [--db <path>] [--expiry-days 14]
   teamshare rotate-token [--db <path>]
   teamshare remove-member <email> [--db <path>]
-  teamshare doctor
+  teamshare doctor [<server-url> <team-token>]
   teamshare connect <server-url> <team-token> [--only cursor,codex,...] [--dry-run] [--force]
   teamshare connect --list
 
@@ -165,7 +181,6 @@ interface TeamshareConfig {
 }
 
 const CONFIG_KEYS: (keyof TeamshareConfig)[] = ['url', 'token', 'name', 'email'];
-const DEFAULT_URL = 'http://localhost:8787';
 
 // homedir() is called here (not hoisted to a module constant) so a test can
 // override HOME before invoking doctor and have it take effect, the same
@@ -174,17 +189,21 @@ function teamshareConfigPath(): string {
   return join(homedir(), '.teamshare.json');
 }
 
-function readTeamshareConfig(): { config: TeamshareConfig | null; path: string } {
+// `exists` is reported separately from `config` so callers can tell "this
+// install method never creates the file" (normal — try the next source)
+// apart from "the file is there but broken" (a real, actionable problem).
+function readTeamshareConfig(): { config: TeamshareConfig | null; path: string; exists: boolean } {
   const path = teamshareConfigPath();
+  if (!existsSync(path)) return { config: null, path, exists: false };
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    return { config: null, path };
+    return { config: null, path, exists: true };
   }
   const obj = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
   const hasAllKeys = CONFIG_KEYS.every((k) => typeof obj[k] === 'string' && (obj[k] as string).length > 0);
-  if (!hasAllKeys) return { config: null, path };
+  if (!hasAllKeys) return { config: null, path, exists: true };
   return {
     config: {
       url: obj.url as string,
@@ -193,6 +212,7 @@ function readTeamshareConfig(): { config: TeamshareConfig | null; path: string }
       email: obj.email as string,
     },
     path,
+    exists: true,
   };
 }
 
@@ -257,7 +277,105 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Re
   }
 }
 
-export async function runDoctor(): Promise<{ exitCode: number; output: string }> {
+interface ResolvedServer {
+  url: string;
+  token: string;
+}
+
+interface ServerResolution {
+  server: ResolvedServer | null;
+  // Only ever the *legacy* ~/.teamshare.json config — the one source that
+  // also carries a name/email fallback for identity resolution. Explicit
+  // args and discovered assistant configs never feed identity fallback;
+  // git config remains the only real source of truth there.
+  legacyConfig: TeamshareConfig | null;
+  lines: string[];
+  problem: boolean;
+}
+
+// Resolves a server URL/token from the three sources doctor supports, tried
+// in this order, and explains which one it used (or why none worked):
+//   1. Explicit `teamshare doctor <server-url> <team-token>` arguments.
+//   2. ~/.teamshare.json, if the file is present (dev / --plugin-dir /
+//      legacy installs).
+//   3. Any assistant config `teamshare connect` knows about that already has
+//      a teamshare entry (Claude Code's plugin install writes neither of the
+//      above — its values live in Claude Code's own settings, which this
+//      process cannot read — so this is how doctor still finds *something*
+//      to test on the most common setup today).
+// Never treats "nothing found" as a broken install — see the guidance text
+// below, which is the whole point of this rewrite.
+function resolveServer(explicitUrl?: string, explicitToken?: string): ServerResolution {
+  const lines: string[] = [];
+
+  if (explicitUrl && explicitToken) {
+    lines.push('[OK] using the server URL and token given on the command line');
+    return { server: { url: explicitUrl, token: explicitToken }, legacyConfig: null, lines, problem: false };
+  }
+
+  const { config: legacyConfig, path: legacyPath, exists: legacyExists } = readTeamshareConfig();
+  if (legacyExists && !legacyConfig) {
+    // The file is there but broken — unlike "the file doesn't exist at all"
+    // (normal under the plugin-managed install), this is an actual problem:
+    // something wrote it and got it wrong, or it wants a `/teamshare-setup`
+    // re-run.
+    lines.push(`[PROBLEM] ${legacyPath} exists but is missing one of url/token/name/email — run /teamshare-setup`);
+    return { server: null, legacyConfig: null, lines, problem: true };
+  }
+  if (legacyConfig) {
+    lines.push(`[OK] ${legacyPath} present with all required keys`);
+    return { server: { url: legacyConfig.url, token: legacyConfig.token }, legacyConfig, lines, problem: false };
+  }
+
+  const discovered = discoverConnectedTargets();
+  if (discovered.length === 0) {
+    lines.push(
+      '[INFO] no server URL/token found from any source:',
+      `  - ${legacyPath} does not exist`,
+      '  - no assistant config known to `teamshare connect` (Cursor, VS Code, Windsurf, Gemini CLI,',
+      '    Cline, Zed, Codex) has a teamshare entry either',
+      '',
+      'This is expected for the two normal setups, not a sign the install is broken:',
+      '  - Claude Code: the plugin stores the server URL and team token itself and never writes',
+      '    ~/.teamshare.json. Run `/plugin` in Claude Code to see the values it has stored.',
+      '  - Any other assistant: run `teamshare connect <server-url> <team-token>` to configure it.',
+      '',
+      'To test a specific server directly, regardless of what is installed on this machine:',
+      '  teamshare doctor <server-url> <team-token>',
+    );
+    return { server: null, legacyConfig: null, lines, problem: false };
+  }
+
+  const uniquePairs = new Set(discovered.map((d) => `${d.url} ${d.token}`));
+  if (uniquePairs.size > 1) {
+    lines.push(
+      `[PROBLEM] found a teamshare entry in ${discovered.length} assistant configs that do not agree ` +
+        'on the server URL/token:',
+    );
+    for (const d of discovered) lines.push(`  - ${d.label} (${d.path}) -> ${d.url}`);
+    lines.push(
+      `Testing the first one found (${discovered[0].label}). Disagreeing configs mean at least one ` +
+        'assistant is pointed at the wrong server or an old token — re-run `teamshare connect` for ' +
+        'whichever ones are wrong.',
+    );
+    return { server: { url: discovered[0].url, token: discovered[0].token }, legacyConfig: null, lines, problem: true };
+  }
+
+  if (discovered.length > 1) {
+    lines.push(
+      `[OK] found a matching teamshare entry in ${discovered.length} assistant configs: ` +
+        discovered.map((d) => d.label).join(', '),
+    );
+  } else {
+    lines.push(`[OK] found a teamshare entry in ${discovered[0].label} (${discovered[0].path})`);
+  }
+  return { server: { url: discovered[0].url, token: discovered[0].token }, legacyConfig: null, lines, problem: false };
+}
+
+export async function runDoctor(
+  explicitUrl?: string,
+  explicitToken?: string,
+): Promise<{ exitCode: number; output: string }> {
   const lines: string[] = [];
   let healthy = true;
   const problem = (msg: string) => {
@@ -266,15 +384,12 @@ export async function runDoctor(): Promise<{ exitCode: number; output: string }>
   };
   const ok = (msg: string) => lines.push(`[OK] ${msg}`);
 
-  const { config, path: configPath } = readTeamshareConfig();
+  const resolution = resolveServer(explicitUrl, explicitToken);
+  lines.push(...resolution.lines);
+  if (resolution.problem) healthy = false;
+  const server = resolution.server;
 
-  if (!config) {
-    problem(`${configPath} is missing or missing one of url/token/name/email — run /teamshare-setup`);
-  } else {
-    ok(`${configPath} present with all required keys`);
-  }
-
-  const identity = resolveIdentity(config);
+  const identity = resolveIdentity(resolution.legacyConfig);
   if (identity) {
     lines.push(
       `[INFO] identity this machine would present: ${identity.name.trim()} <${identity.email.trim().toLowerCase()}>`,
@@ -287,8 +402,8 @@ export async function runDoctor(): Promise<{ exitCode: number; output: string }>
     );
   }
 
-  if (config) {
-    const base = config.url.replace(/\/+$/, '');
+  if (server) {
+    const base = server.url.replace(/\/+$/, '');
 
     try {
       const res = await fetchWithTimeout(`${base}/health`);
@@ -303,9 +418,9 @@ export async function runDoctor(): Promise<{ exitCode: number; output: string }>
     try {
       const res = await fetchWithTimeout(`${base}/unread`, {
         headers: {
-          Authorization: `Bearer ${config.token}`,
-          'X-Teamshare-Email': config.email.trim().toLowerCase(),
-          'X-Teamshare-Name': config.name.trim(),
+          Authorization: `Bearer ${server.token}`,
+          'X-Teamshare-Email': (identity?.email ?? '').trim().toLowerCase(),
+          'X-Teamshare-Name': (identity?.name ?? '').trim(),
         },
       });
       if (res.status === 200) {
@@ -325,29 +440,7 @@ export async function runDoctor(): Promise<{ exitCode: number; output: string }>
       problem(`could not reach ${base}/unread (${(err as Error).message}) — is the server running at that URL?`);
     }
   } else {
-    lines.push('[INFO] server checks skipped — no usable config to read a URL/token from');
-  }
-
-  // The known split: Claude Code resolves the teamshare MCP server's URL from
-  // TEAMSHARE_URL at startup, while the session-start digest reads the URL
-  // straight out of ~/.teamshare.json. A team on a non-default URL who never
-  // exported TEAMSHARE_URL gets a working digest and silently dead MCP tools
-  // — this is the whole reason a teammate would reach for doctor.
-  const envUrl = process.env.TEAMSHARE_URL;
-  if (envUrl) {
-    ok(`TEAMSHARE_URL is set (${envUrl})`);
-  } else if (config) {
-    if (config.url.replace(/\/+$/, '') !== DEFAULT_URL) {
-      problem(
-        `TEAMSHARE_URL is not set, but the configured server (${config.url}) is not the default ` +
-          `${DEFAULT_URL} — the session-start digest will keep working but the teamshare MCP tools ` +
-          `will silently fail to connect. Add to your shell profile: export TEAMSHARE_URL=${config.url}`,
-      );
-    } else {
-      ok('TEAMSHARE_URL is unset — fine, the configured server is the default');
-    }
-  } else {
-    lines.push('[INFO] TEAMSHARE_URL is unset — nothing to compare it against without a usable config');
+    lines.push('[INFO] server checks skipped — no server URL/token available (see above)');
   }
 
   return { exitCode: healthy ? 0 : 1, output: lines.join('\n') + '\n' };
@@ -364,7 +457,12 @@ export async function main(argv: string[]): Promise<void> {
   // doctor never touches the database, so it runs before the dbPath directory
   // is created — a diagnostic command shouldn't create real teamshare state.
   if (args.cmd === 'doctor') {
-    const { exitCode, output } = await runDoctor();
+    if ((args.doctorUrl && !args.doctorToken) || (!args.doctorUrl && args.doctorToken)) {
+      process.stderr.write('doctor needs both <server-url> and <team-token>, or neither\n');
+      process.exitCode = 1;
+      return;
+    }
+    const { exitCode, output } = await runDoctor(args.doctorUrl, args.doctorToken);
     process.stdout.write(output);
     process.exitCode = exitCode;
     return;

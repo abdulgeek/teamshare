@@ -44,6 +44,17 @@ describe('parseArgs', () => {
     expect(parseArgs(['doctor']).cmd).toBe('doctor');
   });
 
+  it('parses doctor with an explicit server-url and team-token', () => {
+    const a = parseArgs(['doctor', 'https://ts.example.com', 'ts_abc123']);
+    expect(a).toMatchObject({ cmd: 'doctor', doctorUrl: 'https://ts.example.com', doctorToken: 'ts_abc123' });
+  });
+
+  it('parses doctor with no arguments as having neither doctorUrl nor doctorToken', () => {
+    const a = parseArgs(['doctor']);
+    expect(a.doctorUrl).toBeUndefined();
+    expect(a.doctorToken).toBeUndefined();
+  });
+
   it('parses connect with a url and token', () => {
     const a = parseArgs(['connect', 'https://ts.example.com', 'ts_abc123']);
     expect(a).toMatchObject({ cmd: 'connect', connectUrl: 'https://ts.example.com', connectToken: 'ts_abc123' });
@@ -91,6 +102,23 @@ describe('help text', () => {
     const out = chunks.join('');
     expect(out).toContain('connect');
     expect(out).toContain('--list');
+  });
+});
+
+describe('doctor wiring in main()', () => {
+  it('errors and exits 1 when doctor is given a url but no token', async () => {
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // @ts-expect-error -- test-only stderr capture
+    process.stderr.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['doctor', 'https://ts.example.com']);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(chunks.join('')).toContain('<server-url>');
   });
 });
 
@@ -164,7 +192,6 @@ describe('formatServeBanner (spec §8 / README: token printed exactly once per g
 
 describe('doctor', () => {
   const originalHome = process.env.HOME;
-  const originalTeamshareUrl = process.env.TEAMSHARE_URL;
   let home: string;
   let server: http.Server;
   let port: number;
@@ -174,7 +201,6 @@ describe('doctor', () => {
   beforeEach(async () => {
     home = tmp();
     process.env.HOME = home;
-    delete process.env.TEAMSHARE_URL;
     respondHealth = (res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
@@ -195,8 +221,6 @@ describe('doctor', () => {
   afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome;
-    if (originalTeamshareUrl === undefined) delete process.env.TEAMSHARE_URL;
-    else process.env.TEAMSHARE_URL = originalTeamshareUrl;
   });
 
   function writeConfig(extra: Record<string, string> = {}) {
@@ -212,14 +236,48 @@ describe('doctor', () => {
     );
   }
 
-  it('fails with a remedy when ~/.teamshare.json is missing', async () => {
-    const { exitCode, output } = await runDoctor();
-    expect(exitCode).toBe(1);
-    expect(output).toContain('.teamshare.json');
-    expect(output).toContain('/teamshare-setup');
-  });
+  // Points git's *global* config at a `.gitconfig` inside the injected temp
+  // home (never the real $HOME) so identity resolution is deterministic
+  // without touching the real machine's git config.
+  function writeGitConfig(name: string, email: string) {
+    writeFileSync(join(home, '.gitconfig'), `[user]\n\tname = ${name}\n\temail = ${email}\n`);
+  }
 
-  it('fails when the config is missing a required key', async () => {
+  function writeAssistantConfig(
+    kind: 'cursor' | 'gemini',
+    opts: { url: string; token: string; email?: string },
+  ) {
+    const email = opts.email ?? 'priya@team.com';
+    if (kind === 'cursor') {
+      mkdirSync(join(home, '.cursor'), { recursive: true });
+      writeFileSync(
+        join(home, '.cursor', 'mcp.json'),
+        JSON.stringify({
+          mcpServers: {
+            teamshare: {
+              url: `${opts.url}/mcp`,
+              headers: { Authorization: `Bearer ${opts.token}`, 'X-Teamshare-Name': 'Priya', 'X-Teamshare-Email': email },
+            },
+          },
+        }),
+      );
+    } else {
+      mkdirSync(join(home, '.gemini'), { recursive: true });
+      writeFileSync(
+        join(home, '.gemini', 'settings.json'),
+        JSON.stringify({
+          mcpServers: {
+            teamshare: {
+              httpUrl: `${opts.url}/mcp`,
+              headers: { Authorization: `Bearer ${opts.token}`, 'X-Teamshare-Name': 'Priya', 'X-Teamshare-Email': email },
+            },
+          },
+        }),
+      );
+    }
+  }
+
+  it('fails when ~/.teamshare.json is present but missing a required key — a real problem, not the guidance path', async () => {
     writeFileSync(join(home, '.teamshare.json'), JSON.stringify({ url: 'http://x', token: 't', name: 'A' }));
     const { exitCode, output } = await runDoctor();
     expect(exitCode).toBe(1);
@@ -228,7 +286,6 @@ describe('doctor', () => {
 
   it('passes end-to-end against a reachable, correctly-configured server, and never prints the token', async () => {
     writeConfig();
-    process.env.TEAMSHARE_URL = `http://127.0.0.1:${port}`;
     const { exitCode, output } = await runDoctor();
     expect(exitCode).toBe(0);
     expect(output).not.toContain('tok_secret_value');
@@ -270,22 +327,60 @@ describe('doctor', () => {
     expect(output).toContain('http://127.0.0.1:1');
   });
 
-  it('warns when TEAMSHARE_URL is unset and the configured server is not the localhost default', async () => {
-    // The known split: the session-start digest reads the URL straight out
-    // of the config file and keeps working, but Claude Code resolves the MCP
-    // server's URL from TEAMSHARE_URL at startup — so the tools silently
-    // fail to connect. This is the whole reason doctor exists.
-    writeConfig();
-    const { exitCode, output } = await runDoctor();
-    expect(exitCode).toBe(1);
-    expect(output).toContain('TEAMSHARE_URL');
-  });
+  describe('resolving a server URL/token from three sources', () => {
+    it('explicit command-line arguments win over ~/.teamshare.json, which is never even consulted', async () => {
+      writeGitConfig('Explicit User', 'explicit@example.com');
+      // A stale legacy config pointing at an unreachable port — if this were
+      // read at all, the health check would fail against port 1.
+      writeConfig({ url: 'http://127.0.0.1:1' });
+      const { exitCode, output } = await runDoctor(`http://127.0.0.1:${port}`, 'explicit_token_value');
+      expect(exitCode).toBe(0);
+      expect(output).toContain('given on the command line');
+      expect(output).not.toContain('127.0.0.1:1');
+      expect(output).not.toContain('explicit_token_value');
+    });
 
-  it('is satisfied when TEAMSHARE_URL is set, regardless of value', async () => {
-    writeConfig();
-    process.env.TEAMSHARE_URL = `http://127.0.0.1:${port}`;
-    const { output } = await runDoctor();
-    expect(output).toContain('TEAMSHARE_URL is set');
+    it('uses ~/.teamshare.json when it is present (already covered above by the end-to-end pass)', async () => {
+      writeConfig();
+      const { output } = await runDoctor();
+      expect(output).toContain('.teamshare.json');
+      expect(output).toContain('present with all required keys');
+    });
+
+    it('discovers a URL/token from an assistant config when it is the only source available', async () => {
+      writeGitConfig('Priya', 'priya@team.com');
+      writeAssistantConfig('cursor', { url: `http://127.0.0.1:${port}`, token: 'discovered_token_value' });
+      const { exitCode, output } = await runDoctor();
+      expect(exitCode).toBe(0);
+      expect(output).toContain('Cursor');
+      expect(output).toContain(join(home, '.cursor', 'mcp.json'));
+      expect(output).not.toContain('discovered_token_value');
+    });
+
+    it('reports each source and which one it is testing when assistant configs disagree', async () => {
+      writeGitConfig('Priya', 'priya@team.com');
+      writeAssistantConfig('cursor', { url: 'http://127.0.0.1:1', token: 'token_a' });
+      writeAssistantConfig('gemini', { url: 'http://127.0.0.1:2', token: 'token_b' });
+      const { exitCode, output } = await runDoctor();
+      expect(exitCode).toBe(1);
+      expect(output.toLowerCase()).toContain('do not agree');
+      expect(output).toContain('Cursor');
+      expect(output).toContain('Gemini CLI');
+      expect(output).not.toContain('token_a');
+      expect(output).not.toContain('token_b');
+    });
+
+    it('produces guidance, not a false alarm, when no source has a URL/token configured', async () => {
+      // Identity resolves fine so this isolates the config-source behavior —
+      // the point is that a missing config alone must not fail doctor.
+      writeGitConfig('Priya', 'priya@team.com');
+      const { exitCode, output } = await runDoctor();
+      expect(exitCode).toBe(0);
+      expect(output).not.toContain('[PROBLEM]');
+      expect(output).toContain('/plugin');
+      expect(output).toContain('teamshare connect');
+      expect(output).toContain('teamshare doctor <server-url> <team-token>');
+    });
   });
 });
 

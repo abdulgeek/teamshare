@@ -273,12 +273,32 @@ check — so run:
 node packages/server/dist/cli.js doctor
 ```
 
-This needs no local server and no database, nothing beyond whatever config
-this machine has (the installed plugin's stored prompts, or a hand-written
-`~/.teamshare.json` if you're on the `--plugin-dir`/`/teamshare-setup` path).
-It checks, and tells you the remedy for each problem it finds:
+This needs no local server and no database — it resolves a server URL/team
+token from whichever of these it finds first, and tells you which one it
+used:
 
-- Whether it can find a usable config at all.
+1. Explicit arguments: `node packages/server/dist/cli.js doctor <server-url>
+   <team-token>`. Always works, needs nothing installed — use this to test a
+   specific server regardless of what's configured on this machine.
+2. `~/.teamshare.json`, if present (the `--plugin-dir`/`/teamshare-setup`
+   development path).
+3. Any other assistant's config that `teamshare connect` knows how to write
+   (Cursor, VS Code, Windsurf, Gemini CLI, Cline, Zed, Codex) — read back
+   directly if it already has a teamshare entry. If more than one disagrees
+   on the URL/token, doctor reports every one it found and which it picked to
+   test, since disagreeing configs are themselves a real problem.
+
+If none of the three has anything, doctor does **not** report a broken
+install — that's the expected shape of the two normal setups: for Claude
+Code, the plugin holds the server URL and team token itself (run `/plugin` to
+see them; no `~/.teamshare.json` is ever created for this install path), and
+for every other assistant, run `teamshare connect` first. It still tells you
+how to test a server directly in that case (`teamshare doctor <server-url>
+<team-token>`).
+
+Once it has a URL/token, it checks, and tells you the remedy for each problem
+it finds:
+
 - The identity this machine would present (name and lowercased email) — so a
   stale or wrong git identity is visible before it causes confusion.
 - Whether the configured server answers `GET /health` at all.
@@ -286,13 +306,9 @@ It checks, and tells you the remedy for each problem it finds:
   many shares are unread), 401 (token rejected), 400 (identity malformed), or
   any other status code, verbatim.
 
-It also prints a line about the `TEAMSHARE_URL` environment variable — that
-check predates the plugin's install prompts and is only meaningful if you're
-running off a hand-written `~/.teamshare.json` with a non-default server URL
-instead of a normal `/plugin install`. If you installed normally, ignore it.
-
 It exits `0` when every check passes and `1` otherwise, and never prints the
-team token.
+team token — when it reads one out of an assistant config, it says where it
+came from, never what it is.
 
 ## Trust model
 

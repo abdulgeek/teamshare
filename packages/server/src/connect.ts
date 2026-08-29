@@ -198,6 +198,14 @@ interface TargetDef {
   configPath: string;
   installed: boolean;
   apply: (ctx: TargetContext) => TargetApplyResult;
+  /**
+   * Reads back the url/token from a previously-written teamshare entry at
+   * configPath, if one is there — used by `teamshare doctor` to discover
+   * credentials on machines where ~/.teamshare.json was never created (e.g.
+   * Claude Code's plugin-managed install). Undefined for targets that are
+   * never actually written (Continue.dev is print-only).
+   */
+  readBack?: () => { url: string; token: string } | null;
 }
 
 function readJsonFileOrEmpty(
@@ -301,6 +309,65 @@ function jsonEntrySnippet(serversKey: string, path: string, entry: unknown): str
   return `Add this into "${serversKey}" in ${path}:\n${body}\n`;
 }
 
+// ---------------------------------------------------------------------------
+// Reading credentials back out of a previously-written entry (`doctor`'s
+// third resolution source). Never writes anything; a malformed/missing file
+// or entry just yields null, same "refuse rather than guess" spirit as the
+// write path above.
+// ---------------------------------------------------------------------------
+
+// mcpUrl() always appends "/mcp" to the base url that was passed to
+// `teamshare connect`; undo that so doctor probes the same base url
+// (`<url>/health`, `<url>/unread`) that every other resolution source uses.
+function stripMcpSuffix(url: string): string {
+  return url.replace(/\/mcp\/?$/, '');
+}
+
+function readBackTeamshareEntry(path: string, serversKey: string): Record<string, unknown> | null {
+  const parsed = readJsonFileOrEmpty(path);
+  if (!parsed.ok) return null;
+  const serversRaw = parsed.data[serversKey];
+  if (!serversRaw || typeof serversRaw !== 'object' || Array.isArray(serversRaw)) return null;
+  const entry = (serversRaw as Record<string, unknown>).teamshare;
+  if (entry === undefined || typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null;
+  if (!looksLikeOurEntry(entry)) return null;
+  return entry as Record<string, unknown>;
+}
+
+// Covers Cursor, VS Code, Cline, Gemini CLI (and any future target) whose
+// entry is a plain { [urlKey]: string, headers: { Authorization: string } }
+// object — the only thing that varies between them is which key holds the
+// url and which top-level key the servers map lives under.
+function readBackJsonUrlEntry(serversKey: string, urlKey: string) {
+  return (path: string): { url: string; token: string } | null => {
+    const entry = readBackTeamshareEntry(path, serversKey);
+    if (!entry) return null;
+    const rawUrl = entry[urlKey];
+    const headers = entry.headers;
+    if (typeof rawUrl !== 'string' || !headers || typeof headers !== 'object') return null;
+    const auth = (headers as Record<string, unknown>).Authorization;
+    if (typeof auth !== 'string') return null;
+    const token = auth.replace(/^Bearer\s+/i, '');
+    if (!token) return null;
+    return { url: stripMcpSuffix(rawUrl), token };
+  };
+}
+
+// Zed's entry has no top-level url/headers — everything is baked into the
+// mcp-remote bridge's `args` array (see buildTargets' zed entry below).
+function readBackZedEntry(path: string): { url: string; token: string } | null {
+  const entry = readBackTeamshareEntry(path, 'context_servers');
+  if (!entry) return null;
+  const args = entry.args;
+  if (!Array.isArray(args)) return null;
+  const url = args.find((a): a is string => typeof a === 'string' && /^https?:\/\//i.test(a));
+  const authArg = args.find((a): a is string => typeof a === 'string' && /^Authorization:/i.test(a));
+  if (!url || !authArg) return null;
+  const token = authArg.replace(/^Authorization:Bearer\s*/i, '');
+  if (!token) return null;
+  return { url: stripMcpSuffix(url), token };
+}
+
 function makeJsonTarget(opts: {
   id: TargetId;
   label: string;
@@ -308,6 +375,7 @@ function makeJsonTarget(opts: {
   appDir: string;
   serversKey: string;
   buildEntry: (ctx: TargetContext) => unknown;
+  readBack: (path: string) => { url: string; token: string } | null;
 }): TargetDef {
   const installed = existsSync(opts.path) || existsSync(opts.appDir);
   return {
@@ -331,6 +399,7 @@ function makeJsonTarget(opts: {
       }
       return result;
     },
+    readBack: () => opts.readBack(opts.path),
   };
 }
 
@@ -395,6 +464,40 @@ function buildCodexSnippet(ctx: TargetContext): string {
   return `Append this to the end of ~/.codex/config.toml:\n\n${buildCodexBlock(ctx)}`;
 }
 
+// TOML basic strings decode with the same escaping JSON uses (see
+// tomlString() above), so wrapping the captured body back in quotes and
+// handing it to JSON.parse reverses tomlString() exactly.
+function tomlStringValue(raw: string): string | null {
+  try {
+    const value: unknown = JSON.parse(`"${raw}"`);
+    return typeof value === 'string' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function readBackCodexEntry(path: string): { url: string; token: string } | null {
+  if (!existsSync(path)) return null;
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  const idx = text.indexOf(CODEX_TABLE_HEADER);
+  if (idx === -1) return null;
+  const rest = text.slice(idx);
+  const urlMatch = rest.match(/\burl\s*=\s*"((?:[^"\\]|\\.)*)"/);
+  const authMatch = rest.match(/\bAuthorization\s*=\s*"((?:[^"\\]|\\.)*)"/);
+  if (!urlMatch || !authMatch) return null;
+  const rawUrl = tomlStringValue(urlMatch[1]);
+  const auth = tomlStringValue(authMatch[1]);
+  if (!rawUrl || !auth) return null;
+  const token = auth.replace(/^Bearer\s+/i, '');
+  if (!token) return null;
+  return { url: stripMcpSuffix(rawUrl), token };
+}
+
 function applyCodex(path: string, ctx: TargetContext): TargetApplyResult {
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
   if (existing.includes(CODEX_TABLE_HEADER)) {
@@ -457,6 +560,7 @@ function buildTargets(home: string): TargetDef[] {
       appDir: join(home, '.cursor'),
       serversKey: 'mcpServers',
       buildEntry: (ctx) => ({ url: mcpUrl(ctx.url), headers: headersObj(ctx) }),
+      readBack: readBackJsonUrlEntry('mcpServers', 'url'),
     }),
   );
 
@@ -468,6 +572,7 @@ function buildTargets(home: string): TargetDef[] {
       appDir: join(home, 'Library', 'Application Support', 'Code'),
       serversKey: 'servers',
       buildEntry: (ctx) => ({ type: 'http', url: mcpUrl(ctx.url), headers: headersObj(ctx) }),
+      readBack: readBackJsonUrlEntry('servers', 'url'),
     }),
   );
 
@@ -479,6 +584,7 @@ function buildTargets(home: string): TargetDef[] {
       appDir: join(home, '.codeium'),
       serversKey: 'mcpServers',
       buildEntry: (ctx) => ({ serverUrl: mcpUrl(ctx.url), headers: headersObj(ctx) }),
+      readBack: readBackJsonUrlEntry('mcpServers', 'serverUrl'),
     }),
   );
 
@@ -490,6 +596,7 @@ function buildTargets(home: string): TargetDef[] {
       appDir: join(home, '.gemini'),
       serversKey: 'mcpServers',
       buildEntry: (ctx) => ({ httpUrl: mcpUrl(ctx.url), headers: headersObj(ctx) }),
+      readBack: readBackJsonUrlEntry('mcpServers', 'httpUrl'),
     }),
   );
 
@@ -518,6 +625,7 @@ function buildTargets(home: string): TargetDef[] {
       }
       return result;
     },
+    readBack: () => readBackJsonUrlEntry('mcpServers', 'url')(clinePath),
   });
 
   targets.push(
@@ -544,6 +652,7 @@ function buildTargets(home: string): TargetDef[] {
           `X-Teamshare-Email:${ctx.identity.email.trim().toLowerCase()}`,
         ],
       }),
+      readBack: readBackZedEntry,
     }),
   );
 
@@ -555,6 +664,7 @@ function buildTargets(home: string): TargetDef[] {
     configPath: codexPath,
     installed: existsSync(codexPath) || existsSync(codexAppDir),
     apply: (ctx) => applyCodex(codexPath, ctx),
+    readBack: () => readBackCodexEntry(codexPath),
   });
 
   const continuePath = join(home, '.continue', 'config.yaml');
@@ -581,6 +691,32 @@ export function listTargets(home: string = homedir()): DetectedTarget[] {
     path: t.configPath,
     installed: t.installed,
   }));
+}
+
+export interface DiscoveredCredentials {
+  id: TargetId;
+  label: string;
+  path: string;
+  url: string;
+  token: string;
+}
+
+// `teamshare doctor`'s third resolution source: when there's no
+// ~/.teamshare.json (e.g. Claude Code's plugin-managed install never creates
+// one), look for a teamshare entry already written into any assistant config
+// `connect` knows how to write, and read the url/token back out of it. Only
+// ever reads; never creates or modifies a file. Returns one entry per
+// assistant that has a recognizable teamshare entry — callers should treat
+// more than one result as worth flagging (disagreeing configs), not just
+// pick the first silently.
+export function discoverConnectedTargets(home: string = homedir()): DiscoveredCredentials[] {
+  const found: DiscoveredCredentials[] = [];
+  for (const target of buildTargets(home)) {
+    if (!target.readBack) continue;
+    const creds = target.readBack();
+    if (creds) found.push({ id: target.id, label: target.label, path: target.configPath, ...creds });
+  }
+  return found;
 }
 
 function missingIdentityAbort(): AbortInfo {
