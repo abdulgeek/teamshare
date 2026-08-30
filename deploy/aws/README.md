@@ -330,12 +330,6 @@ the rebuild would otherwise boot with today's already-ignored `user_data`
 instead of the current template), apply, then restore. To tear the whole
 stack down: remove the block and run `terraform destroy`.
 
-Note also that this deployment uses the instance's auto-assigned public IP
-rather than an Elastic IP (the account is at its EIP quota — every address is
-in use by other p3m infrastructure). A **reboot keeps the IP**, but a
-**stop/start assigns a new one**, which changes the `<ip>.sslip.io` URL and
-means teammates must reconnect. Avoid stopping the instance; reboot instead.
-
 ## Backing up the database
 
 **The SQLite file at `/var/lib/teamshare/teamshare.db` is the entire shared
