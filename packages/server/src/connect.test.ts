@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   mkdtempSync,
   rmSync,
@@ -19,6 +19,14 @@ import {
   formatListOutput,
   normalizeServerUrl,
   parseConnectArgv,
+  resolveValueSource,
+  resolveConnectValue,
+  resolveConnectCredentials,
+  promptHidden,
+  promptVisible,
+  formatArgvTokenWarning,
+  TEAMSHARE_URL_ENV,
+  TEAMSHARE_TOKEN_ENV,
   type GitIdentity,
 } from './connect.js';
 
@@ -797,5 +805,232 @@ describe('parseConnectArgv: pinned <url> <token> positional contract (never a le
   it('--list and --help still work exactly as before, independent of url/token', () => {
     expect(parseConnectArgv(['--list'])).toMatchObject({ list: true, url: undefined, token: undefined });
     expect(parseConnectArgv(['--help'])).toMatchObject({ help: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Credential resolution: argv (already parsed) -> TEAMSHARE_URL/TEAMSHARE_TOKEN
+// in the environment -> an interactive prompt on a real terminal. Mirrors
+// teamshare-team.mjs's resolveSecretSource/resolveSecret/promptHidden tests
+// (team.test.ts), with the added argv tier and the url/token split (only the
+// token is masked; the url prompt echoes normally).
+// ---------------------------------------------------------------------------
+
+describe('resolveValueSource: pure decision, no I/O (mirrors teamshare-team.mjs\'s resolveSecretSource)', () => {
+  it('prefers the environment value when present, even on a real terminal', () => {
+    expect(resolveValueSource('the-value', false)).toBe('env');
+    expect(resolveValueSource('the-value', true)).toBe('env');
+  });
+
+  it('falls back to prompting only when a real terminal is available and the env is empty/absent', () => {
+    expect(resolveValueSource(undefined, true)).toBe('prompt');
+    expect(resolveValueSource('', true)).toBe('prompt');
+    expect(resolveValueSource('   ', true)).toBe('prompt'); // whitespace-only counts as absent
+  });
+
+  it('resolves to "none" — the caller must fail loudly, not hang — with no env and no terminal', () => {
+    expect(resolveValueSource(undefined, false)).toBe('none');
+    expect(resolveValueSource('', false)).toBe('none');
+  });
+});
+
+describe('resolveConnectValue: one value\'s argv -> env -> prompt resolution', () => {
+  it('prefers a positional argv value over env and never calls the prompt function', async () => {
+    const promptFn = vi.fn(async () => {
+      throw new Error('promptFn should not be called when an argv value is present');
+    });
+    const result = await resolveConnectValue({
+      argvValue: 'from-argv',
+      envValue: 'from-env',
+      isTTY: true,
+      promptText: 'x',
+      promptFn,
+    });
+    expect(result).toEqual({ ok: true, value: 'from-argv', source: 'argv' });
+    expect(promptFn).not.toHaveBeenCalled();
+  });
+
+  it('uses the (trimmed) env value when no argv value is given, never calling the prompt function', async () => {
+    const promptFn = vi.fn(async () => {
+      throw new Error('promptFn should not be called when an env value is present');
+    });
+    const result = await resolveConnectValue({
+      argvValue: undefined,
+      envValue: '  from-env  ',
+      isTTY: true,
+      promptText: 'x',
+      promptFn,
+    });
+    expect(result).toEqual({ ok: true, value: 'from-env', source: 'env' });
+    expect(promptFn).not.toHaveBeenCalled();
+  });
+
+  it('prompts when isTTY is true and neither argv nor env is set, trimming the typed answer', async () => {
+    const promptFn = vi.fn(async () => '  typed-value  ');
+    const result = await resolveConnectValue({
+      argvValue: undefined,
+      envValue: undefined,
+      isTTY: true,
+      promptText: 'Value: ',
+      promptFn,
+    });
+    expect(result).toEqual({ ok: true, value: 'typed-value', source: 'prompt' });
+    expect(promptFn).toHaveBeenCalledWith('Value: ', undefined);
+  });
+
+  it('fails when the prompt yields nothing (blank input, or a non-TTY stream resolving null)', async () => {
+    const promptFn = vi.fn(async () => null);
+    const result = await resolveConnectValue({
+      argvValue: undefined,
+      envValue: undefined,
+      isTTY: true,
+      promptText: 'x',
+      promptFn,
+    });
+    expect(result).toEqual({ ok: false, reason: 'no value entered at the prompt' });
+  });
+
+  it('fails immediately — never prompting — with no argv, no env, and no TTY', async () => {
+    const promptFn = vi.fn(async () => {
+      throw new Error('promptFn should not be called with no TTY');
+    });
+    const result = await resolveConnectValue({
+      argvValue: undefined,
+      envValue: undefined,
+      isTTY: false,
+      promptText: 'x',
+      promptFn,
+    });
+    expect(result.ok).toBe(false);
+    expect(promptFn).not.toHaveBeenCalled();
+  });
+});
+
+describe('promptHidden / promptVisible', () => {
+  it('promptHidden resolves null immediately, without writing anything, when the input stream is not a TTY', async () => {
+    const input = { isTTY: false } as unknown as NodeJS.ReadStream;
+    const write = vi.fn();
+    const output = { write } as unknown as NodeJS.WriteStream;
+    const result = await promptHidden('Token: ', { input, output });
+    expect(result).toBeNull();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('promptVisible resolves null immediately, without writing anything, when the input stream is not a TTY', async () => {
+    const input = { isTTY: false } as unknown as NodeJS.ReadStream;
+    const write = vi.fn();
+    const output = { write } as unknown as NodeJS.WriteStream;
+    const result = await promptVisible('Server URL: ', { input, output });
+    expect(result).toBeNull();
+    expect(write).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveConnectCredentials: the new url/token resolution order for the standalone CLI', () => {
+  it('positional argv still works for both url and token', async () => {
+    const result = await resolveConnectCredentials(
+      { url: 'https://ts.example.com', token: 'ts_abc123' },
+      { env: {}, isTTY: false },
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      url: 'https://ts.example.com',
+      token: 'ts_abc123',
+      urlSource: 'argv',
+      tokenSource: 'argv',
+    });
+  });
+
+  it('falls back to TEAMSHARE_URL/TEAMSHARE_TOKEN when neither is positional', async () => {
+    const env = { [TEAMSHARE_URL_ENV]: 'https://ts.example.com', [TEAMSHARE_TOKEN_ENV]: 'ts_env_token' };
+    const result = await resolveConnectCredentials({ url: undefined, token: undefined }, { env, isTTY: false });
+    expect(result).toMatchObject({
+      ok: true,
+      url: 'https://ts.example.com',
+      token: 'ts_env_token',
+      urlSource: 'env',
+      tokenSource: 'env',
+    });
+  });
+
+  it('prompts on a TTY when neither argv nor env is set — visibly for the url, hidden for the token', async () => {
+    const urlPromptFn = vi.fn(async () => 'https://ts.example.com');
+    const tokenPromptFn = vi.fn(async () => 'ts_typed_token');
+    const result = await resolveConnectCredentials(
+      { url: undefined, token: undefined },
+      { env: {}, isTTY: true, urlPromptFn, tokenPromptFn },
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      url: 'https://ts.example.com',
+      token: 'ts_typed_token',
+      urlSource: 'prompt',
+      tokenSource: 'prompt',
+    });
+    expect(urlPromptFn).toHaveBeenCalled();
+    expect(tokenPromptFn).toHaveBeenCalled();
+  });
+
+  it('resolves url and token independently: an argv url with an env token is fine', async () => {
+    const env = { [TEAMSHARE_TOKEN_ENV]: 'ts_env_token' };
+    const result = await resolveConnectCredentials(
+      { url: 'https://ts.example.com', token: undefined },
+      { env, isTTY: false },
+    );
+    expect(result).toMatchObject({ ok: true, urlSource: 'argv', tokenSource: 'env' });
+  });
+
+  it('fails with a clear, actionable reason when nothing resolves (no argv, no env, no TTY)', async () => {
+    const result = await resolveConnectCredentials({ url: undefined, token: undefined }, { env: {}, isTTY: false });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.reason).toContain('server URL');
+    expect(result.reason).toContain(TEAMSHARE_URL_ENV);
+  });
+
+  it('reports which value failed when the url resolves but the token does not', async () => {
+    const result = await resolveConnectCredentials(
+      { url: 'https://ts.example.com', token: undefined },
+      { env: {}, isTTY: false },
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.reason).toContain('personal token');
+    expect(result.reason).toContain(TEAMSHARE_TOKEN_ENV);
+  });
+});
+
+describe('formatArgvTokenWarning: the note printed only when the token came from argv', () => {
+  it('mentions shell history and the environment variable that avoids it', () => {
+    const warning = formatArgvTokenWarning();
+    expect(warning.toLowerCase()).toContain('shell history');
+    expect(warning).toContain(TEAMSHARE_TOKEN_ENV);
+  });
+
+  // The CLI entry point's sole signal for printing this warning is
+  // `resolved.tokenSource === 'argv'` — so the regression that actually
+  // matters is that the env and prompt paths never come back tagged 'argv'
+  // (which would make the CLI nag on paths that already keep the token out
+  // of shell history).
+  it('a token resolved from the environment is never tagged argv, so the CLI would not warn', async () => {
+    const env = { [TEAMSHARE_URL_ENV]: 'https://ts.example.com', [TEAMSHARE_TOKEN_ENV]: 'ts_env_token' };
+    const result = await resolveConnectCredentials({ url: undefined, token: undefined }, { env, isTTY: false });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.tokenSource).toBe('env');
+    expect(result.tokenSource).not.toBe('argv');
+  });
+
+  it('a token resolved from a TTY prompt is never tagged argv either, so the CLI would not warn', async () => {
+    const urlPromptFn = vi.fn(async () => 'https://ts.example.com');
+    const tokenPromptFn = vi.fn(async () => 'ts_typed_token');
+    const result = await resolveConnectCredentials(
+      { url: undefined, token: undefined },
+      { env: {}, isTTY: true, urlPromptFn, tokenPromptFn },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.tokenSource).toBe('prompt');
+    expect(result.tokenSource).not.toBe('argv');
   });
 });

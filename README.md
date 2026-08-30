@@ -69,11 +69,15 @@ Trust the workspace when asked, then restart Claude Code.
 
 **Everything else (Cursor, Codex, Windsurf, Gemini CLI, ...):**
 
+Same source as above: your lead sends you the server URL and your personal token, minted by
+`teamshare invite`, in one ready-to-run message.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-connect.mjs -o teamshare-connect.mjs
-node teamshare-connect.mjs <server-url> <your-personal-token>
+node teamshare-connect.mjs <server-url>
 ```
 
+It prompts for your personal token (hidden as you type) — paste the one your lead sent you.
 No clone, no install, no build. Run `node teamshare-connect.mjs --list` to
 see which assistants it detects on this machine.
 

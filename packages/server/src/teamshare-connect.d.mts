@@ -15,6 +15,12 @@ export type TargetId =
 
 export const ALL_TARGET_IDS: TargetId[];
 
+// Environment variables the standalone CLI entry point falls back to when
+// the server URL / personal token aren't given positionally — same names
+// `teamshare doctor` already accepts.
+export const TEAMSHARE_URL_ENV: string;
+export const TEAMSHARE_TOKEN_ENV: string;
+
 export interface GitIdentity {
   name: string;
   email: string;
@@ -102,3 +108,66 @@ export interface ParsedConnectArgv {
 }
 
 export function parseConnectArgv(argv: string[]): ParsedConnectArgv;
+
+// Credential resolution for the standalone CLI entry point: positional argv
+// (from parseConnectArgv) first, then TEAMSHARE_URL/TEAMSHARE_TOKEN in the
+// environment, then — only on a real terminal — an interactive prompt.
+// Mirrors teamshare-team.d.mts's SecretSource/resolveSecret/promptHidden
+// shape, with an added 'argv' tier.
+
+export type ValueSource = 'env' | 'prompt' | 'none';
+
+export function resolveValueSource(envValue: string | undefined, isTTY: boolean): ValueSource;
+
+export interface PromptStreams {
+  input?: NodeJS.ReadStream;
+  output?: NodeJS.WriteStream;
+}
+
+export function promptHidden(promptText: string, streams?: PromptStreams): Promise<string | null>;
+export function promptVisible(promptText: string, streams?: PromptStreams): Promise<string | null>;
+
+export interface ResolveConnectValueOptions {
+  argvValue?: string;
+  envValue: string | undefined;
+  isTTY: boolean;
+  promptText: string;
+  promptFn: (promptText: string, streams?: PromptStreams) => Promise<string | null>;
+  streams?: PromptStreams;
+}
+
+export type ResolveConnectValueResult =
+  | { ok: true; value: string; source: 'argv' | 'env' | 'prompt' }
+  | { ok: false; reason: string };
+
+export function resolveConnectValue(opts: ResolveConnectValueOptions): Promise<ResolveConnectValueResult>;
+
+export interface ParsedConnectCredentials {
+  url?: string;
+  token?: string;
+}
+
+export interface ResolveConnectCredentialsOptions {
+  env?: NodeJS.ProcessEnv;
+  isTTY?: boolean;
+  urlPromptFn?: (promptText: string, streams?: PromptStreams) => Promise<string | null>;
+  tokenPromptFn?: (promptText: string, streams?: PromptStreams) => Promise<string | null>;
+  streams?: PromptStreams;
+}
+
+export type ResolveConnectCredentialsResult =
+  | {
+      ok: true;
+      url: string;
+      token: string;
+      urlSource: 'argv' | 'env' | 'prompt';
+      tokenSource: 'argv' | 'env' | 'prompt';
+    }
+  | { ok: false; reason: string };
+
+export function resolveConnectCredentials(
+  parsed: ParsedConnectCredentials,
+  opts?: ResolveConnectCredentialsOptions,
+): Promise<ResolveConnectCredentialsResult>;
+
+export function formatArgvTokenWarning(): string;

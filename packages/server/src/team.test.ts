@@ -507,7 +507,15 @@ describe('formatJoinInstructions: the honest join text', () => {
     expect(text).toContain(
       'curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-connect.mjs',
     );
-    expect(text).toContain('node teamshare-connect.mjs https://ts.example.com ts_the_token');
+    // The ready-to-run line must NOT carry the token positionally — that
+    // would put a teammate's personal credential in their shell history the
+    // moment they paste it, the one thing every other secret in this project
+    // (signup secret, admin token) is deliberately kept out of. It prompts
+    // for the token instead; this line stays copy-paste-runnable with just
+    // the url.
+    expect(text).toContain('node teamshare-connect.mjs https://ts.example.com');
+    expect(text).not.toContain('node teamshare-connect.mjs https://ts.example.com ts_the_token');
+    expect(text.toLowerCase()).toContain('prompt for your personal token');
   });
 
   it('presents the facts in the required order', () => {

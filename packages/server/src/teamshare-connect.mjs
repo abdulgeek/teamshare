@@ -45,6 +45,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { createInterface } from 'node:readline';
 
 /**
  * @typedef {'cursor'|'vscode'|'windsurf'|'gemini'|'cline'|'codex'|'zed'|'continue'} TargetId
@@ -65,6 +66,13 @@ export const ALL_TARGET_IDS = [
 // Shown in place of the real token in every printed snippet unless
 // --show-token / { showToken: true } is passed.
 const TOKEN_PLACEHOLDER = '<team-token>';
+
+// Environment variables the standalone CLI entry point falls back to when
+// the server URL / personal token aren't given positionally — same names
+// `teamshare doctor` already accepts (packages/server/src/cli.ts), so a
+// value exported for one works for the other.
+export const TEAMSHARE_URL_ENV = 'TEAMSHARE_URL';
+export const TEAMSHARE_TOKEN_ENV = 'TEAMSHARE_TOKEN';
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -853,6 +861,180 @@ export function parseConnectArgv(argv) {
   return parsed;
 }
 
+// ---------------------------------------------------------------------------
+// Credential resolution for the standalone CLI entry point below: positional
+// argv (already parsed by parseConnectArgv above) first, then the matching
+// environment variable, then — only on a real terminal — an interactive
+// prompt. This is the exact same order and TTY-gating teamshare-team.mjs
+// uses for its own secrets (SIGNUP_SECRET_ENV/ADMIN_TOKEN_ENV, resolved by
+// its resolveSecretSource/resolveSecret/promptHidden), duplicated rather
+// than imported so this file keeps working as a single dependency-free
+// download — see the file-level comment at the top. The one deliberate
+// difference: this resolves TWO values, and only the token is a secret, so
+// the token prompt is masked (promptHidden) while the URL prompt echoes
+// normally (promptVisible) — nothing about typing a server URL needs
+// hiding, and being able to see it typed makes typos easier to catch.
+// ---------------------------------------------------------------------------
+
+// Pure decision, no I/O — mirrors teamshare-team.mjs's resolveSecretSource
+// exactly: an environment value wins even on a real terminal; with neither
+// an env value nor a terminal, the caller must fail loudly rather than hang
+// forever waiting for input that will never come (CI, piped stdin).
+export function resolveValueSource(envValue, isTTY) {
+  const trimmed = (envValue ?? '').trim();
+  if (trimmed) return 'env';
+  return isTTY ? 'prompt' : 'none';
+}
+
+// Mirrors teamshare-team.mjs's promptHidden exactly: masked input (readline
+// still processes editing keystrokes, but nothing it would otherwise echo
+// reaches the terminal), resolving `null` immediately without printing
+// anything when the input stream isn't a TTY.
+export function promptHidden(promptText, streams = {}) {
+  const input = streams.input ?? process.stdin;
+  const output = streams.output ?? process.stdout;
+  if (!input.isTTY) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    const rl = createInterface({ input, output, terminal: true, historySize: 0 });
+    output.write(promptText);
+
+    const rlAny = /** @type {any} */ (rl);
+    const original = rlAny._writeToOutput;
+    rlAny._writeToOutput = () => {};
+
+    rl.question('', (answer) => {
+      rlAny._writeToOutput = original;
+      rl.close();
+      output.write('\n');
+      resolve(answer);
+    });
+  });
+}
+
+// Same TTY-gating as promptHidden, but the typed answer echoes normally —
+// used for the server URL, which isn't a secret.
+export function promptVisible(promptText, streams = {}) {
+  const input = streams.input ?? process.stdin;
+  const output = streams.output ?? process.stdout;
+  if (!input.isTTY) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    const rl = createInterface({ input, output, terminal: true, historySize: 0 });
+    rl.question(promptText, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+/**
+ * One value's resolution: an already-known argv value (if any) first, then
+ * the environment, then — only on a real terminal — an interactive prompt.
+ * Mirrors teamshare-team.mjs's resolveSecret, with one added tier (argv) up
+ * front, since parseConnectArgv's positional <url> <token> form must keep
+ * working exactly as documented.
+ * @param {{
+ *   argvValue?: string,
+ *   envValue: string | undefined,
+ *   isTTY: boolean,
+ *   promptText: string,
+ *   promptFn: (promptText: string, streams?: object) => Promise<string | null>,
+ *   streams?: object,
+ * }} opts
+ */
+export async function resolveConnectValue(opts) {
+  const argvValue = (opts.argvValue ?? '').trim();
+  if (argvValue) return { ok: true, value: argvValue, source: 'argv' };
+
+  const source = resolveValueSource(opts.envValue, opts.isTTY);
+  if (source === 'env') {
+    return { ok: true, value: opts.envValue.trim(), source: 'env' };
+  }
+  if (source === 'prompt') {
+    const answer = await opts.promptFn(opts.promptText, opts.streams);
+    const trimmed = (answer ?? '').trim();
+    if (!trimmed) return { ok: false, reason: 'no value entered at the prompt' };
+    return { ok: true, value: trimmed, source: 'prompt' };
+  }
+  return { ok: false, reason: 'not running on a terminal and no environment variable is set' };
+}
+
+/**
+ * Resolves both the server URL and the personal token for the standalone
+ * CLI entry point below, using resolveConnectValue for each. Reports which
+ * tier each value came from ('argv' | 'env' | 'prompt') so the caller can
+ * print the shell-history warning precisely when — and only when — the
+ * token came from argv.
+ * @param {{ url?: string, token?: string }} parsed - from parseConnectArgv().
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   isTTY?: boolean,
+ *   urlPromptFn?: (promptText: string, streams?: object) => Promise<string | null>,
+ *   tokenPromptFn?: (promptText: string, streams?: object) => Promise<string | null>,
+ *   streams?: object,
+ * }} [opts]
+ */
+export async function resolveConnectCredentials(parsed, opts = {}) {
+  const env = opts.env ?? process.env;
+  const isTTY = opts.isTTY ?? Boolean(process.stdin.isTTY);
+  const streams = opts.streams;
+
+  const urlResult = await resolveConnectValue({
+    argvValue: parsed.url,
+    envValue: env[TEAMSHARE_URL_ENV],
+    isTTY,
+    promptText: 'Server URL: ',
+    promptFn: opts.urlPromptFn ?? promptVisible,
+    streams,
+  });
+  if (!urlResult.ok) {
+    return {
+      ok: false,
+      reason:
+        `could not resolve the server URL (${urlResult.reason}). Pass it as the first argument, set ` +
+        `${TEAMSHARE_URL_ENV}, or run this on an interactive terminal so it can prompt you.`,
+    };
+  }
+
+  const tokenResult = await resolveConnectValue({
+    argvValue: parsed.token,
+    envValue: env[TEAMSHARE_TOKEN_ENV],
+    isTTY,
+    promptText: 'Personal token (input hidden): ',
+    promptFn: opts.tokenPromptFn ?? promptHidden,
+    streams,
+  });
+  if (!tokenResult.ok) {
+    return {
+      ok: false,
+      reason:
+        `could not resolve the personal token (${tokenResult.reason}). Pass it as the second argument, set ` +
+        `${TEAMSHARE_TOKEN_ENV}, or run this on an interactive terminal so it can prompt you.`,
+    };
+  }
+
+  return {
+    ok: true,
+    url: urlResult.value,
+    token: tokenResult.value,
+    urlSource: urlResult.source,
+    tokenSource: tokenResult.source,
+  };
+}
+
+// Printed once, to stderr, only when the token was resolved from a
+// positional argument — the one path that leaves it sitting in shell
+// history (and in `ps` output for as long as the process runs). The env
+// and prompt paths never trigger this; nagging on those would just be
+// noise for the two paths that already keep the token out of both places.
+export function formatArgvTokenWarning() {
+  return (
+    'Note: passing the token as a command-line argument leaves it in your shell history — set ' +
+    `${TEAMSHARE_TOKEN_ENV} or leave it off this command and you will be prompted for it instead.\n`
+  );
+}
+
 const USAGE = `teamshare-connect — write MCP config for this machine's coding assistants
 
 Standalone, dependency-free — no clone, no pnpm install, no build required.
@@ -865,6 +1047,11 @@ Usage:
   node teamshare-connect.mjs <server-url> <team-token> --force
   node teamshare-connect.mjs <server-url> <team-token> --show-token
   node teamshare-connect.mjs --list
+
+The server URL and token can also come from ${TEAMSHARE_URL_ENV} / ${TEAMSHARE_TOKEN_ENV} in
+the environment, or — on a real terminal, whenever an argument is left off — an interactive
+prompt (the token is not echoed back). Passing the token as an argument works but leaves it
+in shell history; the environment variable or the prompt avoids that.
 
 targets: ${ALL_TARGET_IDS.join(', ')}
 `;
@@ -879,17 +1066,27 @@ if (isMainModule()) {
     process.stdout.write(USAGE);
   } else if (parsed.list) {
     process.stdout.write(formatListOutput(listTargets()));
-  } else if (!parsed.url || !parsed.token) {
-    process.stderr.write('usage: node teamshare-connect.mjs <server-url> <team-token> (or --list, --help)\n');
-    process.exitCode = 1;
   } else {
-    const run = runConnect(parsed.url, parsed.token, {
-      dryRun: parsed.dryRun,
-      force: parsed.force,
-      only: parsed.only,
-      showToken: parsed.showToken,
-    });
-    process.stdout.write(formatConnectOutput(run));
-    if (run.aborted) process.exitCode = 1;
+    resolveConnectCredentials(parsed)
+      .then((resolved) => {
+        if (!resolved.ok) {
+          process.stderr.write(`teamshare-connect: ${resolved.reason}\n`);
+          process.exitCode = 1;
+          return;
+        }
+        if (resolved.tokenSource === 'argv') process.stderr.write(formatArgvTokenWarning());
+        const run = runConnect(resolved.url, resolved.token, {
+          dryRun: parsed.dryRun,
+          force: parsed.force,
+          only: parsed.only,
+          showToken: parsed.showToken,
+        });
+        process.stdout.write(formatConnectOutput(run));
+        if (run.aborted) process.exitCode = 1;
+      })
+      .catch((err) => {
+        process.stderr.write(`teamshare-connect: unexpected error: ${err && err.message ? err.message : err}\n`);
+        process.exitCode = 1;
+      });
   }
 }

@@ -456,7 +456,10 @@ export function formatJoinInstructions(opts) {
     'No clone, no install, no build — grab the one connector file and run it:',
     '',
     '  curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-connect.mjs -o teamshare-connect.mjs',
-    `  node teamshare-connect.mjs ${url} ${token}`,
+    `  node teamshare-connect.mjs ${url}`,
+    '',
+    'It will prompt for your personal token (input hidden) — paste the one above. Passing it as a',
+    'second argument instead works too, but leaves it sitting in shell history.',
   ];
   return lines.join('\n') + '\n';
 }
