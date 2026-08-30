@@ -147,6 +147,16 @@ export interface JoinInstructionsOptions {
 export function formatJoinInstructions(opts: JoinInstructionsOptions): string;
 export function formatTokenOnceWarning(token: string): string;
 
+export interface AdminTokenGuidanceOptions {
+  url: string;
+}
+
+// Printed next to a fresh or rotated ADMIN token instead of join
+// instructions — that token 401s on every data route and the MCP
+// connection, so it cannot be used to join. Points the reader at minting
+// their own personal token with `invite` instead.
+export function formatAdminTokenGuidance(opts: AdminTokenGuidanceOptions): string;
+
 export interface FormatTeamOutputOptions {
   url: string;
   team: { teamId: string; name: string; token: string };

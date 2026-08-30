@@ -457,6 +457,35 @@ export function formatTokenOnceWarning(token) {
   ].join('\n');
 }
 
+// What the admin (team) token is actually for, printed anywhere a fresh or
+// rotated admin token is shown — deliberately NOT formatJoinInstructions,
+// because this credential cannot join anything: authenticate() (the
+// resolver every data route and the MCP connection use) consults only
+// member_tokens, so this token 401s on all of them. The one thing worth
+// telling the reader at this moment is the step it is easy to miss: the
+// person holding this token still needs their OWN personal token to use
+// teamshare at all, including the lead.
+export function formatAdminTokenGuidance(opts) {
+  const { url } = opts;
+  const lines = [
+    'This is the ADMIN token for this team, not a personal credential — keep it private. It',
+    'authenticates exactly four things: inviting members, revoking them, reading the roster, and',
+    'rotating itself. It grants no access to shares, receipts, or the digest, and it cannot be used',
+    'to join teamshare with — pasting it into the Claude Code plugin install flow, or into',
+    '`teamshare connect`, gets a 401 on every data route and on the MCP connection itself. There is',
+    'nothing to join with it.',
+    '',
+    'To actually use teamshare yourself — including if you are the lead — mint your own personal',
+    'token first (this step is easy to miss):',
+    '',
+    `  node teamshare-team.mjs invite ${url} <your-own-email> ["Your Name"]`,
+    '',
+    'That command prints the real join instructions, because it mints a token that can actually',
+    'connect.',
+  ];
+  return lines.join('\n') + '\n';
+}
+
 export function formatCreateOutput(opts) {
   const { url, team, verify } = opts;
   const lines = [
@@ -477,7 +506,7 @@ export function formatCreateOutput(opts) {
     'If this token is ever lost or leaked, the only remedy is rotation — it invalidates the old',
     `token immediately: node teamshare-team.mjs rotate-team ${url}`,
     '',
-    formatJoinInstructions({ url, token: team.token }),
+    formatAdminTokenGuidance({ url }),
   ];
   return lines.join('\n') + '\n';
 }
@@ -542,8 +571,13 @@ export function formatRotateOutput(opts) {
     '',
     `Team: ${team.name} (${team.teamId})`,
     '',
-    'The previous token for this team stopped working the instant this ran — every teammate must',
-    'reconnect with the new one below.',
+    'This rotates the ADMIN token only. The previous admin token stopped working the instant this',
+    "ran, but it authenticated nothing but invite/revoke/roster/rotate to begin with — every",
+    "teammate's personal token keeps working exactly as before. Nobody needs to reconnect, and",
+    'nothing they do is disrupted.',
+    '',
+    'That makes this a cheap, safe operation: rotate the admin token any time you suspect it has',
+    'leaked, or on a routine schedule, without it costing the team anything.',
     '',
     formatTokenOnceWarning(team.token),
     '',
@@ -555,7 +589,7 @@ export function formatRotateOutput(opts) {
     // where this same fix was made for the identical suggestion.
     `Re-verify anytime with: TEAMSHARE_URL=${url} TEAMSHARE_TOKEN=${team.token} teamshare doctor`,
     '',
-    formatJoinInstructions({ url, token: team.token }),
+    formatAdminTokenGuidance({ url }),
   ];
   return lines.join('\n') + '\n';
 }

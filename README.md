@@ -156,16 +156,30 @@ Re-verify anytime with: TEAMSHARE_URL=http://127.0.0.1:8799 TEAMSHARE_TOKEN=ts_<
 
 If this token is ever lost or leaked, the only remedy is rotation — it invalidates the old
 token immediately: node teamshare-team.mjs rotate-team <server-url>
+
+This is the ADMIN token for this team, not a personal credential — keep it private. It
+authenticates exactly four things: inviting members, revoking them, reading the roster, and
+rotating itself. It grants no access to shares, receipts, or the digest, and it cannot be used
+to join teamshare with — pasting it into the Claude Code plugin install flow, or into
+`teamshare connect`, gets a 401 on every data route and on the MCP connection itself. There is
+nothing to join with it.
+
+To actually use teamshare yourself — including if you are the lead — mint your own personal
+token first (this step is easy to miss):
+
+  node teamshare-team.mjs invite <server-url> <your-own-email> ["Your Name"]
+
+That command prints the real join instructions, because it mints a token that can actually
+connect.
 ```
 
 **This is an admin token, not something to hand out.** It mints invites,
 revokes access, reads the roster, and rotates itself — it grants **no**
-access to shares, receipts, or the digest, for anyone, including you.
-(The command's own output also appends a join-instructions block after
-this, the same boilerplate `invite` prints below — ignore it here: an
-admin token cannot actually authenticate `/unread` or the MCP connection,
-so there is nothing useful to join with yet. `invite` below is what gets
-anyone, including you, an actual working connection.)
+access to shares, receipts, or the digest, for anyone, including you. The
+command's own output says so directly, and — instead of appending join
+instructions it could never honor — points you at minting your own personal
+token with `invite` below, which is what actually gets anyone, including
+you, a working connection.
 
 ### Invite each teammate
 
@@ -230,12 +244,14 @@ never a positional argument) and invalidates the old one the instant it
 runs. **It does not disturb any teammate's connection.** Member tokens
 minted by `invite` are stored independently of the admin token and keep
 working exactly as before — only admin operations (`invite`/`revoke`/
-`roster`/another `rotate-team`) need the new value. (The tool's own success
-message still says "every teammate must reconnect," left over from the
-single-shared-token design — that line is stale; verified directly that an
-already-issued member token keeps authenticating after rotation.) See
-[Admin](#admin) for the operator's break-glass path, for when a team's
-admin token is gone entirely rather than merely leaked.
+`roster`/another `rotate-team`) need the new value. The tool's own success
+message says exactly this: the previous admin token stopped working the
+instant it ran, every teammate's personal token keeps working unaffected,
+and nobody needs to reconnect — which is what makes rotating the admin
+token a cheap, safe operation to run any time you suspect it's leaked, not
+something to put off. See [Admin](#admin) for the operator's break-glass
+path, for when a team's admin token is gone entirely rather than merely
+leaked.
 
 **Already have teamshare working on this machine and need a second,
 independent team** — e.g. spinning one up for another group? Claude Code

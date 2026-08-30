@@ -32,7 +32,7 @@ import {
   normalizeServerUrl,
   type TargetId,
 } from './connect.js';
-import { formatInviteOutput, formatJoinInstructions, formatRosterOutput, formatTokenOnceWarning } from './team.js';
+import { formatInviteOutput, formatRosterOutput, formatTokenOnceWarning } from './team.js';
 
 export interface Args {
   cmd:
@@ -601,7 +601,7 @@ function resolveServer(
     return { server: null, legacyConfig: null, lines, problem: true };
   }
 
-  const uniquePairs = new Set(discovered.map((d) => `${d.url} ${d.token}`));
+  const uniquePairs = new Set(discovered.map((d) => `${d.url}\0${d.token}`));
   if (uniquePairs.size > 1) {
     lines.push(
       `[PROBLEM] found a teamshare entry in ${discovered.length} assistant configs that do not agree ` +
@@ -797,9 +797,14 @@ export async function main(argv: string[]): Promise<void> {
     const token = rotateTeamToken(db, resolved.id);
     db.close();
     process.stdout.write(
-      `New team token for "${resolved.name}":\n\n  ${token}\n\n` +
-        'Teammates must reconnect with this token: `/plugin configure teamshare` for Claude Code, ' +
-        'or `teamshare connect` again for everyone else.\n',
+      `New ADMIN token for "${resolved.name}":\n\n  ${token}\n\n` +
+        'This rotates the ADMIN token only (invite/revoke/roster/rotate) — the previous admin token ' +
+        "stopped working immediately. Every teammate's personal token keeps working exactly as " +
+        'before; nobody needs to reconnect, and nothing they do is disrupted. That makes this a ' +
+        'cheap, safe operation to run any time you suspect the admin token has leaked.\n\n' +
+        'This token cannot be used to join teamshare itself — it 401s on every data route and on the ' +
+        'MCP connection. To use teamshare yourself, mint your own personal token: ' +
+        '`teamshare invite <your-own-email>`.\n',
     );
     return;
   }
@@ -989,7 +994,26 @@ export async function main(argv: string[]): Promise<void> {
       );
     }
 
-    lines.push(formatJoinInstructions({ url: args.createTeamUrl ?? '<url>', token }));
+    // §Identity comes from the token: this is the ADMIN token, not a
+    // personal one — deliberately not formatJoinInstructions. It 401s on
+    // every data route and on the MCP connection (authenticate() consults
+    // only member_tokens), so there is nothing to "join" with it. The one
+    // thing worth telling the reader here is the step that's easy to miss:
+    // even the person who just ran this still needs their own personal
+    // token to use teamshare at all.
+    lines.push(
+      [
+        'This is the ADMIN token for this team, not a personal credential — keep it private. It',
+        'authenticates only invite/revoke/roster/rotate; it grants no access to shares, receipts, or',
+        'the digest, and it cannot be used to join teamshare with — pasting it into the Claude Code',
+        'plugin install flow, or into `teamshare connect`, gets a 401 on every data route and on the',
+        'MCP connection itself.',
+        '',
+        'To actually use teamshare yourself — including if you are the lead — mint your own personal',
+        'token first (this step is easy to miss): `teamshare invite <your-own-email>`. That command',
+        'prints the real join instructions, because it mints a token that can actually connect.',
+      ].join('\n'),
+    );
 
     process.stdout.write(lines.join('\n') + '\n');
     return;

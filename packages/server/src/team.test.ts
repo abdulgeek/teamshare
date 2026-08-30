@@ -21,6 +21,7 @@ import {
   getRosterOverHttp,
   formatJoinInstructions,
   formatTokenOnceWarning,
+  formatAdminTokenGuidance,
   formatCreateOutput,
   formatRotateOutput,
   formatMemberTokenOnceWarning,
@@ -549,7 +550,7 @@ describe('formatCreateOutput / formatRotateOutput', () => {
   const team = { teamId: 'tm_abc', name: 'Rocket Squad', token: 'ts_new_token' };
   const verify = { healthy: true, lines: ['[OK] server reachable at https://ts.example.com/health'] };
 
-  it('formatCreateOutput includes the token-once warning, verify lines, a re-verify doctor line, the rotation remedy, and join instructions', () => {
+  it('formatCreateOutput includes the token-once warning, verify lines, a re-verify doctor line, and the rotation remedy — but never join instructions for the admin token', () => {
     const out = formatCreateOutput({ url: 'https://ts.example.com', team, verify });
     expect(out.toLowerCase()).toContain('shown once');
     expect(out).toContain('[OK] server reachable');
@@ -559,18 +560,48 @@ describe('formatCreateOutput / formatRotateOutput', () => {
     expect(out).toContain('TEAMSHARE_URL=https://ts.example.com TEAMSHARE_TOKEN=ts_new_token teamshare doctor');
     expect(out).not.toContain('teamshare doctor https://ts.example.com ts_new_token');
     expect(out).toContain('rotate-team');
-    expect(out).toContain('/plugin install teamshare');
+    // This mints the ADMIN token — authenticate() never accepts it, so it
+    // 401s on every data route and on the MCP connection. It cannot be used
+    // to join, so this output must never say "here's how to join" next to
+    // it (regression test for the defect: both create-team and rotate-team
+    // used to append the real join instructions with this very token).
+    expect(out).not.toContain('/plugin marketplace add');
+    expect(out).not.toContain('/plugin install teamshare');
+    expect(out.toLowerCase()).toContain('admin token');
+    expect(out.toLowerCase()).toContain('cannot be used');
+    expect(out).toContain('node teamshare-team.mjs invite https://ts.example.com <your-own-email>');
   });
 
-  it('formatRotateOutput says the previous token stopped working and everyone must reconnect', () => {
+  it('formatRotateOutput says the admin token was rotated, the old one stopped working immediately, and every teammate keeps working unaffected', () => {
     const out = formatRotateOutput({ url: 'https://ts.example.com', team, verify });
+    // Rotation only ever touches teams.token_hash — member_tokens is a
+    // completely separate table (rotateTeamToken in db.ts) — so teammates
+    // must never be told to reconnect, and the operation should read as
+    // cheap and safe, since the old wording discouraged exactly the
+    // rotation it should encourage.
+    expect(out.toLowerCase()).toContain('admin token');
     expect(out.toLowerCase()).toContain('stopped working');
-    expect(out.toLowerCase()).toContain('reconnect');
+    expect(out.toLowerCase()).toContain("nobody needs to reconnect");
+    expect(out.toLowerCase()).toContain('cheap');
+    expect(out.toLowerCase()).toContain('safe');
+    expect(out).not.toMatch(/every teammate must (reconnect|reconnect with)/i);
     expect(out.toLowerCase()).toContain('shown once');
-    expect(out).toContain('/plugin install teamshare');
+    // Same regression test as formatCreateOutput above: the admin token
+    // this mints cannot be used to join, so no join instructions for it.
+    expect(out).not.toContain('/plugin marketplace add');
+    expect(out).not.toContain('/plugin install teamshare');
+    expect(out).toContain('node teamshare-team.mjs invite https://ts.example.com <your-own-email>');
     // Same env-var fix as formatCreateOutput's re-verify line, above.
     expect(out).toContain('TEAMSHARE_URL=https://ts.example.com TEAMSHARE_TOKEN=ts_new_token teamshare doctor');
     expect(out).not.toContain('teamshare doctor https://ts.example.com ts_new_token');
+  });
+
+  it('formatAdminTokenGuidance never mentions join instructions and points at inviting yourself', () => {
+    const out = formatAdminTokenGuidance({ url: 'https://ts.example.com' });
+    expect(out).not.toContain('/plugin marketplace add');
+    expect(out).not.toContain('/plugin install teamshare');
+    expect(out.toLowerCase()).toContain('admin token');
+    expect(out).toContain('node teamshare-team.mjs invite https://ts.example.com <your-own-email>');
   });
 });
 
@@ -619,6 +650,10 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
     expect(result.stdout.match(/\[OK\]/g)?.length).toBeGreaterThanOrEqual(2); // /health AND /members
     expect(result.stdout).not.toContain(SIGNUP_SECRET);
     expect(result.stderr).not.toContain(SIGNUP_SECRET);
+    // This mints the ADMIN token — it cannot be used to join teamshare, so
+    // this output must never print join instructions next to it.
+    expect(result.stdout).not.toContain('/plugin marketplace add');
+    expect(result.stdout).not.toContain('/plugin install teamshare');
     expect(findTeamByName(db, 'CLI Squad')).toBeTruthy();
   });
 
@@ -662,6 +697,11 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
     expect(result.stdout).toContain('teamshare rotate-team — success');
     expect(result.stdout).not.toContain(oldToken);
     expect(result.stdout.toLowerCase()).toContain('stopped working');
+    expect(result.stdout.toLowerCase()).toContain('nobody needs to reconnect');
+    // This mints the ADMIN token — it cannot be used to join teamshare, so
+    // this output must never print join instructions next to it.
+    expect(result.stdout).not.toContain('/plugin marketplace add');
+    expect(result.stdout).not.toContain('/plugin install teamshare');
 
     // The old admin token must genuinely stop working on another
     // admin-authenticated route — see the identical reasoning in the

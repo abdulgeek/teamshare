@@ -606,10 +606,17 @@ describe('rotate-token on a migrated database genuinely invalidates the old toke
       process.stdout.write = original;
     }
     const printed = chunks.join('');
-    const match = printed.match(/New team token[^:]*:\s*\n\s*\n\s*(\S+)/);
+    const match = printed.match(/New ADMIN token[^:]*:\s*\n\s*\n\s*(\S+)/);
     expect(match).toBeTruthy();
     const newToken = match![1];
     expect(newToken).not.toBe(oldToken);
+    // This is the admin token, not a personal one — rotating it must not
+    // claim teammates are affected, and must not tell anyone to "reconnect"
+    // with it (it cannot be used to join anything).
+    expect(printed.toLowerCase()).toContain('stopped working');
+    expect(printed.toLowerCase()).toContain('nobody needs to reconnect');
+    expect(printed).not.toContain('/plugin configure teamshare');
+    expect(printed).not.toContain('/plugin install teamshare');
 
     const verifyDb = openDb(dbPath);
     try {
@@ -674,8 +681,16 @@ describe('create-team (break-glass CLI, local database only)', () => {
     expect(out).toContain('TEAMSHARE_URL=<url> TEAMSHARE_TOKEN=');
     expect(out).toContain('teamshare doctor');
     expect(out).not.toContain('teamshare doctor <url>');
-    expect(out).toContain('/plugin install teamshare');
-    expect(out).toContain('git config --global user.name');
+    // create-team mints the ADMIN token, which 401s on every data route and
+    // the MCP connection — it cannot be used to join, so this output must
+    // never hand out join instructions for it. The real join instructions
+    // belong to `invite`, which mints an actual member token (see the
+    // dedicated describe block below).
+    expect(out).not.toContain('/plugin install teamshare');
+    expect(out).not.toContain('/plugin marketplace add');
+    expect(out.toLowerCase()).toContain('admin token');
+    expect(out.toLowerCase()).toContain('cannot be used to join');
+    expect(out).toContain('teamshare invite <your-own-email>');
 
     const db = openDb(dbPath);
     try {
