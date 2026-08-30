@@ -46,6 +46,22 @@ instance if either was ever lost — see [`deploy/aws/README.md`
 
 ## Join a team (the most common path)
 
+Two things below can look like arbitrary bureaucracy if nobody says why.
+**Why a server URL:** teamshare isn't a self-contained plugin — a shared
+noticeboard has to live somewhere every teammate can reach, and that's your
+team's server. It's already running, so you're not standing anything up,
+just pointing at the address your lead gives you (standing one up at all is
+a separate, once-per-company job — see [Install](#install-it-once-per-company)
+above). **Why a personal token:** two concrete reasons. It keeps the
+noticeboard private — without it, anyone who installed this plugin and
+guessed the address could read your team's shares. And it's how the server
+knows *which* teammate you are: every share you publish and every "yes,
+I've read that" is attributed by the token, not by a name your client
+claims — exactly why your lead mints one per person rather than the team
+passing one around, and what makes "who's seen this?" a real answer instead
+of a guess. Either way, you don't go hunting for either value: **your lead
+sends you both, in one message.**
+
 Every share and read receipt is attributed to your git identity. Set it
 once, before installing anything:
 
@@ -63,9 +79,10 @@ Then, depending on your assistant:
 /plugin install teamshare
 ```
 
-You'll be prompted for the **Server URL** and **Your personal token** — the
-token your team lead sent you privately with `teamshare invite` (see below).
-Trust the workspace when asked, then restart Claude Code.
+You'll be prompted for the **Server URL** (this team's is
+`https://54.90.22.249.sslip.io`) and **Your personal token** — the token
+your team lead sent you privately with `teamshare invite` (see below). Trust
+the workspace when asked, then restart Claude Code.
 
 **Everything else (Cursor, Codex, Windsurf, Gemini CLI, ...):**
 
@@ -74,7 +91,7 @@ Same source as above: your lead sends you the server URL and your personal token
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-connect.mjs -o teamshare-connect.mjs
-node teamshare-connect.mjs <server-url>
+node teamshare-connect.mjs https://54.90.22.249.sslip.io
 ```
 
 It prompts for your personal token (hidden as you type) — paste the one your lead sent you.
@@ -99,7 +116,7 @@ mint each teammate their own personal token and send it to them privately:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
-node teamshare-team.mjs invite <server-url> <email> ["<name>"]
+node teamshare-team.mjs invite https://54.90.22.249.sslip.io <email> ["<name>"]
 ```
 
 It prompts for your admin token rather than taking it as an argument, so the
@@ -145,7 +162,7 @@ checkout, no install — she downloads one script and creates her team:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
-TEAMSHARE_SIGNUP_SECRET=<the-org-secret> node teamshare-team.mjs create-team https://teamshare.acme.example.com "Acme Engineering"
+TEAMSHARE_SIGNUP_SECRET=<the-org-secret> node teamshare-team.mjs create-team https://54.90.22.249.sslip.io "Acme Engineering"
 ```
 
 ```
@@ -159,8 +176,8 @@ Team token (shown once — this cannot be recovered later; save it in a password
 
 Verifying the new token against the live server:
 
-[OK] server reachable at https://teamshare.acme.example.com/health
-[OK] https://teamshare.acme.example.com/members returned 200 (0 known email(s))
+[OK] server reachable at https://54.90.22.249.sslip.io/health
+[OK] https://54.90.22.249.sslip.io/members returned 200 (0 known email(s))
 ...
 This is the ADMIN token for this team, not a personal credential — it cannot be used to join
 teamshare with. To actually use teamshare yourself, mint your own personal token first: ...
@@ -170,7 +187,7 @@ She saves the admin token in a password manager, then — because the admin
 token can't itself be used to join — mints her own personal token:
 
 ```bash
-TEAMSHARE_ADMIN_TOKEN=<the-admin-token-above> node teamshare-team.mjs invite https://teamshare.acme.example.com priya@example.com "Priya"
+TEAMSHARE_ADMIN_TOKEN=<the-admin-token-above> node teamshare-team.mjs invite https://54.90.22.249.sslip.io priya@example.com "Priya"
 ```
 
 That prints her personal token (`tsm_...`) plus the same join instructions
@@ -179,7 +196,7 @@ below, which she follows herself.
 **Inviting Sam.** Priya mints Sam his own token the same way:
 
 ```bash
-TEAMSHARE_ADMIN_TOKEN=<the-admin-token-above> node teamshare-team.mjs invite https://teamshare.acme.example.com sam@example.com "Sam"
+TEAMSHARE_ADMIN_TOKEN=<the-admin-token-above> node teamshare-team.mjs invite https://54.90.22.249.sslip.io sam@example.com "Sam"
 ```
 
 ```
@@ -202,7 +219,7 @@ Send this token privately to sam@example.com only — never post it in a shared 
 
 --- Not using Claude Code? ---
 curl -fsSL .../teamshare-connect.mjs -o teamshare-connect.mjs
-node teamshare-connect.mjs https://teamshare.acme.example.com
+node teamshare-connect.mjs https://54.90.22.249.sslip.io
 ```
 
 Priya sends that whole block to Sam in a DM, never in the team channel.
@@ -216,7 +233,7 @@ install, no build:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-connect.mjs -o teamshare-connect.mjs
-node teamshare-connect.mjs https://teamshare.acme.example.com
+node teamshare-connect.mjs https://54.90.22.249.sslip.io
 ```
 
 It prompts for his personal token (hidden as he types), detects Cursor on
@@ -242,8 +259,8 @@ node packages/server/dist/cli.js doctor
 ```
 [OK] found a teamshare entry in Cursor (~/.cursor/mcp.json)
 [INFO] identity this machine would present: Sam <sam@example.com>
-[OK] server reachable at https://teamshare.acme.example.com/health
-[OK] https://teamshare.acme.example.com/unread returned 200 (0 unread share(s))
+[OK] server reachable at https://54.90.22.249.sslip.io/health
+[OK] https://54.90.22.249.sslip.io/unread returned 200 (0 unread share(s))
 [OK] connected to team: Acme Engineering
 ```
 
@@ -319,23 +336,23 @@ curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/s
 
 - `create-team <url> "<name>"` — create a team; prints an admin token (shown once).
   ```bash
-  TEAMSHARE_SIGNUP_SECRET=<secret> node teamshare-team.mjs create-team <server-url> "Acme Engineering"
+  TEAMSHARE_SIGNUP_SECRET=<secret> node teamshare-team.mjs create-team https://54.90.22.249.sslip.io "Acme Engineering"
   ```
 - `rotate-team <url>` — invalidate the current admin token, mint a new one. No teammate's connection is disturbed.
   ```bash
-  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs rotate-team <server-url>
+  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs rotate-team https://54.90.22.249.sslip.io
   ```
 - `invite <url> <email> ["<name>"]` — mint one person a personal token (shown once); send it to them privately.
   ```bash
-  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs invite <server-url> sam@example.com "Sam"
+  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs invite https://54.90.22.249.sslip.io sam@example.com "Sam"
   ```
 - `revoke <url> <email>` — kill every live token for one email, on every device.
   ```bash
-  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs revoke <server-url> sam@example.com
+  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs revoke https://54.90.22.249.sslip.io sam@example.com
   ```
 - `roster <url>` — list who has a live token and who's still "invited, not yet active."
   ```bash
-  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs roster <server-url>
+  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs roster https://54.90.22.249.sslip.io
   ```
 
 **The lead, from a checkout** — same five identity operations as the local
@@ -345,7 +362,7 @@ required once the server hosts more than one team, optional and inferred
 otherwise.
 
 ```bash
-node packages/server/dist/cli.js create-team "<name>" [--url <server-url>] [--db <path>]
+node packages/server/dist/cli.js create-team "<name>" [--url https://54.90.22.249.sslip.io] [--db <path>]
 node packages/server/dist/cli.js invite <email> ["<name>"] [--team "<name>"] [--db <path>]
 node packages/server/dist/cli.js revoke <email> [--team "<name>"] [--db <path>]
 node packages/server/dist/cli.js roster [--team "<name>"] [--db <path>]
@@ -362,11 +379,11 @@ against any server, regardless of what's configured on this machine.
 
 - `doctor [<url> <token>]` — the real check for a silent connection: resolves a server URL/token (explicit args, `TEAMSHARE_URL`/`TEAMSHARE_TOKEN`, `~/.teamshare.json`, or a discovered assistant config, in that order) and reports identity, reachability, and unread count.
   ```bash
-  TEAMSHARE_URL=<server-url> TEAMSHARE_TOKEN=<your-token> node packages/server/dist/cli.js doctor
+  TEAMSHARE_URL=https://54.90.22.249.sslip.io TEAMSHARE_TOKEN=<your-token> node packages/server/dist/cli.js doctor
   ```
 - `connect <url> <token> [--only cursor,codex] [--dry-run] [--force] [--show-token]` — same connector as the standalone script below, built into the CLI.
   ```bash
-  node packages/server/dist/cli.js connect <server-url> <your-token> --only cursor,codex --dry-run
+  node packages/server/dist/cli.js connect https://54.90.22.249.sslip.io <your-token> --only cursor,codex --dry-run
   ```
 - `connect --list` — show which assistants this machine has and their config paths, without writing anything.
   ```bash
@@ -382,7 +399,7 @@ curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/s
 
 - `<url> [token]` — configure every detected assistant on this machine in one run; prompts for the token (hidden) if you don't pass it or set `TEAMSHARE_TOKEN`.
   ```bash
-  node teamshare-connect.mjs <server-url>
+  node teamshare-connect.mjs https://54.90.22.249.sslip.io
   ```
 - `--only cursor,codex` — restrict to specific targets: `cursor`, `vscode`, `windsurf`, `gemini`, `cline`, `codex`, `zed`, `continue`.
 - `--dry-run` — print what would change, write nothing.
@@ -401,11 +418,11 @@ curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/s
   ```
 - `/teamshare-create-team [team name] [server-url]` — mint a *second*, independent team on a server this machine already talks to. Not the first-time path — that's the team-lead section above.
   ```
-  /teamshare-create-team "Platform Team" https://teamshare.acme.example.com
+  /teamshare-create-team "Platform Team" https://54.90.22.249.sslip.io
   ```
 - `/teamshare-setup [server-url] [team-token]` — supply the server URL and token by hand, for `claude --plugin-dir` development or repairing a broken config. Not part of a normal install.
   ```
-  /teamshare-setup https://teamshare.acme.example.com tsm_...
+  /teamshare-setup https://54.90.22.249.sslip.io tsm_...
   ```
 
 **MCP tools your agent calls for you** — you don't type these; ask in plain
