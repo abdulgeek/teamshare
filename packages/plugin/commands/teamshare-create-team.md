@@ -91,26 +91,10 @@ output.
    const fs = require("node:fs");
    const os = require("node:os");
    const path = require("node:path");
-   const { execFileSync } = require("node:child_process");
 
    const name = process.env.TEAMSHARE_NEW_TEAM_NAME;
    const url = String(process.env.TEAMSHARE_NEW_TEAM_URL).replace(/\/+$/, "").replace(/\/mcp$/i, "");
    const secret = process.env.TEAMSHARE_SIGNUP_SECRET;
-
-   function gitIdentity() {
-     const home = os.homedir();
-     const run = (args) => {
-       try {
-         return execFileSync("git", args, { cwd: home, timeout: 1500, stdio: ["ignore", "pipe", "ignore"] })
-           .toString("utf8").trim();
-       } catch { return ""; }
-     };
-     let n = run(["config", "--global", "--get", "user.name"]);
-     let e = run(["config", "--global", "--get", "user.email"]);
-     if (!n) n = run(["config", "--get", "user.name"]);
-     if (!e) e = run(["config", "--get", "user.email"]);
-     return (n && e) ? { name: n, email: e } : null;
-   }
 
    (async () => {
      if (!secret) { console.log("RESULT: no-secret"); process.exitCode = 1; return; }
@@ -145,24 +129,22 @@ output.
        if (!h.ok) healthy = false;
      } catch { healthy = false; }
 
-     const identity = gitIdentity();
-     let identityChecked = false;
-     if (identity) {
-       identityChecked = true;
-       try {
-         const u = await fetch(url + "/unread", {
-           headers: {
-             Authorization: "Bearer " + body.token,
-             "X-Teamshare-Email": identity.email.trim().toLowerCase(),
-             "X-Teamshare-Name": identity.name.trim(),
-           },
-         });
-         if (u.status !== 200) healthy = false;
-       } catch { healthy = false; }
-     }
+     // /members, NOT /unread. The token just minted is the team's ADMIN
+     // token, and an admin token grants no access to shares, receipts, or
+     // the digest — /unread 401s for it by design, so checking there would
+     // report every successful creation as unhealthy. /members is the one
+     // data-plane-adjacent route an admin token genuinely does authenticate,
+     // and it needs no per-user identity headers. This mirrors verifyTeam()
+     // in packages/server/src/teamshare-team.mjs.
+     try {
+       const m = await fetch(url + "/members", {
+         headers: { Authorization: "Bearer " + body.token },
+       });
+       if (m.status !== 200) healthy = false;
+     } catch { healthy = false; }
 
      console.log("RESULT: created " + JSON.stringify(body.name));
-     console.log("VERIFY: " + (healthy ? "healthy" : "unhealthy") + (identityChecked ? "" : " (no git identity on this machine — /unread not checked)"));
+     console.log("VERIFY: " + (healthy ? "healthy" : "unhealthy"));
      console.log("SAVED: " + outPath);
    })();
    '
