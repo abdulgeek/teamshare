@@ -68,29 +68,31 @@ node teamshare-connect.mjs <server-url> <your-personal-token>
 No clone, no install, no build. Run `node teamshare-connect.mjs --list` to
 see which assistants it detects on this machine.
 
-Either way, confirm the connection actually works:
+Either way, confirm it worked by starting a session and asking your agent
+whether you have any unread team shares. If a teammate has published one, you
+will see it; if nothing has been shared yet, you will be told that too — which
+is the same answer, and that is the point.
 
-```bash
-node packages/server/dist/cli.js doctor
-```
-
-Every delivery failure in this system is silent by design — see
-[`docs/reference.md`](docs/reference.md#diagnosing-a-silent-connection-teamshare-doctor)
-for why `doctor` exists and how to read its output.
+Every delivery failure here is silent by design, so "I see nothing" and "I am
+not connected" look identical. If you need a real check, `teamshare doctor`
+does one — it needs a checkout of this repo, so see
+[`docs/reference.md`](docs/reference.md#diagnosing-a-silent-connection-teamshare-doctor).
 
 ## Add someone to your team (the lead)
 
-Once you've created a team (`teamshare-team.mjs create-team`, which prints
+Once you've created a team (`node teamshare-team.mjs create-team`, which prints
 an **admin token** — save it, but note it cannot itself join teamshare),
 mint each teammate their own personal token and send it to them privately:
 
 ```bash
-node packages/server/src/teamshare-team.mjs invite <server-url> <email> ["<name>"]
+curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
+node teamshare-team.mjs invite <server-url> <email> ["<name>"]
 ```
 
-This needs the admin token, resolved from `TEAMSHARE_ADMIN_TOKEN` in the
-environment (or prompted for on a real terminal — never a command-line
-argument; `TEAMSHARE_TEAM_TOKEN` also works, as an older alias). It prints
+It prompts for your admin token rather than taking it as an argument, so the
+token stays out of your shell history and out of `ps` output. For scripting,
+set `TEAMSHARE_ADMIN_TOKEN` in the environment instead (`TEAMSHARE_TEAM_TOKEN`
+is an older alias for the same thing). It prints
 that person's token once, plus ready-to-send join instructions — send them
 in a DM, never in a shared channel. One message per person is what makes a
 share's sender and a receipt's reader real, checked facts instead of an
