@@ -585,3 +585,84 @@ describe('listRoster (data layer)', () => {
     expect(listRoster(scope).find((m) => m.email === 'sam@team.com')?.status).toBe('invited, not yet active');
   });
 });
+
+
+describe('inviting a team is not treated as an attack', () => {
+  // Regression: /invites shared the signup limiter's five-per-ten-minutes
+  // bucket, so a lead who created a team and then onboarded colleagues got a
+  // 429 on the fifth call — and since a failed invite just prints an error,
+  // that teammate was silently left without a token. Onboarding a team in one
+  // sitting is the commonest thing a lead ever does.
+  async function start(overrides: Partial<AppOptions> = {}) {
+    const db = openDb(':memory:');
+    const app = createApp({ db, expiryDays: 14, now: () => NOW, signupSecret: 'sig_topsecret', ...overrides });
+    const server = await new Promise<Server>((resolve) => {
+      const srv = app.listen(0, () => resolve(srv));
+    });
+    const addr = server.address();
+    const base = typeof addr === 'object' && addr ? `http://127.0.0.1:${addr.port}` : '';
+    return {
+      base,
+      createTeam: (name: string) =>
+        fetch(`${base}/teams`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Teamshare-Signup-Secret': 'sig_topsecret' },
+          body: JSON.stringify({ name }),
+        }),
+      invite: (admin: string, email: string) =>
+        fetch(`${base}/invites`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${admin}` },
+          body: JSON.stringify({ email }),
+        }),
+      async close() {
+        await new Promise<void>((r) => server.close(() => r()));
+        db.close();
+      },
+    };
+  }
+
+  it('lets one admin invite a realistic team without hitting a limit', async () => {
+    const ctx = await start();
+    try {
+      const team = await ctx.createTeam('Big Team');
+      expect(team.status).toBe(201);
+      const admin = (await team.json()).token as string;
+
+      // Eight people, on top of the team creation already spent above — well
+      // past the old shared bucket of five.
+      for (let i = 0; i < 8; i++) {
+        const res = await ctx.invite(admin, `dev${i}@acme.com`);
+        expect(res.status, `invite ${i} was rejected with ${res.status}`).toBe(201);
+      }
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('still bounds invites, so a stolen admin token cannot mint without limit', async () => {
+    const ctx = await start({ inviteRateLimit: { windowMs: 60_000, max: 2 } });
+    try {
+      const admin = (await (await ctx.createTeam('Capped')).json()).token as string;
+      expect((await ctx.invite(admin, 'a@acme.com')).status).toBe(201);
+      expect((await ctx.invite(admin, 'b@acme.com')).status).toBe(201);
+      expect((await ctx.invite(admin, 'c@acme.com')).status).toBe(429);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('keeps team creation on its own tight bucket, neither feeding nor fed by invites', async () => {
+    const ctx = await start({ signupRateLimit: { windowMs: 60_000, max: 1 } });
+    try {
+      const first = await ctx.createTeam('One');
+      expect(first.status).toBe(201);
+      const admin = (await first.json()).token as string;
+      expect((await ctx.invite(admin, 'a@acme.com')).status).toBe(201);
+      // The invite must not have refilled — or drained — the signup budget.
+      expect((await ctx.createTeam('Two')).status).toBe(429);
+    } finally {
+      await ctx.close();
+    }
+  });
+});

@@ -44,6 +44,7 @@ export interface AppOptions {
   // Instance-wide cap on total teams. undefined = unlimited.
   maxTeams?: number;
   signupRateLimit?: SignupRateLimitOptions;
+  inviteRateLimit?: SignupRateLimitOptions;
 }
 
 // A few lines, in-process, per the design doc: bounds how many team-creation
@@ -51,6 +52,21 @@ export interface AppOptions {
 // signup secret cannot be used to mint unlimited teams. Keyed off the app's
 // own now() clock (not wall time) so tests never need a real timer.
 const DEFAULT_SIGNUP_RATE_LIMIT: SignupRateLimitOptions = { windowMs: 10 * 60_000, max: 5 };
+
+// Inviting gets its OWN, far larger bucket. It used to share the signup
+// limiter, one bucket for both — which meant a lead who created a team and
+// then onboarded their colleagues hit 429 on the fifth call and, because the
+// invite that failed simply printed an error, silently left that teammate
+// without a token. Onboarding a team in one sitting is the single most common
+// thing a lead does, and it was rate-limited as if it were an attack.
+//
+// The two are not comparable risks. POST /teams is reachable by anyone holding
+// a shared org-wide signup secret; POST /invites requires that team's admin
+// token and can only ever mint credentials scoped to that one team. A tight
+// bound is right for the first and wrong for the second. This still bounds a
+// runaway loop or a stolen admin token, at a level no real team reaches:
+// sixty invitations in ten minutes from one address.
+const DEFAULT_INVITE_RATE_LIMIT: SignupRateLimitOptions = { windowMs: 10 * 60_000, max: 60 };
 
 function createSignupRateLimiter(opts: SignupRateLimitOptions) {
   const hits = new Map<string, { count: number; resetAt: number }>();
@@ -77,6 +93,7 @@ export function createApp(opts: AppOptions): express.Express {
   const signupSecret = opts.signupSecret ?? null;
   const maxTeams = opts.maxTeams;
   const allowSignupAttempt = createSignupRateLimiter(opts.signupRateLimit ?? DEFAULT_SIGNUP_RATE_LIMIT);
+  const allowInviteAttempt = createSignupRateLimiter(opts.inviteRateLimit ?? DEFAULT_INVITE_RATE_LIMIT);
 
   const app = express();
   app.use(express.json({ limit: '256kb' }));
@@ -156,14 +173,13 @@ export function createApp(opts: AppOptions): express.Express {
   });
 
   // §Identity comes from the token. Admin-only: mints a personal credential
-  // for one named email, never asserted by the joiner. Rate-limited with the
-  // exact same per-IP limiter POST /teams uses (deliberately shared, not a
-  // second independent bucket) — an admin token leaking should not let an
-  // attacker mint unlimited member credentials any more than a leaked
-  // signup secret should mint unlimited teams.
+  // for one named email, never asserted by the joiner. Rate-limited on its own
+  // generous per-IP bucket (see DEFAULT_INVITE_RATE_LIMIT) rather than sharing
+  // the signup one, so onboarding a whole team in one sitting is not mistaken
+  // for abuse — while a stolen admin token still cannot mint without bound.
   app.post('/invites', (req, res) => {
     const ip = clientIp(req);
-    if (!allowSignupAttempt(ip, Date.parse(now()))) {
+    if (!allowInviteAttempt(ip, Date.parse(now()))) {
       res.status(429).json({ error: 'too many invite attempts from this address — try again later' });
       return;
     }
