@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { openDb, createTeam, hashToken, findTeamByName, makeTeamScope, createMemberToken, type Db } from './db.js';
 import { createApp } from './app.js';
@@ -33,7 +33,20 @@ import {
   SIGNUP_SECRET_ENV,
   TEAM_TOKEN_ENV,
   ADMIN_TOKEN_ENV,
+  SERVER_URL_ENV,
+  DEFAULT_SERVER_URL,
   adminTokenFromEnv,
+  looksLikeServerUrl,
+  invocationName,
+  resolveServerUrl,
+  readAdminStore,
+  readBundledMcpUrl,
+  adminEntriesFor,
+  adminStorePath,
+  saveAdminEntry,
+  resolveAdminTokenFromStore,
+  resolveMemberToken,
+  formatWhoamiOutput,
 } from './team.js';
 
 const NOW = '2026-08-29T00:00:00.000Z';
@@ -376,6 +389,11 @@ describe('inviteMemberOverHttp / revokeMemberOverHttp / getRosterOverHttp agains
     const result = await inviteMemberOverHttp({ url: base, adminToken: 'ts_wrong', email: 'sam@team.com' });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
+    // Assert the message too, not just the code. /invites can only answer 401,
+    // 400, 429 or 201 — so a 403 here (seen once) did not come from this
+    // server at all, and a bare status mismatch gives no hint of that. The
+    // message makes a wrong-server response name itself.
+    expect(result.message, `unexpected ${result.status} from ${base}`).toMatch(/token|auth/i);
     expect(result.status).toBe(401);
   });
 
@@ -431,11 +449,17 @@ describe('formatMemberTokenOnceWarning / formatInviteOutput / formatRevokeOutput
   });
 
   it('formatInviteOutput tells the lead to send the token privately, and includes join instructions', () => {
-    const out = formatInviteOutput({ url: 'https://ts.example.com', email: 'sam@team.com', name: 'Sam', token: 'tsm_the_token' });
+    const out = formatInviteOutput({ url: DEFAULT_SERVER_URL, email: 'sam@team.com', name: 'Sam', token: 'tsm_the_token' });
     expect(out.toLowerCase()).toContain('send this token privately');
     expect(out).toContain('sam@team.com');
     expect(out).toContain('tsm_the_token');
     expect(out).toContain('/plugin install teamshare');
+  });
+
+  it('formatInviteOutput routes a self-hosted team to the connector instead of the plugin', () => {
+    const out = formatInviteOutput({ url: 'https://ts.example.com', email: 'sam@team.com', name: 'Sam', token: 'tsm_the_token' });
+    expect(out).toContain('node teamshare-connect.mjs https://ts.example.com');
+    expect(out).not.toContain('/plugin install teamshare');
   });
 
   it('formatRevokeOutput reports a positive count as revoked, and zero as nothing to revoke', () => {
@@ -477,7 +501,11 @@ describe('formatMemberTokenOnceWarning / formatInviteOutput / formatRevokeOutput
 // ---------------------------------------------------------------------------
 
 describe('formatJoinInstructions: the honest join text', () => {
-  const text = formatJoinInstructions({ url: 'https://ts.example.com', token: 'ts_the_token' });
+  // The DEFAULT server, deliberately: this is the path essentially every
+  // teammate takes, and it is the one where the Claude Code plugin works,
+  // because the plugin has that address compiled into its .mcp.json. The
+  // self-hosted branch is a separate describe below.
+  const text = formatJoinInstructions({ url: DEFAULT_SERVER_URL, token: 'ts_the_token' });
 
   it('includes every required fact', () => {
     // Per-email invites (docs/superpowers/specs/2026-08-30-teamshare-invites-design.md)
@@ -490,7 +518,12 @@ describe('formatJoinInstructions: the honest join text', () => {
     expect(text.toLowerCase()).toContain('attribution trustworthy');
     expect(text).toContain('/plugin marketplace add abdulgeek/teamshare');
     expect(text).toContain('/plugin install teamshare');
-    expect(text).toContain('Server URL');
+    // The server address is compiled into the plugin's .mcp.json, so install
+    // prompts for exactly one value. Pinning the absence of a "Server URL"
+    // field stops the second prompt creeping back into the instructions and
+    // sending teammates hunting for a value nobody needs to hand out.
+    expect(text).not.toContain('Server URL');
+    expect(text.toLowerCase()).toContain('asks for one value');
     // The label pinned here is "Personal token", not "Team token" — this
     // value is minted for one named person (create-team/rotate-team's admin
     // token or invite's member token) and must never be posted somewhere the
@@ -519,8 +552,12 @@ describe('formatJoinInstructions: the honest join text', () => {
     // (signup secret, admin token) is deliberately kept out of. It prompts
     // for the token instead; this line stays copy-paste-runnable with just
     // the url.
-    expect(text).toContain('node teamshare-connect.mjs https://ts.example.com');
-    expect(text).not.toContain('node teamshare-connect.mjs https://ts.example.com ts_the_token');
+    // The connector takes no arguments on the default server either — same
+    // reason. And the token is never passed positionally: that would put a
+    // teammate's personal credential into their shell history the moment they
+    // paste it, the one thing every other secret here is kept out of.
+    expect(text).toContain('node teamshare-connect.mjs\n');
+    expect(text).not.toContain('node teamshare-connect.mjs ts_the_token');
     expect(text.toLowerCase()).toContain('prompt for your personal token');
   });
 
@@ -528,7 +565,7 @@ describe('formatJoinInstructions: the honest join text', () => {
     const idx = (needle: string) => text.indexOf(needle);
     const marketplaceAdd = idx('/plugin marketplace add');
     const pluginInstall = idx('/plugin install teamshare');
-    const prompts = idx('Server URL');
+    const prompts = idx('Personal token:');
     const trust = idx('Trust this workspace');
     const versionFloor = idx('2.1.238');
     const restart = idx('Restart Claude Code');
@@ -552,6 +589,45 @@ describe('formatJoinInstructions: the honest join text', () => {
   });
 });
 
+describe('formatJoinInstructions: a team on its own server', () => {
+  // The Claude Code plugin's .mcp.json carries the default address as static
+  // JSON, and nothing in a plugin can rewrite it per-install. So a self-hosted
+  // team told to "install the plugin" would end up with a client permanently
+  // pointed at the wrong server, failing with a 401 indistinguishable from a
+  // bad token. This text must route them to the connector instead.
+  const text = formatJoinInstructions({ url: 'https://ts.example.com', token: 'ts_the_token' });
+
+  it('sends them to the connector, not the plugin', () => {
+    expect(text).toContain('node teamshare-connect.mjs https://ts.example.com');
+    expect(text).not.toContain('/plugin install teamshare');
+    expect(text).not.toContain('/plugin marketplace add');
+  });
+
+  it('still states the facts that hold on every path', () => {
+    expect(text).toContain('ts_the_token');
+    expect(text.toLowerCase()).toContain('who you are comes');
+    expect(text.toLowerCase()).toContain('attribution trustworthy');
+    expect(text.toLowerCase()).toContain('personal to you');
+    expect(text.toLowerCase()).toContain('must not be shared');
+  });
+
+  it('never passes the token positionally', () => {
+    expect(text).not.toContain('teamshare-connect.mjs https://ts.example.com ts_the_token');
+  });
+
+  it('never claims the connector configures Claude Code, because it does not', () => {
+    // The connector writes MCP config for Cursor, VS Code, Windsurf, Gemini
+    // CLI, Cline, Codex, Zed and Continue. Claude Code's teamshare config
+    // lives in the plugin's own .mcp.json and the connector never touches it,
+    // so telling a Claude Code user to run it sends them through a command
+    // that changes nothing they use. This text got that wrong once.
+    expect(text).not.toMatch(/connector[^.]*Claude Code/i);
+    expect(text).not.toMatch(/configures Claude Code/i);
+    // It must still tell a Claude Code user what to actually do.
+    expect(text).toContain('fork');
+  });
+});
+
 describe('formatTokenOnceWarning', () => {
   it('says the token is shown once, cannot be recovered, and to save it in a password manager now', () => {
     const text = formatTokenOnceWarning('ts_abc123');
@@ -570,10 +646,12 @@ describe('formatCreateOutput / formatRotateOutput', () => {
     const out = formatCreateOutput({ url: 'https://ts.example.com', team, verify });
     expect(out.toLowerCase()).toContain('shown once');
     expect(out).toContain('[OK] server reachable');
-    // Env-var form, never positional: doctor now accepts TEAMSHARE_URL/
-    // TEAMSHARE_TOKEN precisely so this re-verify suggestion (which contains
-    // a real token) doesn't put it into shell history or `ps` output.
-    expect(out).toContain('TEAMSHARE_URL=https://ts.example.com TEAMSHARE_TOKEN=ts_new_token teamshare doctor');
+    // The re-verify suggestion used to be a `teamshare doctor` line carrying
+    // TEAMSHARE_URL and the live token inline. `whoami` replaces it: it reads
+    // the saved store, so the command names no credential at all — and unlike
+    // doctor it needs no checkout of this repo to run.
+    expect(out).toContain('teamshare-team whoami');
+    expect(out).not.toContain('TEAMSHARE_TOKEN=ts_new_token');
     expect(out).not.toContain('teamshare doctor https://ts.example.com ts_new_token');
     expect(out).toContain('rotate-team');
     // This mints the ADMIN token — authenticate() never accepts it, so it
@@ -585,7 +663,7 @@ describe('formatCreateOutput / formatRotateOutput', () => {
     expect(out).not.toContain('/plugin install teamshare');
     expect(out.toLowerCase()).toContain('admin token');
     expect(out.toLowerCase()).toContain('cannot be used');
-    expect(out).toContain('node teamshare-team.mjs invite https://ts.example.com <your-own-email>');
+    expect(out).toContain('teamshare-team invite <your-own-email>');
   });
 
   it('formatRotateOutput says the admin token was rotated, the old one stopped working immediately, and every teammate keeps working unaffected', () => {
@@ -606,9 +684,10 @@ describe('formatCreateOutput / formatRotateOutput', () => {
     // this mints cannot be used to join, so no join instructions for it.
     expect(out).not.toContain('/plugin marketplace add');
     expect(out).not.toContain('/plugin install teamshare');
-    expect(out).toContain('node teamshare-team.mjs invite https://ts.example.com <your-own-email>');
-    // Same env-var fix as formatCreateOutput's re-verify line, above.
-    expect(out).toContain('TEAMSHARE_URL=https://ts.example.com TEAMSHARE_TOKEN=ts_new_token teamshare doctor');
+    expect(out).toContain('teamshare-team invite <your-own-email>');
+    // Same as formatCreateOutput: no credential-bearing re-verify line at all
+    // any more, because the token is read from the saved store instead.
+    expect(out).not.toContain('TEAMSHARE_TOKEN=ts_new_token');
     expect(out).not.toContain('teamshare doctor https://ts.example.com ts_new_token');
   });
 
@@ -617,7 +696,37 @@ describe('formatCreateOutput / formatRotateOutput', () => {
     expect(out).not.toContain('/plugin marketplace add');
     expect(out).not.toContain('/plugin install teamshare');
     expect(out.toLowerCase()).toContain('admin token');
-    expect(out).toContain('node teamshare-team.mjs invite https://ts.example.com <your-own-email>');
+    expect(out).toContain('teamshare-team invite <your-own-email>');
+  });
+
+  it('reports where the admin token was saved, and still says to keep a copy', () => {
+    const out = formatAdminTokenGuidance({ url: 'https://ts.example.com', savedPath: '/home/lead/.teamshare/admin.json' });
+    expect(out).toContain('/home/lead/.teamshare/admin.json');
+    expect(out.toLowerCase()).toContain('never have to paste it again');
+    // Saving is a convenience, not a backup: the file dies with the machine,
+    // so the password-manager instruction must survive the convenience.
+    expect(out.toLowerCase()).toContain('password manager');
+  });
+
+  it('surfaces a failure to save rather than silently leaving the lead without a working token', () => {
+    const out = formatCreateOutput({
+      url: 'https://ts.example.com',
+      team,
+      verify,
+      saveError: 'EACCES: permission denied',
+    });
+    expect(out).toContain('EACCES: permission denied');
+    expect(out).toContain(ADMIN_TOKEN_ENV);
+    // The team really was created — saying otherwise would send the lead off
+    // to create a duplicate.
+    expect(out).toContain('create-team — success');
+  });
+
+  it('spells suggested commands the way this file was actually invoked', () => {
+    const asPluginBin = formatCreateOutput({ url: 'https://ts.example.com', team, verify, cmdName: 'teamshare-team' });
+    const asScript = formatCreateOutput({ url: 'https://ts.example.com', team, verify, cmdName: 'node teamshare-team.mjs' });
+    expect(asPluginBin).toContain('teamshare-team invite <your-own-email>');
+    expect(asScript).toContain('node teamshare-team.mjs invite <your-own-email>');
   });
 });
 
@@ -636,10 +745,20 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
   let db: Db;
   let server: Server;
   let base: string;
+  let home: string;
   const SIGNUP_SECRET = 'cli-signup-secret-value';
+
+  // create-team and rotate-team now PERSIST the admin token, so every call
+  // here must be pointed at a throwaway home. Without this the suite writes
+  // live-looking credentials into the developer's own ~/.teamshare/admin.json,
+  // one dead entry per run, pointing at ephemeral ports that no longer exist —
+  // which is exactly what happened the first time this landed.
+  const run: typeof runTeamCli = (argv, opts = {}) =>
+    runTeamCli(argv, { homeDir: home, ...opts });
 
   beforeEach(async () => {
     db = openDb(':memory:');
+    home = mkdtempSync(join(tmpdir(), 'teamshare-home-'));
     const app = createApp({ db, expiryDays: 14, signupSecret: SIGNUP_SECRET });
     server = await new Promise<Server>((resolve) => {
       const s = app.listen(0, () => resolve(s));
@@ -651,10 +770,11 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
   afterEach(async () => {
     await new Promise<void>((r) => server.close(() => r()));
     db.close();
+    rmSync(home, { recursive: true, force: true });
   });
 
   it('create-team succeeds via the signup-secret environment variable and never echoes the secret', async () => {
-    const result = await runTeamCli(['create-team', base, 'CLI Squad'], {
+    const result = await run(['create-team', base, 'CLI Squad'], {
       env: { [SIGNUP_SECRET_ENV]: SIGNUP_SECRET },
       isTTY: false,
       identity,
@@ -674,7 +794,7 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
   });
 
   it('create-team fails loudly, without creating a team, when the signup secret is wrong', async () => {
-    const result = await runTeamCli(['create-team', base, 'Wrong Secret Team'], {
+    const result = await run(['create-team', base, 'Wrong Secret Team'], {
       env: { [SIGNUP_SECRET_ENV]: 'not-the-real-secret' },
       isTTY: false,
       identity,
@@ -688,7 +808,7 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
     const promptFn = vi.fn(async () => {
       throw new Error('should never prompt when isTTY is false');
     });
-    const result = await runTeamCli(['create-team', base, 'No Secret Team'], {
+    const result = await run(['create-team', base, 'No Secret Team'], {
       env: {},
       isTTY: false,
       identity,
@@ -704,7 +824,7 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
     const oldToken = 'ts_cli_old_token';
     createTeam(db, 'Rotating Team', hashToken(oldToken), NOW);
 
-    const result = await runTeamCli(['rotate-team', base], {
+    const result = await run(['rotate-team', base], {
       env: { [TEAM_TOKEN_ENV]: oldToken },
       isTTY: false,
       identity,
@@ -731,11 +851,11 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
   });
 
   it('help and unknown-command results carry no exit-code surprises', async () => {
-    const help = await runTeamCli(['--help'], { env: {}, isTTY: false, identity });
+    const help = await run(['--help'], { env: {}, isTTY: false, identity });
     expect(help.exitCode).toBe(0);
     expect(help.stdout).toContain('create-team');
 
-    const unknown = await runTeamCli(['bogus', base], { env: {}, isTTY: false, identity });
+    const unknown = await run(['bogus', base], { env: {}, isTTY: false, identity });
     expect(unknown.exitCode).toBe(1);
     expect(unknown.stderr).toContain('bogus');
   });
@@ -749,7 +869,7 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
     });
 
     it('invite succeeds and the printed token genuinely works', async () => {
-      const result = await runTeamCli(['invite', base, 'sam@team.com', 'Sam'], {
+      const result = await run(['invite', base, 'sam@team.com', 'Sam'], {
         env: { [ADMIN_TOKEN_ENV]: adminToken },
         isTTY: false,
         identity,
@@ -767,7 +887,7 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
     });
 
     it('invite fails loudly when the admin token is wrong, minting nothing', async () => {
-      const result = await runTeamCli(['invite', base, 'sam@team.com'], {
+      const result = await run(['invite', base, 'sam@team.com'], {
         env: { [ADMIN_TOKEN_ENV]: 'ts_wrong' },
         isTTY: false,
         identity,
@@ -780,7 +900,7 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
       const scope = makeTeamScope(db, findTeamByName(db, 'Admin Ops Team')!.id);
       const memberToken = createMemberToken(scope, 'sam@team.com', 'Sam', NOW);
 
-      const result = await runTeamCli(['revoke', base, 'sam@team.com'], {
+      const result = await run(['revoke', base, 'sam@team.com'], {
         env: { [ADMIN_TOKEN_ENV]: adminToken },
         isTTY: false,
         identity,
@@ -796,7 +916,7 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
       const scope = makeTeamScope(db, findTeamByName(db, 'Admin Ops Team')!.id);
       createMemberToken(scope, 'sam@team.com', 'Sam', NOW);
 
-      const result = await runTeamCli(['roster', base], {
+      const result = await run(['roster', base], {
         env: { [ADMIN_TOKEN_ENV]: adminToken },
         isTTY: false,
         identity,
@@ -811,7 +931,7 @@ describe('runTeamCli: the full pipeline, in-process against a real local server'
       const promptFn = vi.fn(async () => {
         throw new Error('should never prompt when isTTY is false');
       });
-      const result = await runTeamCli(['roster', base], { env: {}, isTTY: false, identity, promptFn });
+      const result = await run(['roster', base], { env: {}, isTTY: false, identity, promptFn });
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain(ADMIN_TOKEN_ENV);
       expect(promptFn).not.toHaveBeenCalled();
@@ -904,5 +1024,558 @@ describe('admin token env aliasing', () => {
 
   it('resolves to undefined when neither is set, so the caller can prompt', () => {
     expect(adminTokenFromEnv({})).toBeUndefined();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// The server address stops being something a human types.
+//
+// teamshare's deployment sits behind an Elastic IP (deploy/aws/eip.tf), so its
+// address is permanent — and asking every teammate and every admin command to
+// paste it was ceremony, not configuration. These pin the override order that
+// keeps self-hosting possible while the default costs nobody anything.
+// ---------------------------------------------------------------------------
+
+describe('looksLikeServerUrl', () => {
+  it('accepts only an explicit http(s) URL', () => {
+    expect(looksLikeServerUrl('https://teamshare.example.com')).toBe(true);
+    expect(looksLikeServerUrl('http://127.0.0.1:8787')).toBe(true);
+    expect(looksLikeServerUrl('  https://ts.example.com  ')).toBe(true);
+  });
+
+  it('rejects the things that share the same argument position', () => {
+    // This predicate is the ONLY thing separating `create-team "Platform"`
+    // from the older `create-team <url> "Platform"`, so a team name or an
+    // email must never be mistaken for a server.
+    expect(looksLikeServerUrl('Platform')).toBe(false);
+    expect(looksLikeServerUrl('sam@acme.com')).toBe(false);
+    expect(looksLikeServerUrl('teamshare.example.com')).toBe(false);
+    expect(looksLikeServerUrl('')).toBe(false);
+    expect(looksLikeServerUrl(undefined)).toBe(false);
+  });
+});
+
+describe('resolveServerUrl', () => {
+  it('falls all the way through to the built-in default when nothing is configured', () => {
+    const r = resolveServerUrl({ env: {}, clientConfig: null });
+    expect(r.url).toBe(DEFAULT_SERVER_URL);
+    expect(r.source).toBe('default');
+  });
+
+  it('honours the override order: flag, then positional, then env, then config file', () => {
+    const env = { [SERVER_URL_ENV]: 'https://from-env.example' };
+    const clientConfig = { url: 'https://from-file.example' };
+
+    expect(resolveServerUrl({ flag: 'https://from-flag.example', positional: 'https://from-arg.example', env, clientConfig }))
+      .toMatchObject({ url: 'https://from-flag.example', source: 'flag' });
+    expect(resolveServerUrl({ positional: 'https://from-arg.example', env, clientConfig }))
+      .toMatchObject({ url: 'https://from-arg.example', source: 'argument' });
+    expect(resolveServerUrl({ env, clientConfig }))
+      .toMatchObject({ url: 'https://from-env.example', source: 'env' });
+    expect(resolveServerUrl({ env: {}, clientConfig }))
+      .toMatchObject({ url: 'https://from-file.example', source: 'config-file' });
+  });
+
+  it('normalises whatever it resolves, so a pasted /mcp suffix still works', () => {
+    expect(resolveServerUrl({ flag: 'https://ts.example.com/mcp' }).url).toBe('https://ts.example.com');
+    expect(resolveServerUrl({ env: { [SERVER_URL_ENV]: 'https://ts.example.com/' } }).url).toBe('https://ts.example.com');
+  });
+
+  it('ignores blank values rather than resolving to an empty server', () => {
+    expect(resolveServerUrl({ flag: '   ', env: { [SERVER_URL_ENV]: '  ' }, clientConfig: { url: '' } }).source).toBe('default');
+  });
+});
+
+describe('parseTeamArgv: the server argument is now optional', () => {
+  it('reads the command arguments directly when no URL is given', () => {
+    expect(parseTeamArgv(['create-team', 'Platform'])).toMatchObject({ cmd: 'create-team', name: 'Platform', url: undefined });
+    expect(parseTeamArgv(['invite', 'sam@acme.com', 'Sam'])).toMatchObject({ cmd: 'invite', email: 'sam@acme.com', name: 'Sam' });
+    expect(parseTeamArgv(['revoke', 'sam@acme.com'])).toMatchObject({ cmd: 'revoke', email: 'sam@acme.com' });
+    expect(parseTeamArgv(['roster'])).toMatchObject({ cmd: 'roster', url: undefined });
+    expect(parseTeamArgv(['whoami'])).toMatchObject({ cmd: 'whoami' });
+  });
+
+  it('still accepts the older leading-URL form, so nothing documented before this change breaks', () => {
+    expect(parseTeamArgv(['create-team', 'https://ts.example.com', 'Platform'])).toMatchObject({
+      cmd: 'create-team',
+      url: 'https://ts.example.com',
+      name: 'Platform',
+    });
+    expect(parseTeamArgv(['invite', 'https://ts.example.com', 'sam@acme.com', 'Sam'])).toMatchObject({
+      cmd: 'invite',
+      url: 'https://ts.example.com',
+      email: 'sam@acme.com',
+      name: 'Sam',
+    });
+  });
+
+  it('never mistakes a team name or an email for a server', () => {
+    expect(parseTeamArgv(['create-team', 'Platform']).url).toBeUndefined();
+    expect(parseTeamArgv(['invite', 'sam@acme.com']).url).toBeUndefined();
+    expect(parseTeamArgv(['invite', 'sam@acme.com']).email).toBe('sam@acme.com');
+  });
+
+  it('supports --server and --team, in both spellings, anywhere in the line', () => {
+    expect(parseTeamArgv(['invite', '--server', 'https://ts.example.com', 'sam@acme.com'])).toMatchObject({
+      cmd: 'invite',
+      serverFlag: 'https://ts.example.com',
+      email: 'sam@acme.com',
+    });
+    expect(parseTeamArgv(['roster', '--team=Platform'])).toMatchObject({ cmd: 'roster', teamName: 'Platform' });
+    expect(parseTeamArgv(['roster', '--server=https://ts.example.com'])).toMatchObject({
+      cmd: 'roster',
+      serverFlag: 'https://ts.example.com',
+    });
+  });
+
+  it('reports a flag with no value instead of silently swallowing the next argument', () => {
+    expect(parseTeamArgv(['invite', 'sam@acme.com', '--server']).badFlag).toContain('--server');
+    expect(parseTeamArgv(['roster', '--team']).badFlag).toContain('--team');
+  });
+
+  it('rejects an unknown option rather than treating it as a positional', () => {
+    expect(parseTeamArgv(['roster', '--wat']).badFlag).toContain('--wat');
+  });
+
+  it('treats an unknown subcommand as unknown, and bare/-h as help', () => {
+    expect(parseTeamArgv(['frobnicate'])).toMatchObject({ cmd: 'unknown', unknown: 'frobnicate' });
+    expect(parseTeamArgv([]).help).toBe(true);
+    expect(parseTeamArgv(['-h']).help).toBe(true);
+    expect(parseTeamArgv(['invite', '--help']).help).toBe(true);
+  });
+});
+
+describe('invocationName: the same bytes ship as a script and as a PATH command', () => {
+  it('spells a .mjs file as something you run with node', () => {
+    expect(invocationName('/somewhere/teamshare-team.mjs')).toBe('node teamshare-team.mjs');
+  });
+
+  it('spells an extensionless bin as a bare command', () => {
+    expect(invocationName('/Users/x/.claude/plugins/cache/teamshare/teamshare/0.1.0/bin/teamshare-team')).toBe(
+      'teamshare-team',
+    );
+  });
+
+  it('falls back to the script name when argv[1] is missing', () => {
+    expect(invocationName(undefined)).toBe('node teamshare-team.mjs');
+    expect(invocationName('')).toBe('node teamshare-team.mjs');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The admin token stops being something a human re-pastes. A slash command has
+// no TTY to prompt on, so without this store the whole plugin-native admin
+// surface is impossible.
+// ---------------------------------------------------------------------------
+
+describe('the admin token store', () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'teamshare-store-'));
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('round-trips a saved token, owner-readable only', () => {
+    const saved = saveAdminEntry({
+      url: 'https://ts.example.com',
+      teamId: 'tm_1',
+      name: 'Platform',
+      token: 'ts_secret',
+      homeDir: home,
+      now: NOW,
+    });
+    expect(saved.ok).toBe(true);
+
+    const path = adminStorePath(home);
+    expect(existsSync(path)).toBe(true);
+    // A credential on disk that any other account can read is not a store,
+    // it's a leak. The mode argument alone is masked by umask, so this pins
+    // the explicit chmod that follows the write.
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+
+    const entries = adminEntriesFor(readAdminStore({ homeDir: home }), 'https://ts.example.com');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ team_id: 'tm_1', name: 'Platform', token: 'ts_secret', created_at: NOW });
+  });
+
+  it('replaces the entry for the same team rather than accumulating a dead credential', () => {
+    const common = { url: 'https://ts.example.com', teamId: 'tm_1', name: 'Platform', homeDir: home };
+    saveAdminEntry({ ...common, token: 'ts_old', now: NOW });
+    saveAdminEntry({ ...common, token: 'ts_new', now: NOW });
+
+    const entries = adminEntriesFor(readAdminStore({ homeDir: home }), 'https://ts.example.com');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].token).toBe('ts_new');
+  });
+
+  it('keeps teams on different servers, and different teams on one server, apart', () => {
+    saveAdminEntry({ url: 'https://a.example', teamId: 'tm_a', name: 'A', token: 'ts_a', homeDir: home, now: NOW });
+    saveAdminEntry({ url: 'https://b.example', teamId: 'tm_b', name: 'B', token: 'ts_b', homeDir: home, now: NOW });
+    saveAdminEntry({ url: 'https://a.example', teamId: 'tm_a2', name: 'A2', token: 'ts_a2', homeDir: home, now: NOW });
+
+    expect(adminEntriesFor(readAdminStore({ homeDir: home }), 'https://a.example').map((t) => t.name).sort()).toEqual(['A', 'A2']);
+    expect(adminEntriesFor(readAdminStore({ homeDir: home }), 'https://b.example').map((t) => t.name)).toEqual(['B']);
+  });
+
+  it('matches servers after normalisation, so a trailing slash or /mcp still finds the token', () => {
+    saveAdminEntry({ url: 'https://ts.example.com', teamId: 'tm_1', name: 'Platform', token: 'ts_x', homeDir: home, now: NOW });
+    expect(adminEntriesFor(readAdminStore({ homeDir: home }), 'https://ts.example.com/')).toHaveLength(1);
+    expect(adminEntriesFor(readAdminStore({ homeDir: home }), 'https://ts.example.com/mcp')).toHaveLength(1);
+  });
+
+  it('treats a missing, malformed or hand-edited store as simply empty', () => {
+    expect(readAdminStore({ homeDir: home }).teams).toEqual([]);
+    mkdirSync(join(home, '.teamshare'), { recursive: true });
+    writeFileSync(adminStorePath(home), 'not json at all');
+    expect(readAdminStore({ homeDir: home }).teams).toEqual([]);
+    writeFileSync(adminStorePath(home), JSON.stringify({ version: 1, teams: 'nope' }));
+    expect(readAdminStore({ homeDir: home }).teams).toEqual([]);
+    // An entry missing the only two fields that make it usable is dropped
+    // rather than handed to a caller that would send `Bearer undefined`.
+    writeFileSync(adminStorePath(home), JSON.stringify({ version: 1, teams: [{ name: 'no token' }] }));
+    expect(readAdminStore({ homeDir: home }).teams).toEqual([]);
+  });
+
+  it('reports a save failure instead of pretending it worked', () => {
+    const result = saveAdminEntry({
+      url: 'https://ts.example.com',
+      teamId: 'tm_1',
+      name: 'Platform',
+      token: 'ts_x',
+      homeDir: home,
+      now: NOW,
+      fs: {
+        readFileSync: () => {
+          throw new Error('ENOENT');
+        },
+        mkdirSync: () => {
+          throw new Error('EACCES: permission denied');
+        },
+      } as unknown as typeof import('node:fs'),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('EACCES');
+  });
+});
+
+describe('resolveAdminTokenFromStore', () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'teamshare-store-'));
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const save = (name: string, token: string, url = 'https://ts.example.com', teamId = name) =>
+    saveAdminEntry({ url, teamId, name, token, homeDir: home, now: NOW });
+
+  it('lets an environment variable override the store, so a one-off always wins', () => {
+    save('Platform', 'ts_stored');
+    const r = resolveAdminTokenFromStore({ url: 'https://ts.example.com', env: { [ADMIN_TOKEN_ENV]: 'ts_env' }, homeDir: home });
+    expect(r).toMatchObject({ ok: true, token: 'ts_env', source: 'env' });
+  });
+
+  it('honours the older TEAMSHARE_TEAM_TOKEN spelling too', () => {
+    const r = resolveAdminTokenFromStore({ url: 'https://ts.example.com', env: { [TEAM_TOKEN_ENV]: 'ts_legacy' }, homeDir: home });
+    expect(r).toMatchObject({ ok: true, token: 'ts_legacy' });
+  });
+
+  it('uses the saved token when exactly one team is stored for that server', () => {
+    save('Platform', 'ts_stored');
+    const r = resolveAdminTokenFromStore({ url: 'https://ts.example.com', env: {}, homeDir: home });
+    expect(r).toMatchObject({ ok: true, token: 'ts_stored', source: 'store' });
+  });
+
+  it('refuses to guess between several teams — guessing would revoke someone from the wrong one', () => {
+    save('Platform', 'ts_a', 'https://ts.example.com', 'tm_a');
+    save('Infra', 'ts_b', 'https://ts.example.com', 'tm_b');
+    const r = resolveAdminTokenFromStore({ url: 'https://ts.example.com', env: {}, homeDir: home });
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.reason === 'ambiguous') expect(r.names.sort()).toEqual(['Infra', 'Platform']);
+  });
+
+  it('picks the named team when --team disambiguates, case-insensitively', () => {
+    save('Platform', 'ts_a', 'https://ts.example.com', 'tm_a');
+    save('Infra', 'ts_b', 'https://ts.example.com', 'tm_b');
+    expect(resolveAdminTokenFromStore({ url: 'https://ts.example.com', env: {}, teamName: 'infra', homeDir: home }))
+      .toMatchObject({ ok: true, token: 'ts_b' });
+  });
+
+  it('says which teams it does have when --team names one it does not', () => {
+    save('Platform', 'ts_a');
+    const r = resolveAdminTokenFromStore({ url: 'https://ts.example.com', env: {}, teamName: 'Nope', homeDir: home });
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.reason === 'no-such-team') expect(r.names).toEqual(['Platform']);
+  });
+
+  it('reports nothing saved for a server it has never seen', () => {
+    save('Platform', 'ts_a', 'https://other.example');
+    expect(resolveAdminTokenFromStore({ url: 'https://ts.example.com', env: {}, homeDir: home }))
+      .toMatchObject({ ok: false, reason: 'none-saved' });
+  });
+});
+
+describe('resolveMemberToken: a different credential, from a different place', () => {
+  it('prefers the plugin option, then the plain env var, then the config file', () => {
+    expect(
+      resolveMemberToken({
+        env: { CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN: 'tsm_plugin', TEAMSHARE_TOKEN: 'tsm_env' },
+        clientConfig: { token: 'tsm_file' },
+      }),
+    ).toBe('tsm_plugin');
+    expect(resolveMemberToken({ env: { TEAMSHARE_TOKEN: 'tsm_env' }, clientConfig: { token: 'tsm_file' } })).toBe('tsm_env');
+    expect(resolveMemberToken({ env: {}, clientConfig: { token: 'tsm_file' } })).toBe('tsm_file');
+    expect(resolveMemberToken({ env: {}, clientConfig: null })).toBeUndefined();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// The point of the whole change, end to end: a lead creates a team and then
+// runs invite / roster / revoke / rotate with NO token supplied and NO TTY to
+// be prompted on — which is exactly the situation a Claude Code slash command
+// runs in. Before the store, every one of these would have failed.
+// ---------------------------------------------------------------------------
+
+describe('runTeamCli: admin commands with nothing pasted and no terminal', () => {
+  let db: Db;
+  let server: Server;
+  let base: string;
+  let home: string;
+  const SIGNUP_SECRET = 'store-signup-secret';
+
+  // isTTY false and a promptFn that throws: if any command reaches for a
+  // prompt, the test fails loudly instead of hanging or quietly passing.
+  const neverPrompt = () => {
+    throw new Error('should never prompt: the token must come from the saved store');
+  };
+  const run = (argv: string[], extra: Record<string, unknown> = {}) =>
+    runTeamCli(argv, { homeDir: home, env: {}, isTTY: false, identity, promptFn: neverPrompt as never, ...extra });
+
+  beforeEach(async () => {
+    db = openDb(':memory:');
+    home = mkdtempSync(join(tmpdir(), 'teamshare-e2e-'));
+    const app = createApp({ db, expiryDays: 14, signupSecret: SIGNUP_SECRET });
+    server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const addr = server.address();
+    if (typeof addr === 'object' && addr) base = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const createTeamHere = () =>
+    run(['create-team', base, 'Platform'], { env: { [SIGNUP_SECRET_ENV]: SIGNUP_SECRET } });
+
+  it('create-team saves the admin token and says where it went', async () => {
+    const created = await createTeamHere();
+    expect(created.exitCode).toBe(0);
+    expect(created.stdout).toContain(adminStorePath(home));
+
+    const entries = adminEntriesFor(readAdminStore({ homeDir: home }), base);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].name).toBe('Platform');
+    // The saved token is the real one — the same value the output printed for
+    // the lead's password manager.
+    expect(created.stdout).toContain(entries[0].token);
+  });
+
+  it('invite, roster and revoke all work afterwards with no credential in the environment', async () => {
+    await createTeamHere();
+
+    const invited = await run(['invite', base, 'sam@acme.com', 'Sam']);
+    expect(invited.exitCode).toBe(0);
+    expect(invited.stdout).toContain('teamshare invite — success');
+    expect(invited.stdout).toContain('sam@acme.com');
+
+    const roster = await run(['roster', base]);
+    expect(roster.exitCode).toBe(0);
+    expect(roster.stdout).toContain('sam@acme.com');
+    expect(roster.stdout).toContain('Platform');
+
+    const revoked = await run(['revoke', base, 'sam@acme.com']);
+    expect(revoked.exitCode).toBe(0);
+    expect(revoked.stdout).toContain('Revoked 1 live token(s)');
+  });
+
+  it('the personal token an invite mints actually authenticates, and the admin token still does not', async () => {
+    await createTeamHere();
+    const invited = await run(['invite', base, 'sam@acme.com', 'Sam']);
+    const memberToken = /tsm_[A-Za-z0-9]+/.exec(invited.stdout)?.[0];
+    expect(memberToken).toBeTruthy();
+
+    const asMember = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${memberToken}` } });
+    expect(asMember.status).toBe(200);
+
+    // The credential split this design rests on: the admin token invites
+    // people and reads nothing.
+    const adminToken = adminEntriesFor(readAdminStore({ homeDir: home }), base)[0].token;
+    const asAdmin = await fetch(`${base}/unread`, { headers: { Authorization: `Bearer ${adminToken}` } });
+    expect(asAdmin.status).toBe(401);
+  });
+
+  it('rotate-team replaces the saved token, so the very next command keeps working', async () => {
+    await createTeamHere();
+    const before = adminEntriesFor(readAdminStore({ homeDir: home }), base)[0].token;
+
+    const rotated = await run(['rotate-team', base]);
+    expect(rotated.exitCode).toBe(0);
+
+    const after = adminEntriesFor(readAdminStore({ homeDir: home }), base)[0].token;
+    expect(after).not.toBe(before);
+    expect(adminEntriesFor(readAdminStore({ homeDir: home }), base)).toHaveLength(1);
+
+    // The real regression this guards: a rotate that printed a new token but
+    // left the old one on disk would break every later admin command with a
+    // 401 and no clue why.
+    const roster = await run(['roster', base]);
+    expect(roster.exitCode).toBe(0);
+  });
+
+  it('explains what to do, rather than hanging or leaking, when no token is saved for that server', async () => {
+    const result = await run(['roster', base]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('no admin token');
+    expect(result.stderr).toContain('create-team');
+    // Someone who is not the lead does not need an admin token at all, and
+    // the message has to say so or they will go looking for one.
+    expect(result.stderr).toContain('invite <your-email>');
+  });
+
+  it('asks which team instead of guessing when this machine holds two on one server', async () => {
+    await createTeamHere();
+    await run(['create-team', base, 'Infra'], { env: { [SIGNUP_SECRET_ENV]: SIGNUP_SECRET } });
+
+    const ambiguous = await run(['roster', base]);
+    expect(ambiguous.exitCode).toBe(1);
+    expect(ambiguous.stderr).toContain('--team');
+    expect(ambiguous.stderr).toContain('Platform');
+    expect(ambiguous.stderr).toContain('Infra');
+
+    const named = await run(['roster', base, '--team', 'Infra']);
+    expect(named.exitCode).toBe(0);
+    expect(named.stdout).toContain('Infra');
+  });
+
+  it('whoami distinguishes "not connected" from "nothing to read", which is otherwise invisible', async () => {
+    const created = await createTeamHere();
+    expect(created.exitCode).toBe(0);
+
+    // A lead who created a team but never invited themselves: admin token
+    // present, personal token absent. This is the exact state that silently
+    // produced an empty digest forever.
+    const before = await run(['whoami', base]);
+    expect(before.exitCode).toBe(0);
+    expect(before.stdout).toContain('Platform');
+    expect(before.stdout.toLowerCase()).toContain('not set on this machine');
+
+    const invited = await run(['invite', base, 'lead@acme.com', 'Lead']);
+    const memberToken = /tsm_[A-Za-z0-9]+/.exec(invited.stdout)?.[0] as string;
+
+    const after = await run(['whoami', base], { env: { TEAMSHARE_TOKEN: memberToken } });
+    expect(after.stdout.toLowerCase()).toContain('working');
+    expect(after.stdout).toContain('0 unread');
+  });
+
+  it('whoami names an admin token presented as a personal one, the mistake that looks like a bad token', async () => {
+    await createTeamHere();
+    const adminToken = adminEntriesFor(readAdminStore({ homeDir: home }), base)[0].token;
+    const result = await run(['whoami', base], { env: { TEAMSHARE_TOKEN: adminToken } });
+    expect(result.stdout).toContain('401');
+    expect(result.stdout.toLowerCase()).toContain('admin token');
+  });
+
+  it('whoami says the address is built in when nothing chose it', async () => {
+    const result = await runTeamCli(['whoami'], {
+      homeDir: home,
+      env: {},
+      isTTY: false,
+      identity,
+      // No server anywhere: it must resolve to the default and say so, rather
+      // than reporting an empty address or asking for one.
+      fetchImpl: (async () => {
+        throw new Error('offline');
+      }) as unknown as typeof fetch,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(DEFAULT_SERVER_URL);
+    expect(result.stdout.toLowerCase()).toContain('built in');
+  });
+
+  it('never writes outside the home it was given', async () => {
+    await createTeamHere();
+    // Pins the isolation the rest of this file depends on: an escape here
+    // means the suite is quietly writing credentials into the developer's own
+    // ~/.teamshare/admin.json, which is exactly what happened once already.
+    expect(existsSync(adminStorePath(home))).toBe(true);
+    expect(readFileSync(adminStorePath(home), 'utf8')).toContain('Platform');
+  });
+});
+
+
+describe('readBundledMcpUrl: self-hosting is one edited line', () => {
+  // A self-hoster forks this repo and changes .mcp.json's url. Every other
+  // surface has to follow that automatically, or the MCP connection talks to
+  // their server while the admin commands talk to teamshare's — shares
+  // published to one place and read from another, silently.
+  const manifest = (url: unknown) => () => JSON.stringify({ mcpServers: { teamshare: { url } } });
+
+  it('reads the address out of the manifest sitting beside the bin directory', () => {
+    expect(
+      readBundledMcpUrl({
+        scriptPath: '/plugins/teamshare/bin/teamshare-team',
+        readFileSync: manifest('https://self-hosted.example/mcp') as never,
+      }),
+    ).toBe('https://self-hosted.example');
+  });
+
+  it('ignores an unresolved placeholder rather than treating it as an address', () => {
+    expect(
+      readBundledMcpUrl({
+        scriptPath: '/plugins/teamshare/bin/teamshare-team',
+        readFileSync: manifest('${user_config.TEAMSHARE_URL}/mcp') as never,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('yields nothing when there is no manifest — a curl\'d copy, or the in-repo path', () => {
+    expect(
+      readBundledMcpUrl({
+        scriptPath: '/tmp/teamshare-team.mjs',
+        readFileSync: (() => {
+          throw new Error('ENOENT');
+        }) as never,
+      }),
+    ).toBeUndefined();
+    expect(readBundledMcpUrl({ scriptPath: '', readFileSync: manifest('https://x.example') as never })).toBeUndefined();
+  });
+
+  it('yields nothing for a malformed or empty manifest instead of throwing mid-command', () => {
+    expect(
+      readBundledMcpUrl({ scriptPath: '/p/bin/t', readFileSync: (() => 'not json') as never }),
+    ).toBeUndefined();
+    expect(readBundledMcpUrl({ scriptPath: '/p/bin/t', readFileSync: manifest(undefined) as never })).toBeUndefined();
+    expect(readBundledMcpUrl({ scriptPath: '/p/bin/t', readFileSync: manifest('   ') as never })).toBeUndefined();
+  });
+
+  it('sits below every explicit source, and above the built-in default', () => {
+    const bundledUrl = 'https://self-hosted.example';
+    expect(resolveServerUrl({ env: {}, clientConfig: null, bundledUrl }))
+      .toMatchObject({ url: bundledUrl, source: 'bundled' });
+    expect(resolveServerUrl({ env: { [SERVER_URL_ENV]: 'https://env.example' }, clientConfig: null, bundledUrl }))
+      .toMatchObject({ url: 'https://env.example', source: 'env' });
+    expect(resolveServerUrl({ env: {}, clientConfig: { url: 'https://file.example' }, bundledUrl }))
+      .toMatchObject({ url: 'https://file.example', source: 'config-file' });
+    expect(resolveServerUrl({ env: {}, clientConfig: null, bundledUrl: '' }))
+      .toMatchObject({ url: DEFAULT_SERVER_URL, source: 'default' });
   });
 });

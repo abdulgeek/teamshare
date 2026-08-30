@@ -289,7 +289,7 @@ describe('session-start hook', () => {
       const out = await runHook(
         { hook_event_name: 'SessionStart', source: 'startup' },
         {
-          CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL: `http://127.0.0.1:${port}`,
+          TEAMSHARE_URL: `http://127.0.0.1:${port}`,
           CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN: 'tok_env',
           GIT_CONFIG_GLOBAL: gitConfigPath,
         },
@@ -316,7 +316,7 @@ describe('session-start hook', () => {
       await runHook(
         { hook_event_name: 'SessionStart', source: 'startup' },
         {
-          CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL: `http://127.0.0.1:${port}`,
+          TEAMSHARE_URL: `http://127.0.0.1:${port}`,
           CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN: 'tok_env',
         },
       );
@@ -367,7 +367,7 @@ describe('session-start hook', () => {
       const out = await runHook(
         { hook_event_name: 'SessionStart', source: 'startup' },
         {
-          CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL: `http://127.0.0.1:${port}`,
+          TEAMSHARE_URL: `http://127.0.0.1:${port}`,
           CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN: 'tok_env',
         },
       );
@@ -424,7 +424,7 @@ describe('session-start hook', () => {
       await runHook(
         { hook_event_name: 'SessionStart', source: 'startup' },
         {
-          CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL: `http://127.0.0.1:${port}`,
+          TEAMSHARE_URL: `http://127.0.0.1:${port}`,
           CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN: 'tok_env',
           GIT_CONFIG_GLOBAL: globalGitConfig,
         },

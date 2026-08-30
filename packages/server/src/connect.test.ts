@@ -27,8 +27,13 @@ import {
   formatArgvTokenWarning,
   TEAMSHARE_URL_ENV,
   TEAMSHARE_TOKEN_ENV,
+  TEAM_VERBS,
+  formatWrongToolMessage,
+  looksLikeServerUrl,
+  DEFAULT_SERVER_URL as CONNECT_DEFAULT_SERVER_URL,
   type GitIdentity,
 } from './connect.js';
+import { TEAM_COMMANDS, DEFAULT_SERVER_URL as TEAM_DEFAULT_SERVER_URL } from './team.js';
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -811,21 +816,45 @@ describe('parseConnectArgv: pinned <url> <token> positional contract (never a le
     expect(parsed.token).toBe('ts_abc123');
   });
 
-  it('has no subcommand concept at all: a value that looks like one of teamshare-team.mjs\'s verbs is still just the url positional', () => {
-    for (const wouldBeSubcommand of ['create-team', 'rotate-team', 'create', 'rotate']) {
+  it('has no subcommand concept at all — but names the mistake instead of misreading it as a token', () => {
+    // The URL positional is optional now, so an accidental team verb would
+    // otherwise be silently accepted as this person's token and written into
+    // every assistant's config. Both binaries sit on PATH together once the
+    // plugin is installed, so this slip is live, not hypothetical.
+    for (const wouldBeSubcommand of TEAM_VERBS) {
       const parsed = parseConnectArgv([wouldBeSubcommand, 'ts_abc123']);
-      expect(parsed.url).toBe(wouldBeSubcommand);
-      expect(parsed.token).toBe('ts_abc123');
+      expect(parsed.wrongTool).toBe(wouldBeSubcommand);
+      expect(parsed.token).toBeUndefined();
       expect((parsed as any).cmd).toBeUndefined();
     }
+    expect(formatWrongToolMessage('invite')).toContain('teamshare-team invite');
   });
 
-  it('flags still parse after the two positionals, unaffected by their literal values', () => {
-    const parsed = parseConnectArgv(['create-team', 'rotate-team', '--only', 'cursor,codex', '--dry-run']);
-    expect(parsed.url).toBe('create-team');
-    expect(parsed.token).toBe('rotate-team');
+  it('keeps that guard to the exact verb list its sibling actually has', () => {
+    // A word that merely resembles one must still be an ordinary positional —
+    // this parser gains no vocabulary of its own.
+    for (const notAVerb of ['create', 'rotate', 'roster-please']) {
+      const parsed = parseConnectArgv([notAVerb, 'ts_abc123']);
+      expect(parsed.wrongTool).toBeUndefined();
+      expect(parsed.token).toBe(notAVerb);
+    }
+    // Hand-maintained duplicates: if teamshare-team gains a subcommand and the
+    // connector's list is not updated, this fails rather than drifting.
+    expect([...TEAM_VERBS].sort()).toEqual([...TEAM_COMMANDS].sort());
+  });
+
+  it('flags still parse after the positionals, unaffected by their literal values', () => {
+    const parsed = parseConnectArgv(['https://ts.example.com', 'ts_abc123', '--only', 'cursor,codex', '--dry-run']);
+    expect(parsed.url).toBe('https://ts.example.com');
+    expect(parsed.token).toBe('ts_abc123');
     expect(parsed.only).toEqual(['cursor', 'codex']);
     expect(parsed.dryRun).toBe(true);
+  });
+
+  it('takes a lone token when no server is given, and never mistakes one for the other', () => {
+    expect(parseConnectArgv(['tsm_abc123'])).toMatchObject({ url: undefined, token: 'tsm_abc123' });
+    expect(parseConnectArgv([])).toMatchObject({ url: undefined, token: undefined });
+    expect(parseConnectArgv(['https://ts.example.com'])).toMatchObject({ url: 'https://ts.example.com', token: undefined });
   });
 
   it('--list and --help still work exactly as before, independent of url/token', () => {
@@ -979,8 +1008,8 @@ describe('resolveConnectCredentials: the new url/token resolution order for the 
     });
   });
 
-  it('prompts on a TTY when neither argv nor env is set — visibly for the url, hidden for the token', async () => {
-    const urlPromptFn = vi.fn(async () => 'https://ts.example.com');
+  it('prompts only for the token — the server address is built in and never asked for', async () => {
+    const urlPromptFn = vi.fn(async () => 'https://never-asked.example');
     const tokenPromptFn = vi.fn(async () => 'ts_typed_token');
     const result = await resolveConnectCredentials(
       { url: undefined, token: undefined },
@@ -988,13 +1017,46 @@ describe('resolveConnectCredentials: the new url/token resolution order for the 
     );
     expect(result).toMatchObject({
       ok: true,
-      url: 'https://ts.example.com',
+      url: CONNECT_DEFAULT_SERVER_URL,
       token: 'ts_typed_token',
-      urlSource: 'prompt',
+      urlSource: 'default',
       tokenSource: 'prompt',
     });
-    expect(urlPromptFn).toHaveBeenCalled();
+    // The whole point: a teammate is asked for exactly one thing, the one
+    // thing that is genuinely theirs. Asking for a server address their lead
+    // should never have had to send them is the friction this removes.
+    expect(urlPromptFn).not.toHaveBeenCalled();
     expect(tokenPromptFn).toHaveBeenCalled();
+  });
+
+  it('uses the built-in address with no argv, no env and no terminal at all', async () => {
+    const result = await resolveConnectCredentials(
+      { url: undefined, token: 'ts_abc' },
+      { env: {}, isTTY: false },
+    );
+    expect(result).toMatchObject({ ok: true, url: CONNECT_DEFAULT_SERVER_URL, urlSource: 'default' });
+  });
+
+  it('still lets a self-hoster override the address, by argument or by environment', async () => {
+    const byArg = await resolveConnectCredentials(
+      { url: 'https://self.example', token: 'ts_abc' },
+      { env: {}, isTTY: false },
+    );
+    expect(byArg).toMatchObject({ ok: true, url: 'https://self.example', urlSource: 'argv' });
+
+    const byEnv = await resolveConnectCredentials(
+      { url: undefined, token: 'ts_abc' },
+      { env: { [TEAMSHARE_URL_ENV]: 'https://self.example' }, isTTY: false },
+    );
+    expect(byEnv).toMatchObject({ ok: true, url: 'https://self.example', urlSource: 'env' });
+  });
+
+  it('agrees with teamshare-team about what the built-in address is', () => {
+    // Hand-maintained duplicates — each file must stay a single dependency-free
+    // download, so neither can import the other. This is what catches a change
+    // to one of them.
+    expect(CONNECT_DEFAULT_SERVER_URL).toBe(TEAM_DEFAULT_SERVER_URL);
+    expect(looksLikeServerUrl(CONNECT_DEFAULT_SERVER_URL)).toBe(true);
   });
 
   it('resolves url and token independently: an argv url with an env token is fine', async () => {
@@ -1006,12 +1068,13 @@ describe('resolveConnectCredentials: the new url/token resolution order for the 
     expect(result).toMatchObject({ ok: true, urlSource: 'argv', tokenSource: 'env' });
   });
 
-  it('fails with a clear, actionable reason when nothing resolves (no argv, no env, no TTY)', async () => {
+  it('fails on the token alone when nothing resolves — the URL can no longer be the reason', async () => {
     const result = await resolveConnectCredentials({ url: undefined, token: undefined }, { env: {}, isTTY: false });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toContain('server URL');
-    expect(result.reason).toContain(TEAMSHARE_URL_ENV);
+    expect(result.reason).toContain('personal token');
+    expect(result.reason).toContain(TEAMSHARE_TOKEN_ENV);
+    expect(result.reason).not.toContain('server URL');
   });
 
   it('reports which value failed when the url resolves but the token does not', async () => {

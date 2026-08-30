@@ -2,7 +2,8 @@
 // SessionStart hook: print unread team shares as context for Claude.
 // Contract: plain stdout on exit 0 becomes session context.
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -75,11 +76,24 @@ function gitIdentity() {
   return null;
 }
 
-// Config resolves in this order:
-//   1. CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL / _TOKEN — set by Claude Code once
-//      the plugin's userConfig prompts have been answered. This is the
-//      installed-plugin path and takes precedence over the config file.
-//   2. ~/.teamshare.json — the dev (--plugin-dir) / legacy fallback.
+// The server address is no longer something anyone configures. It is compiled
+// into this plugin's own .mcp.json — the single line a self-hoster forks — and
+// read back from there, so the digest can never end up pointing at a different
+// server than the MCP connection right beside it. That split-brain is worse
+// than not supporting self-hosting at all: shares would publish to one server
+// and the digest would read from another, silently.
+//
+// Resolution order for the URL:
+//   1. TEAMSHARE_URL in the environment — an explicit, deliberate override.
+//   2. ~/.teamshare.json's `url` — what /teamshare-setup writes for a dev
+//      (--plugin-dir) or repair setup.
+//   3. This plugin's own .mcp.json — the normal case, and the fork case.
+//   4. The built-in default, if .mcp.json is somehow unreadable.
+//
+// The TOKEN still comes from Claude Code's userConfig prompt, because it is
+// genuinely per-person:
+//   1. CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN — the installed-plugin path.
+//   2. ~/.teamshare.json — the dev / legacy fallback.
 // Identity (name/email) always tries git config first, then the config file,
 // independent of where url/token came from — but it is optional, not a
 // second prerequisite alongside url/token. Per-email invites
@@ -89,12 +103,38 @@ function gitIdentity() {
 // teammate who has a valid url/token but never ran `git config --global
 // user.name/user.email` must still get their digest — the whole point of
 // this design is that the token alone is enough.
+// Kept byte-identical to DEFAULT_SERVER_URL in packages/server/src/
+// teamshare-team.mjs and teamshare-connect.mjs. A hand-maintained duplicate:
+// this hook is a dependency-free script in another package and cannot import
+// them. Only ever reached if .mcp.json is missing or unreadable.
+const DEFAULT_SERVER_URL = 'https://54.90.22.249.sslip.io';
+
+function readBundledMcpUrl() {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(readFileSync(join(here, '..', '.mcp.json'), 'utf8'));
+    const url = manifest?.mcpServers?.teamshare?.url;
+    if (typeof url !== 'string' || !url.trim() || url.includes('${')) return undefined;
+    // The manifest holds the MCP endpoint; every other route hangs off the
+    // origin, so strip the /mcp suffix the same way normalizeServerUrl does.
+    return url.trim().replace(/\/+$/, '').replace(/\/mcp$/i, '');
+  } catch {
+    return undefined;
+  }
+}
+
 function loadConfig() {
   const fileCfg = readConfigFile();
 
-  const url = process.env.CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL || fileCfg?.url;
+  const url =
+    (process.env.TEAMSHARE_URL ?? '').trim() ||
+    (typeof fileCfg?.url === 'string' ? fileCfg.url.trim() : '') ||
+    readBundledMcpUrl() ||
+    DEFAULT_SERVER_URL;
   const token = process.env.CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN || fileCfg?.token;
-  if (!url || !token) return null;
+  // The URL always resolves now, so a missing token is the only thing that can
+  // leave this machine unconfigured — and it stays silent, as before.
+  if (!token) return null;
 
   const identity =
     gitIdentity() || (fileCfg?.name && fileCfg?.email ? { name: fileCfg.name, email: fileCfg.email } : null);

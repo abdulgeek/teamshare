@@ -13,6 +13,7 @@ import {
   getOrCreateSignupSecret, hashToken, makeTeamScope, upsertMember, createMemberToken,
 } from './db.js';
 import { createApp } from './app.js';
+import { DEFAULT_SERVER_URL } from './team.js';
 
 const dirs: string[] = [];
 function tmp() {
@@ -777,6 +778,30 @@ describe('create-team (break-glass CLI, local database only)', () => {
 // §Identity comes from the token. Local-database break-glass path, the same
 // shape as rotate-token/remove-member/create-team above.
 describe('invite / revoke / roster (local database)', () => {
+  it('invite prints real Claude Code instructions once TEAMSHARE_URL says this is the default deployment', async () => {
+    const dbPath = join(tmp(), 'teamshare.db');
+    const db = openDb(dbPath);
+    createTeam(db, 'Only Team', hashToken('ts_invite_url'), '2026-01-01T00:00:00Z');
+    db.close();
+
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    const previousUrl = process.env.TEAMSHARE_URL;
+    process.env.TEAMSHARE_URL = DEFAULT_SERVER_URL;
+    // @ts-expect-error -- test-only stdout capture
+    process.stdout.write = (chunk: string) => { chunks.push(String(chunk)); return true; };
+    try {
+      await main(['invite', 'sam@team.com', 'Sam', '--db', dbPath]);
+    } finally {
+      process.stdout.write = original;
+      if (previousUrl === undefined) delete process.env.TEAMSHARE_URL;
+      else process.env.TEAMSHARE_URL = previousUrl;
+    }
+    const out = chunks.join('');
+    expect(out).toContain('/plugin install teamshare');
+    expect(out).not.toContain('<your-server-url>');
+  });
+
   it('invite mints a working personal token, printed once with a send-privately warning and join instructions', async () => {
     const dbPath = join(tmp(), 'teamshare.db');
     const db = openDb(dbPath);
@@ -796,7 +821,12 @@ describe('invite / revoke / roster (local database)', () => {
     expect(out).toContain('sam@team.com');
     expect(out.toLowerCase()).toContain('shown once');
     expect(out.toLowerCase()).toContain('send this token privately');
-    expect(out).toContain('/plugin install teamshare');
+    // This path reads the database file directly and cannot know the public
+    // address it is served on, so it must not claim the Claude Code plugin
+    // will work — the plugin only reaches teamshare's own deployment. It
+    // emits the connector, with a placeholder the operator fills in.
+    expect(out).toContain('teamshare-connect.mjs <your-server-url>');
+    expect(out).not.toContain('/plugin install teamshare');
 
     const match = out.match(/Personal token for[^:]*:\s*\n\s*\n\s*(\S+)/);
     expect(match).toBeTruthy();

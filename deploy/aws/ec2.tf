@@ -11,11 +11,18 @@ resource "aws_instance" "teamshare" {
   vpc_security_group_ids = [aws_security_group.teamshare.id]
   iam_instance_profile   = aws_iam_instance_profile.teamshare.name
 
-  # The instance's auto-assigned public IP is what teammates reach and what the
-  # TLS hostname is derived from (<ip>.sslip.io, computed at boot from IMDS).
-  # No Elastic IP: this account is at its EIP quota, with every address in use
-  # by other p3m infrastructure. Trade-off documented in README.md — stopping
-  # and starting the instance changes this IP, and therefore the URL.
+  # The instance's public IP is what teammates reach and what the TLS hostname
+  # is derived from (<ip>.sslip.io, computed at boot from IMDS).
+  #
+  # That address is now an Elastic IP (eip.tf, use_elastic_ip defaults to true
+  # since the quota increase on 2026-08-29), so it survives a stop/start and
+  # not just a reboot. This is load-bearing well beyond convenience: the
+  # resulting URL is compiled into packages/plugin/.mcp.json and into both
+  # standalone CLIs, so that nobody has to be told an address. Releasing the
+  # Elastic IP would silently break every installed client.
+  #
+  # This flag stays set regardless: it is what gives the instance a public
+  # address at all before the EIP association is applied.
   associate_public_ip_address = true
 
   root_block_device {

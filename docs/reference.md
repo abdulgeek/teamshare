@@ -64,11 +64,11 @@ AWS, no Terraform, no SSM:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
-node teamshare-team.mjs create-team <server-url> "<your team name>"
+node teamshare-team.mjs create-team "<your team name>"
 ```
 
 Already have a checkout? Same script, shorter path: `node
-packages/server/src/teamshare-team.mjs create-team <server-url> "<your team
+packages/server/src/teamshare-team.mjs create-team "<your team
 name>"`.
 
 The signup secret is never a command-line argument — that would land it in

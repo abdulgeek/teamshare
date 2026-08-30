@@ -1,7 +1,7 @@
 {
   "name": "teamshare",
   "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "teamshare"
   },
@@ -12,15 +12,10 @@
     "collaboration"
   ],
   "userConfig": {
-    "TEAMSHARE_URL": {
-      "type": "string",
-      "title": "Server URL",
-      "description": "The origin of your team's teamshare server, no path — e.g. http://localhost:8787 or https://teamshare.your-company.com."
-    },
     "TEAMSHARE_TOKEN": {
       "type": "string",
       "title": "Your personal token",
-      "description": "The personal token your team lead sent you (it starts with tsm_). It identifies you specifically, so keep it private: anyone holding it can publish shares and record read receipts as you. If you don't have one, ask your lead to run: teamshare invite <your-email>",
+      "description": "The token your team lead sent you — it starts with tsm_ and identifies you specifically. Keep it private: whoever holds it can publish shares and record read receipts as you. Don't have one? Ask your lead to run /teamshare-invite <your-email>.",
       "sensitive": true
     }
   }

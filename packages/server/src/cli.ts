@@ -893,9 +893,18 @@ export async function main(argv: string[]): Promise<void> {
     // command — there is no local identity to test it with. The lead's own
     // remedy for "did this work" is the same one `create-team` prints:
     // `teamshare doctor` run by the invitee, once they have it.
+    // This break-glass path talks to the database file directly, so it has no
+    // idea what public address that database is served on — and the join
+    // instructions differ by exactly that: teamshare's own deployment gets the
+    // Claude Code plugin, any other server gets the connector. Guessing the
+    // default here would hand a self-hoster's teammates instructions pointing
+    // at somebody else's server, failing with a 401 that looks like a bad
+    // token. So: use TEAMSHARE_URL when the operator has set it, and otherwise
+    // emit an obvious placeholder for them to fill in.
+    const inviteUrl = (process.env.TEAMSHARE_URL ?? '').trim() || '<your-server-url>';
     process.stdout.write(
       `Team: "${resolved.name}"\n\n` +
-        formatInviteOutput({ url: '<url>', email: emailCheck.value, name, token }),
+        formatInviteOutput({ url: inviteUrl, email: emailCheck.value, name, token }),
     );
     return;
   }
