@@ -35,6 +35,15 @@ other machines can reach it.
 Prefer AWS to plain `node`? See [`deploy/aws/README.md`](deploy/aws/README.md)
 for a Terraform stack with a persistent volume and automatic TLS.
 
+**Already deployed from this checkout?** Don't guess the URL or ask around
+for the signup secret — `deploy/aws/terraform.tfstate` has both, if
+`terraform apply` has already run here. From `deploy/aws`, `terraform
+output` prints the live `url`, plus break-glass SSM commands
+(`ssm_show_signup_secret_command`, `ssm_read_team_token_command`) to read
+the signup secret or a team's original token straight off the running
+instance if either was ever lost — see [`deploy/aws/README.md`
+§ Break-glass](deploy/aws/README.md#break-glass-recovering-a-secret-or-token-via-ssm).
+
 ## Join a team (the most common path)
 
 Every share and read receipt is attributed to your git identity. Set it
