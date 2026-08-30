@@ -488,13 +488,16 @@ describe('formatJoinInstructions: the honest join text', () => {
     // The label pinned here is "Personal token", not "Team token" — this
     // value is minted for one named person (create-team/rotate-team's admin
     // token or invite's member token) and must never be posted somewhere the
-    // whole team can see it. The prompt's own field is still titled "Team
-    // token" (packages/plugin/.claude-plugin/plugin.json, deliberately
-    // unchanged — see the design doc's "the client does not change"), so the
-    // text calls that out explicitly rather than pretending it says something
-    // it doesn't.
+    // whole team can see it.
+    //
+    // These instructions used to carry a caveat that the Claude Code prompt
+    // itself was still titled "Team token" and should be ignored. That label
+    // has since been corrected in plugin.json to "Your personal token", so
+    // the caveat became a lie in the opposite direction — telling the reader
+    // to disregard a field that now says exactly the right thing. The second
+    // assertion pins its absence so it cannot be reintroduced.
     expect(text).toContain('Personal token');
-    expect(text).toContain('still labeled "Team token" in the');
+    expect(text).not.toContain('still labeled "Team token"');
     expect(text.toLowerCase()).toContain('personal to you');
     expect(text.toLowerCase()).toContain('must not be shared');
     expect(text.toLowerCase()).toContain('trust this workspace');

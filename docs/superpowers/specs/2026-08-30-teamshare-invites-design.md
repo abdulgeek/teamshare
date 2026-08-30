@@ -88,6 +88,12 @@ install is already their personal token, so `plugin.json`, `.mcp.json`,
 `headers.sh`, `session-start.mjs` and `teamshare-connect.mjs` are all
 untouched. No redemption, no new storage, no extra step for the teammate.
 
+**"Untouched" here means no behavioural change.** It is not a claim that every
+string in those files was already correct. `plugin.json`'s install prompt, for
+one, still called this value the "Team token" — display text that this design
+made wrong and that was corrected separately afterwards. Read this section as
+scoping the code change, not as blessing the wording.
+
 The lead's workflow changes: one `invite` per teammate, delivered individually,
 instead of one token posted once. That is the cost of the property, and it is
 paid by one person rather than by everyone.

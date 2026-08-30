@@ -287,9 +287,8 @@ Two commands, two prompts:
 
 The install prompts you for two values — **Server URL** (the origin, no
 path, e.g. `http://localhost:8787` or `https://teamshare.your-company.com`)
-and a token, still labeled **Team token** in the prompt itself even though
-it isn't one anymore. What you paste there is a token your team lead minted
-**for you specifically**, with `teamshare invite`, and sent to you
+and **Your personal token**. What you paste there is a token your team lead
+minted **for you specifically**, with `teamshare invite`, and sent to you
 privately — not a value shared across the team. It's bound to your
 identity: every share you publish and every receipt you record is
 attributed to whoever holds it, so treat it like a password and never post
