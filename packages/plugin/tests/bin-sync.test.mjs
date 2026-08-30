@@ -12,6 +12,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+// tests/ deliberately, not bin/: a directory Claude Code puts on PATH should
+// contain only things meant to be run.
 const repoRoot = join(pluginRoot, '..', '..');
 
 const COPIES = [
