@@ -33,6 +33,7 @@ import {
   SIGNUP_SECRET_ENV,
   TEAM_TOKEN_ENV,
   ADMIN_TOKEN_ENV,
+  adminTokenFromEnv,
 } from './team.js';
 
 const NOW = '2026-08-29T00:00:00.000Z';
@@ -867,5 +868,26 @@ describe('end-to-end: running teamshare-team.mjs directly with plain node', () =
     expect(out).toContain('rotate-team');
     expect(out).toContain(SIGNUP_SECRET_ENV);
     expect(out).toContain(TEAM_TOKEN_ENV);
+  });
+});
+
+describe('admin token env aliasing', () => {
+  // Regression: `invite`/`revoke`/`roster` read TEAMSHARE_ADMIN_TOKEN while
+  // `rotate-team` read TEAMSHARE_TEAM_TOKEN. They are the SAME credential, so
+  // a lead who set one and then ran the other command got "could not resolve
+  // the ... token" for a variable they had definitely set.
+  it('accepts either variable name for the same credential', () => {
+    expect(adminTokenFromEnv({ [ADMIN_TOKEN_ENV]: 'ts_a' })).toBe('ts_a');
+    expect(adminTokenFromEnv({ [TEAM_TOKEN_ENV]: 'ts_b' })).toBe('ts_b');
+  });
+
+  it('prefers the canonical ADMIN name when both are set', () => {
+    expect(
+      adminTokenFromEnv({ [ADMIN_TOKEN_ENV]: 'ts_admin', [TEAM_TOKEN_ENV]: 'ts_team' }),
+    ).toBe('ts_admin');
+  });
+
+  it('resolves to undefined when neither is set, so the caller can prompt', () => {
+    expect(adminTokenFromEnv({})).toBeUndefined();
   });
 });

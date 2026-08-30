@@ -42,12 +42,28 @@ import { homedir } from 'node:os';
  */
 
 export const SIGNUP_SECRET_ENV = 'TEAMSHARE_SIGNUP_SECRET';
+// TEAMSHARE_TEAM_TOKEN and TEAMSHARE_ADMIN_TOKEN name the SAME credential —
+// the admin token that create-team/rotate-team print. Both are accepted
+// everywhere an admin token is needed (see adminTokenFromEnv below), because
+// having `invite` read one name and `rotate-team` read the other produced a
+// "could not resolve the current team token" error for a variable the user
+// had, in fact, set.
 export const TEAM_TOKEN_ENV = 'TEAMSHARE_TEAM_TOKEN';
 // The admin token — the same value create-team/rotate-team print, now used
 // for the day-to-day admin operations (invite/revoke/roster) instead of the
 // rarer team-creation/rotation ones. Never a positional argument, same rule
 // as the other two secrets above.
 export const ADMIN_TOKEN_ENV = 'TEAMSHARE_ADMIN_TOKEN';
+
+/**
+ * The admin token from either accepted variable. ADMIN is preferred because
+ * the design calls this credential the admin token; TEAM is the older alias.
+ * @param {Record<string, string | undefined>} env
+ * @returns {string | undefined}
+ */
+export function adminTokenFromEnv(env) {
+  return env[ADMIN_TOKEN_ENV] ?? env[TEAM_TOKEN_ENV];
+}
 
 // ---------------------------------------------------------------------------
 // Identity (needed only to verify the freshly-minted token against /unread,
@@ -757,7 +773,7 @@ export async function runTeamCli(argv, opts = {}) {
     }
 
     const tokenResult = await resolveSecret({
-      envValue: env[TEAM_TOKEN_ENV],
+      envValue: adminTokenFromEnv(env),
       isTTY,
       promptText: 'Current team token (input hidden): ',
       promptFn: opts.promptFn,
@@ -768,7 +784,7 @@ export async function runTeamCli(argv, opts = {}) {
         exitCode: 1,
         stdout: '',
         stderr:
-          `could not resolve the current team token (${tokenResult.reason}). Set ${TEAM_TOKEN_ENV}, or run ` +
+          `could not resolve the admin token (${tokenResult.reason}). Set ${ADMIN_TOKEN_ENV} (or ${TEAM_TOKEN_ENV}), or run ` +
           'this on an interactive terminal so it can prompt you.\n',
       };
     }
@@ -796,7 +812,7 @@ export async function runTeamCli(argv, opts = {}) {
     }
 
     const adminResult = await resolveSecret({
-      envValue: env[ADMIN_TOKEN_ENV],
+      envValue: adminTokenFromEnv(env),
       isTTY,
       promptText: 'Admin token (input hidden): ',
       promptFn: opts.promptFn,
@@ -807,7 +823,7 @@ export async function runTeamCli(argv, opts = {}) {
         exitCode: 1,
         stdout: '',
         stderr:
-          `could not resolve the admin token (${adminResult.reason}). Set ${ADMIN_TOKEN_ENV}, or run this ` +
+          `could not resolve the admin token (${adminResult.reason}). Set ${ADMIN_TOKEN_ENV} (or ${TEAM_TOKEN_ENV}), or run this ` +
           'on an interactive terminal so it can prompt you.\n',
       };
     }
@@ -836,7 +852,7 @@ export async function runTeamCli(argv, opts = {}) {
     }
 
     const adminResult = await resolveSecret({
-      envValue: env[ADMIN_TOKEN_ENV],
+      envValue: adminTokenFromEnv(env),
       isTTY,
       promptText: 'Admin token (input hidden): ',
       promptFn: opts.promptFn,
@@ -847,7 +863,7 @@ export async function runTeamCli(argv, opts = {}) {
         exitCode: 1,
         stdout: '',
         stderr:
-          `could not resolve the admin token (${adminResult.reason}). Set ${ADMIN_TOKEN_ENV}, or run this ` +
+          `could not resolve the admin token (${adminResult.reason}). Set ${ADMIN_TOKEN_ENV} (or ${TEAM_TOKEN_ENV}), or run this ` +
           'on an interactive terminal so it can prompt you.\n',
       };
     }
@@ -875,7 +891,7 @@ export async function runTeamCli(argv, opts = {}) {
     }
 
     const adminResult = await resolveSecret({
-      envValue: env[ADMIN_TOKEN_ENV],
+      envValue: adminTokenFromEnv(env),
       isTTY,
       promptText: 'Admin token (input hidden): ',
       promptFn: opts.promptFn,
@@ -886,7 +902,7 @@ export async function runTeamCli(argv, opts = {}) {
         exitCode: 1,
         stdout: '',
         stderr:
-          `could not resolve the admin token (${adminResult.reason}). Set ${ADMIN_TOKEN_ENV}, or run this ` +
+          `could not resolve the admin token (${adminResult.reason}). Set ${ADMIN_TOKEN_ENV} (or ${TEAM_TOKEN_ENV}), or run this ` +
           'on an interactive terminal so it can prompt you.\n',
       };
     }
