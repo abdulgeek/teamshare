@@ -25,8 +25,14 @@
 #   4. If neither yields both values, fall back to ~/.teamshare.json's
 #      name/email, if that file exists and has both — keeps --plugin-dir
 #      development and existing installs working.
-#   5. Still nothing — emit exactly {} so the server rejects cleanly with 400
-#      rather than half-authenticating.
+#   5. Still nothing — emit exactly {}, and that is fine, not a failure: per-
+#      email invites (docs/superpowers/specs/2026-08-30-teamshare-invites-design.md)
+#      moved identity into the personal token itself, so the server resolves
+#      who you are from Authorization (supplied separately by .mcp.json's own
+#      static headers, never by this script), not from these two headers,
+#      which it accepts but ignores either way. Sending them when they do
+#      resolve costs nothing and keeps this client compatible with an older
+#      server that used to validate them.
 #
 # Stdout is a single JSON object and nothing else; any stray output corrupts
 # the header map Claude Code merges this into.

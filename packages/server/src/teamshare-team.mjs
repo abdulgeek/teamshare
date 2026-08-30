@@ -409,10 +409,13 @@ export async function getRosterOverHttp(opts) {
 // flattering summary. This is what a lead pastes into Slack; if it
 // understates reality (skips workspace trust, the version floor, or the
 // restart), teammates hit silent 401s and the lead fields questions all
-// afternoon instead. Order matters and is asserted by a test: git identity,
-// then the two /plugin commands, then what they'll be prompted for, then
-// workspace trust, then the version floor, then the restart, then the
-// non-Claude-Code path.
+// afternoon instead. Order matters and is asserted by a test: the two
+// /plugin commands, then what they'll be prompted for, then workspace trust,
+// then the version floor, then the restart, then the non-Claude-Code path.
+// There is deliberately no git-identity step here any more: per-email
+// invites (docs/superpowers/specs/2026-08-30-teamshare-invites-design.md)
+// moved identity into the personal token itself, so git config has no
+// bearing on whether joining works.
 export function formatJoinInstructions(opts) {
   const { url, token } = opts;
   const lines = [
@@ -421,19 +424,14 @@ export function formatJoinInstructions(opts) {
     '',
     '--- Joining the team in Claude Code ---',
     '',
-    '0. Set your global git identity first, if you have not already — nothing works without it,',
-    '   because the server rejects every request with a 400 until it is set:',
-    '',
-    '     git config --global user.name "Your Name"',
-    '     git config --global user.email "you@example.com"',
-    '',
     '1. In Claude Code, run:',
     '',
     '     /plugin marketplace add abdulgeek/teamshare',
     '     /plugin install teamshare',
     '',
-    '2. It will prompt you for two values. What you paste into the second is YOUR OWN personal',
-    '   token, bound to your identity:',
+    '2. It will prompt you for two values. The second is YOUR OWN personal token: who you are comes',
+    '   from this token, minted for you by name by your lead, not from anything your client claims —',
+    '   which is what makes attribution trustworthy.',
     '',
     `     Server URL:      ${url}`,
     `     Personal token:  ${token}`,

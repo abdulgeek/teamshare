@@ -195,10 +195,11 @@ output.
        positional argument): `TEAMSHARE_URL=<url> TEAMSHARE_TOKEN=<token>
        teamshare doctor`.
      - Give the same real join instructions `/teamshare-setup` and the
-       standalone script give — git identity, `/plugin marketplace add
+       standalone script give — `/plugin marketplace add
        abdulgeek/teamshare` then `/plugin install teamshare`, trusting the
        workspace, the Claude Code ≥ 2.1.238 requirement, and the restart —
        with the token filled in from the file, not from this conversation.
+       No git identity step: attribution comes from the token itself.
    - `created "<name>"` with `VERIFY: unhealthy` — the team exists but
      something didn't check out (server unreachable on the second call, or
      the new token was rejected). Tell the user the team was created, the

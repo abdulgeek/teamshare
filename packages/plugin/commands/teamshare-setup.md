@@ -34,26 +34,27 @@ as a fallback whenever `CLAUDE_PLUGIN_OPTION_*` env vars aren't present.
    - The URL is an origin with no path — `http://localhost:8787` or
      `https://teamshare.internal`. Strip any trailing `/mcp` or slash.
 
-2. Read the user's git identity:
+2. Read the user's git identity, for context only — it is not required:
 
    ```bash
    git config --get user.name; git config --get user.email
    ```
 
-   If either is empty, stop and tell the user to set them:
-
-   ```bash
-   git config --global user.name "Your Name"
-   git config --global user.email "you@example.com"
-   ```
+   Attribution comes from the personal token itself (the server binds it to
+   the email the lead invited), not from git config, so a machine with
+   neither value set connects exactly the same as one that has them. If
+   either is empty, just proceed with an empty string for that field below —
+   do not stop or ask the user to set anything.
 
 3. Verify the server accepts these credentials before the real config file
    ever exists. The token must never appear in a command Claude runs — not
    even inside a `curl -H` argument — because that string shows up in the
    tool-call UI and stays in the session transcript. So write the candidate
    config first, to a **temporary** file, `~/.teamshare.json.new` — not
-   `~/.teamshare.json` itself yet — with exactly these four keys, the email
-   lowercased and the URL with no trailing slash:
+   `~/.teamshare.json` itself yet — with exactly these four keys (`name`/
+   `email` may be empty strings when git identity didn't resolve — that is
+   fine, not an error), the email lowercased and the URL with no trailing
+   slash:
 
    ```json
    {
@@ -85,8 +86,6 @@ as a fallback whenever `CLAUDE_PLUGIN_OPTION_*` env vars aren't present.
      `~/.teamshare.json`, then continue to the confirmation step.
    - `STATUS 401` → the token is wrong. Delete `~/.teamshare.json.new`, ask
      for the token again, and do not promote.
-   - `STATUS 400` → identity headers are malformed. Delete
-     `~/.teamshare.json.new` and re-check the git identity.
    - `UNREACHABLE ...` → a genuine network failure — nothing answered at all.
      Delete `~/.teamshare.json.new` and report the URL tried.
    - any other `STATUS <code>` → the server is there and answered, just not
@@ -94,9 +93,10 @@ as a fallback whenever `CLAUDE_PLUGIN_OPTION_*` env vars aren't present.
      Don't call this "unreachable": delete `~/.teamshare.json.new` and report
      the actual code to the user.
 
-4. Confirm to the user: the URL, the identity that will appear on their
-   shares, and that both the session-start digest and (for a `--plugin-dir`
-   dev setup) the MCP connection pick this up on the **next** session.
+4. Confirm to the user: the URL, that their personal token — not the git
+   identity just recorded — is what will appear on their shares and receipts,
+   and that both the session-start digest and (for a `--plugin-dir` dev
+   setup) the MCP connection pick this up on the **next** session.
 
 ## Rules
 

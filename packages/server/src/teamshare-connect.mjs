@@ -86,11 +86,22 @@ export const TEAMSHARE_TOKEN_ENV = 'TEAMSHARE_TOKEN';
 // Deliberately mirrors doctor's gitIdentity(), not headers.sh's simpler
 // version: cwd defaults to the *home* directory, never the caller's cwd, and
 // --global is tried before plain --get. `connect` bakes a static identity
-// into other tools' user-scope configs, so it must resolve the same
-// machine-wide identity doctor checks and headers.sh normally sends —
-// resolving from whatever directory the user happened to be in when they
-// typed `teamshare connect` let a repo-local git identity silently diverge
-// from that, which is exactly the kind of mismatch this tool exists to avoid.
+// into other tools' user-scope configs, so when it does resolve one it
+// should be the same machine-wide identity doctor checks and headers.sh
+// normally sends — resolving from whatever directory the user happened to be
+// in when they typed `teamshare connect` let a repo-local git identity
+// silently diverge from that, which is exactly the kind of mismatch this
+// tool exists to avoid.
+//
+// This identity is optional, not a prerequisite: per-email invites
+// (docs/superpowers/specs/2026-08-30-teamshare-invites-design.md) moved
+// identity into the personal token itself — the server resolves who you are
+// from the token in `member_tokens`, and the X-Teamshare-Name/-Email headers
+// below are accepted but ignored everywhere. When this resolves, the headers
+// are still sent alongside the token (harmless, and it keeps this client
+// compatible with an older server that used to validate them); when it does
+// not resolve, connect proceeds exactly the same way, just without those two
+// header values.
 //
 // cwd/env are still injectable so tests can prove both the "found" and
 // "genuinely absent" paths without ever touching the real machine's git
@@ -129,11 +140,17 @@ export function resolveGitIdentity(opts = {}) {
   return { name, email: email.toLowerCase() };
 }
 
+// ctx.identity is optional (see the comment above resolveGitIdentity): when
+// it is null, these two headers are still sent, just empty, rather than
+// omitted — the server ignores them either way, and keeping the keys present
+// is what lets looksLikeOurEntry() below keep recognizing a previously
+// written entry as ours on a later run (e.g. after `rotate-token`), even on
+// a machine with no git identity configured.
 function headersObj(ctx) {
   return {
     Authorization: `Bearer ${ctx.token}`,
-    'X-Teamshare-Name': ctx.identity.name.trim(),
-    'X-Teamshare-Email': ctx.identity.email.trim().toLowerCase(),
+    'X-Teamshare-Name': (ctx.identity?.name ?? '').trim(),
+    'X-Teamshare-Email': (ctx.identity?.email ?? '').trim().toLowerCase(),
   };
 }
 
@@ -393,8 +410,9 @@ function buildCodexBlock(ctx) {
     '',
     '[mcp_servers.teamshare.http_headers]',
     `Authorization = ${tomlString(`Bearer ${ctx.token}`)}`,
-    `X-Teamshare-Name = ${tomlString(ctx.identity.name.trim())}`,
-    `X-Teamshare-Email = ${tomlString(ctx.identity.email.trim().toLowerCase())}`,
+    // Empty, not omitted, when ctx.identity is null — see headersObj() above.
+    `X-Teamshare-Name = ${tomlString((ctx.identity?.name ?? '').trim())}`,
+    `X-Teamshare-Email = ${tomlString((ctx.identity?.email ?? '').trim().toLowerCase())}`,
   ];
   return lines.join('\n') + '\n';
 }
@@ -486,8 +504,9 @@ function buildContinueSnippet(ctx) {
     '    requestOptions:',
     '      headers:',
     `        Authorization: Bearer ${snippetCtx.token}`,
-    `        X-Teamshare-Name: ${snippetCtx.identity.name.trim()}`,
-    `        X-Teamshare-Email: ${snippetCtx.identity.email.trim().toLowerCase()}`,
+    // Empty, not omitted, when ctx.identity is null — see headersObj() above.
+    `        X-Teamshare-Name: ${(snippetCtx.identity?.name ?? '').trim()}`,
+    `        X-Teamshare-Email: ${(snippetCtx.identity?.email ?? '').trim().toLowerCase()}`,
   ];
   return lines.join('\n') + '\n';
 }
@@ -596,10 +615,11 @@ function buildTargets(home, platform) {
           mcpUrl(ctx.url),
           '--header',
           `Authorization:Bearer ${ctx.token}`,
+          // Empty, not omitted, when ctx.identity is null — see headersObj() above.
           '--header',
-          `X-Teamshare-Name:${ctx.identity.name.trim()}`,
+          `X-Teamshare-Name:${(ctx.identity?.name ?? '').trim()}`,
           '--header',
-          `X-Teamshare-Email:${ctx.identity.email.trim().toLowerCase()}`,
+          `X-Teamshare-Email:${(ctx.identity?.email ?? '').trim().toLowerCase()}`,
         ],
       }),
       readBack: readBackZedEntry,
@@ -661,19 +681,6 @@ export function discoverConnectedTargets(home = homedir(), platform = process.pl
   return found;
 }
 
-function missingIdentityAbort() {
-  return {
-    reason: 'git identity (user.name and/or user.email) is not fully configured',
-    remedy: [
-      'A config written without an identity would fail every call with a confusing 400.',
-      'Set your git identity, then re-run teamshare connect:',
-      '',
-      '  git config --global user.name "Your Name"',
-      '  git config --global user.email "you@example.com"',
-    ].join('\n'),
-  };
-}
-
 function invalidOnlyAbort(unknown) {
   return {
     reason: `--only named an unknown target: ${unknown.join(', ')}`,
@@ -716,14 +723,17 @@ export function runConnect(url, token, options = {}) {
   // that injects `home` but forgets to also pass an identity or
   // gitIdentityOptions must never fall through to reading the real machine's
   // global git config.
-  const identity =
+  //
+  // Git identity is optional (see the comment above resolveGitIdentity):
+  // there is nothing to abort over here. A resolved-but-incomplete identity
+  // (e.g. an explicitly injected object with an empty name or email) is
+  // normalized to `null` rather than trusted half-filled-in, same as "not
+  // resolved at all" — both take the identity-less path below.
+  const resolved =
     options.identity !== undefined
       ? options.identity
       : resolveGitIdentity(options.gitIdentityOptions ?? { cwd: home });
-
-  if (!identity || !identity.name.trim() || !identity.email.trim()) {
-    return { aborted: missingIdentityAbort(), results: [], showToken };
-  }
+  const identity = resolved && resolved.name.trim() && resolved.email.trim() ? resolved : null;
 
   const allTargets = buildTargets(home, platform);
   const selected = options.only ? allTargets.filter((t) => options.only.includes(t.id)) : allTargets;
@@ -769,6 +779,18 @@ export function formatConnectOutput(run) {
   }
 
   const lines = ['teamshare connect — result', ''];
+
+  // Brief and non-blocking, per the header comment above resolveGitIdentity:
+  // identity now comes from the personal token itself, so a missing git
+  // identity is worth a one-line note, never a reason anything failed.
+  if (!run.identity) {
+    lines.push(
+      '[note] no git identity configured on this machine — proceeding without it. Your personal token is ' +
+        'what identifies you to the server now, not git config, so this has no effect on whether teamshare works.',
+      '',
+    );
+  }
+
   let writtenCount = 0;
   const snippets = [];
 

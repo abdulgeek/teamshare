@@ -191,7 +191,11 @@ creates, so your first team always starts with the standalone script above.
 
 ## The teammate, in full
 
-Without a set git identity, every call to the server fails with a 400.
+There is no git identity to set up. Per-email invites moved identity into
+the personal token itself — `teamshare invite <email>` mints a token the
+server binds to that email, so every share and receipt is attributed to the
+token, not to `git config`. A machine with no git identity configured
+connects exactly the same as one that has it.
 
 For local development without a real install, point Claude Code straight at
 the plugin directory instead — `claude --plugin-dir packages/plugin` —
@@ -218,12 +222,15 @@ silently configuring nothing.
 What it guarantees on every write: it backs up any file it touches
 (`<file>.teamshare-backup-<epoch>`) before changing it; it never clobbers an
 unrelated MCP server that happens to also be named `teamshare` unless you
-pass `--force`; it aborts before touching anything if your global git
-identity isn't set; `--dry-run` prints what would change and writes
-nothing; `--only cursor,codex` restricts the run to specific targets; and it
-never prints your real token in a manual snippet unless you pass
-`--show-token` (needed for Zed and Continue.dev, which are print-only every
-time).
+pass `--force`; `--dry-run` prints what would change and writes nothing;
+`--only cursor,codex` restricts the run to specific targets; and it never
+prints your real token in a manual snippet unless you pass `--show-token`
+(needed for Zed and Continue.dev, which are print-only every time). Your
+global git identity is optional, not a prerequisite: when it's set, connect
+also sends it in the `X-Teamshare-Name`/`X-Teamshare-Email` headers
+alongside your token (harmless, and it keeps you compatible with an older
+server that used to check them); when it isn't, connect proceeds exactly the
+same way — identity comes from your personal token either way.
 
 Two targets are special cases worth knowing up front: **Codex CLI**
 (`~/.codex/config.toml`) is only ever appended to, never rewritten, since
@@ -282,9 +289,10 @@ back her own personal token.
 The next morning, **Sam** joins the team. Priya runs `teamshare-team.mjs
 invite <server-url> sam@example.com "Sam"`, gets back a token minted
 specifically for Sam, and sends it to him directly (a DM, not the team
-channel) along with the join instructions the command prints. Sam sets his
-git identity, installs the Claude Code plugin, pastes in the server URL and
-the token Priya sent him, and restarts Claude Code. Before any of that,
+channel) along with the join instructions the command prints. Sam installs
+the Claude Code plugin, pastes in the server URL and the token Priya sent
+him, and restarts Claude Code — no git identity to set up first, since the
+token he pasted already is his identity. Before any of that,
 Priya had already run `/share` to publish `Auth middleware refactor lands
 Friday. Don't touch src/auth this week.` as `blocking`.
 
@@ -406,12 +414,13 @@ token itself; run `/plugin` to see them) and for anyone who hasn't run
 nothing was actually checked against a real server, so exit 0 would be a
 false all-clear.
 
-Once it has a URL/token, it checks and reports the identity this machine
-would present, whether the server answers `GET /health`, and what `GET
-/unread` returns: 200 (and how many shares are unread, plus which team),
-401 (token rejected), 400 (identity malformed), or any other status
-verbatim. It exits `0` only when every check on a real server passed, and
-never prints the team token — when it reads one out of an assistant config,
+Once it has a URL/token, it reports the git identity this machine would
+present (context only — never required, since attribution comes from the
+personal token, not this), whether the server answers `GET /health`, and
+what `GET /unread` returns: 200 (and how many shares are unread, plus which
+team), 401 (token rejected), or any other status verbatim. It exits `0`
+only when every check on a real server passed, and never prints the team
+token — when it reads one out of an assistant config,
 it says where it came from, never what it is.
 
 ## Trust model

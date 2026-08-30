@@ -480,8 +480,14 @@ describe('formatJoinInstructions: the honest join text', () => {
   const text = formatJoinInstructions({ url: 'https://ts.example.com', token: 'ts_the_token' });
 
   it('includes every required fact', () => {
-    expect(text).toContain('git config --global user.name');
-    expect(text).toContain('git config --global user.email');
+    // Per-email invites (docs/superpowers/specs/2026-08-30-teamshare-invites-design.md)
+    // moved identity into the personal token itself, so there is no longer a
+    // git-config prerequisite step here — pinning its absence so it cannot
+    // silently creep back in as a required first step.
+    expect(text).not.toContain('git config --global user.name');
+    expect(text).not.toContain('git config --global user.email');
+    expect(text.toLowerCase()).toContain('who you are comes');
+    expect(text.toLowerCase()).toContain('attribution trustworthy');
     expect(text).toContain('/plugin marketplace add abdulgeek/teamshare');
     expect(text).toContain('/plugin install teamshare');
     expect(text).toContain('Server URL');
@@ -520,7 +526,6 @@ describe('formatJoinInstructions: the honest join text', () => {
 
   it('presents the facts in the required order', () => {
     const idx = (needle: string) => text.indexOf(needle);
-    const gitName = idx('git config --global user.name');
     const marketplaceAdd = idx('/plugin marketplace add');
     const pluginInstall = idx('/plugin install teamshare');
     const prompts = idx('Server URL');
@@ -530,10 +535,9 @@ describe('formatJoinInstructions: the honest join text', () => {
     const nonClaude = idx('Not using Claude Code');
     const curlLine = idx('curl -fsSL');
 
-    for (const pos of [gitName, marketplaceAdd, pluginInstall, prompts, trust, versionFloor, restart, nonClaude, curlLine]) {
+    for (const pos of [marketplaceAdd, pluginInstall, prompts, trust, versionFloor, restart, nonClaude, curlLine]) {
       expect(pos).toBeGreaterThan(-1);
     }
-    expect(marketplaceAdd).toBeGreaterThan(gitName);
     expect(pluginInstall).toBeGreaterThan(marketplaceAdd);
     expect(prompts).toBeGreaterThan(pluginInstall);
     expect(trust).toBeGreaterThan(prompts);

@@ -398,7 +398,11 @@ interface TeamshareConfig {
   email: string;
 }
 
-const CONFIG_KEYS: (keyof TeamshareConfig)[] = ['url', 'token', 'name', 'email'];
+// Only url/token are truly required. name/email are optional identity
+// context (see resolveIdentity below) — per-email invites moved identity
+// into the personal token itself, so a config that predates that, or one
+// hand-edited to omit them, is still a valid, usable config, not "broken."
+const REQUIRED_CONFIG_KEYS: ('url' | 'token')[] = ['url', 'token'];
 
 // homedir() is called here (not hoisted to a module constant) so a test can
 // override HOME before invoking doctor and have it take effect, the same
@@ -420,14 +424,17 @@ function readTeamshareConfig(): { config: TeamshareConfig | null; path: string; 
     return { config: null, path, exists: true };
   }
   const obj = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-  const hasAllKeys = CONFIG_KEYS.every((k) => typeof obj[k] === 'string' && (obj[k] as string).length > 0);
-  if (!hasAllKeys) return { config: null, path, exists: true };
+  const hasRequiredKeys = REQUIRED_CONFIG_KEYS.every((k) => typeof obj[k] === 'string' && (obj[k] as string).length > 0);
+  if (!hasRequiredKeys) return { config: null, path, exists: true };
   return {
     config: {
       url: obj.url as string,
       token: obj.token as string,
-      name: obj.name as string,
-      email: obj.email as string,
+      // Optional: absent or non-string just means no legacy-config fallback
+      // identity is available (resolveIdentity falls back to git either
+      // way), never a reason to treat the whole file as broken.
+      name: typeof obj.name === 'string' ? obj.name : '',
+      email: typeof obj.email === 'string' ? obj.email : '',
     },
     path,
     exists: true,
@@ -476,8 +483,15 @@ function gitIdentity(): { name: string; email: string } | null {
 
 // Same fallback shape as the plugin: prefer the resolved git identity, and
 // fall back to ~/.teamshare.json's name/email only when git yields nothing.
+// A config with no (or blank) name/email is treated the same as no config at
+// all here — never a half-filled-in identity — since neither source being
+// set is a normal, unproblematic case now that identity comes from the
+// personal token, not from either of these.
 function resolveIdentity(config: TeamshareConfig | null): { name: string; email: string } | null {
-  return gitIdentity() || (config ? { name: config.name, email: config.email } : null);
+  if (config && config.name.trim() && config.email.trim()) {
+    return gitIdentity() || { name: config.name, email: config.email };
+  }
+  return gitIdentity();
 }
 
 // Generous relative to the SessionStart hook's 1.5s budget on purpose: a PaaS
@@ -569,7 +583,7 @@ function resolveServer(
     // (normal under the plugin-managed install), this is an actual problem:
     // something wrote it and got it wrong, or it wants a `/teamshare-setup`
     // re-run.
-    lines.push(`[PROBLEM] ${legacyPath} exists but is missing one of url/token/name/email — run /teamshare-setup`);
+    lines.push(`[PROBLEM] ${legacyPath} exists but is missing url or token — run /teamshare-setup`);
     return { server: null, legacyConfig: null, lines, problem: true };
   }
   if (legacyConfig) {
@@ -645,16 +659,21 @@ export async function runDoctor(
   if (resolution.problem) healthy = false;
   const server = resolution.server;
 
+  // Reported as useful context only, never as a problem: identity now comes
+  // from the personal token the server looks up (member_tokens), not from
+  // git config or these headers — see
+  // docs/superpowers/specs/2026-08-30-teamshare-invites-design.md. A machine
+  // with no git identity configured connects exactly the same as one that
+  // has it, so a missing identity here is not something to flag as broken.
   const identity = resolveIdentity(resolution.legacyConfig);
   if (identity) {
     lines.push(
       `[INFO] identity this machine would present: ${identity.name.trim()} <${identity.email.trim().toLowerCase()}>`,
     );
   } else {
-    problem(
-      'identity unresolved — no git user.name/user.email and no usable ~/.teamshare.json. Run:\n' +
-        '  git config --global user.name "Your Name"\n' +
-        '  git config --global user.email "you@example.com"',
+    lines.push(
+      '[INFO] no git identity configured on this machine (git config --global user.name/user.email) — that is ' +
+        'fine: your personal token, not git config, is what identifies you to the server.',
     );
   }
 
@@ -697,10 +716,6 @@ export async function runDoctor(
         problem(
           `${base}/unread returned 401 — token rejected. Reconnect: /plugin (Claude Code) or ` +
             '`teamshare connect` (other assistants)',
-        );
-      } else if (res.status === 400) {
-        problem(
-          `${base}/unread returned 400 — identity malformed, check git config user.name/user.email`,
         );
       } else {
         problem(`${base}/unread returned ${res.status}`);

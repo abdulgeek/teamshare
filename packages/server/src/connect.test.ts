@@ -466,10 +466,10 @@ describe('a backup is created before each write', () => {
   });
 });
 
-describe('missing git identity aborts before any file is touched', () => {
-  it('runConnect aborts and touches nothing when neither identity nor a resolvable git config is available', () => {
+describe('a missing git identity is optional, not a blocker', () => {
+  it('runConnect succeeds and writes config when neither identity nor a resolvable git config is available', () => {
     const home = tmp();
-    mkdirSync(join(home, '.cursor'), { recursive: true }); // would otherwise be written to
+    mkdirSync(join(home, '.cursor'), { recursive: true });
 
     const isolatedCwd = tmp(); // not a git repo
     const isolatedHome = tmp(); // guaranteed empty — no real ~/.gitconfig can leak in
@@ -482,23 +482,45 @@ describe('missing git identity aborts before any file is touched', () => {
 
     const run = runConnect(url, token, {
       home,
+      only: ['cursor'],
       now: FIXED_NOW,
       gitIdentityOptions: { cwd: isolatedCwd, env: isolatedEnv },
     });
 
-    expect(run.aborted).toBeDefined();
-    expect(run.aborted!.remedy).toContain('git config --global user.name');
-    expect(run.aborted!.remedy).toContain('git config --global user.email');
-    expect(run.results).toEqual([]);
-    expect(existsSync(join(home, '.cursor', 'mcp.json'))).toBe(false);
+    expect(run.aborted).toBeUndefined();
+    expect(run.identity).toBeNull();
+    const cursor = run.results.find((r) => r.id === 'cursor')!;
+    expect(cursor.status).toBe('written');
+    const written = readJson(join(home, '.cursor', 'mcp.json')) as any;
+    // Headers are still present (so a later run still recognizes this as our
+    // entry), just empty — never a fabricated or fake identity.
+    expect(written.mcpServers.teamshare.headers.Authorization).toBe(`Bearer ${token}`);
+    expect(written.mcpServers.teamshare.headers['X-Teamshare-Name']).toBe('');
+    expect(written.mcpServers.teamshare.headers['X-Teamshare-Email']).toBe('');
   });
 
-  it('aborts when an explicit identity object has an empty name or email', () => {
+  it('treats an explicit identity object with an empty name or email the same as no identity at all', () => {
     const home = tmp();
     mkdirSync(join(home, '.cursor'), { recursive: true });
-    const run = runConnect(url, token, { home, identity: { name: '', email: 'x@y.com' }, now: FIXED_NOW });
-    expect(run.aborted).toBeDefined();
-    expect(existsSync(join(home, '.cursor', 'mcp.json'))).toBe(false);
+    const run = runConnect(url, token, {
+      home,
+      identity: { name: '', email: 'x@y.com' },
+      only: ['cursor'],
+      now: FIXED_NOW,
+    });
+    expect(run.aborted).toBeUndefined();
+    expect(run.identity).toBeNull();
+    expect(run.results.find((r) => r.id === 'cursor')!.status).toBe('written');
+  });
+
+  it('formatConnectOutput adds a brief, non-blocking note when no identity was found — never a failure claim', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    const run = runConnect(url, token, { home, identity: null, only: ['cursor'], now: FIXED_NOW });
+    const out = formatConnectOutput(run);
+    expect(out).toContain('no git identity configured');
+    expect(out.toLowerCase()).not.toContain('fail');
+    expect(out).toContain('1 assistant(s) configured automatically.');
   });
 });
 
@@ -564,12 +586,16 @@ describe('formatting: formatConnectOutput / formatListOutput', () => {
   });
 
   it('formatConnectOutput reports the abort reason and remedy plainly', () => {
+    // An arbitrary abort shape, to test the generic rendering mechanism
+    // itself — not tied to any one real abort reason (--only validation is
+    // the only kind runConnect produces today; a missing git identity no
+    // longer aborts anything).
     const out = formatConnectOutput({
-      aborted: { reason: 'git identity is not fully configured', remedy: 'git config --global user.name "You"' },
+      aborted: { reason: '--only named an unknown target: bogus', remedy: 'Valid targets: cursor, vscode' },
       results: [],
     });
-    expect(out).toContain('git identity is not fully configured');
-    expect(out).toContain('git config --global user.name');
+    expect(out).toContain('--only named an unknown target: bogus');
+    expect(out).toContain('Valid targets: cursor, vscode');
   });
 
   it('formatConnectOutput counts configured assistants and reminds about restart and doctor', () => {

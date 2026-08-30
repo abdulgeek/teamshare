@@ -62,15 +62,9 @@ passing one around, and what makes "who's seen this?" a real answer instead
 of a guess. Either way, you don't go hunting for either value: **your lead
 sends you both, in one message.**
 
-Every share and read receipt is attributed to your git identity. Set it
-once, before installing anything:
+No separate identity step: paste the token below and you're set.
 
-```bash
-git config --global user.name "Your Name"
-git config --global user.email "you@example.com"
-```
-
-Then, depending on your assistant:
+Depending on your assistant:
 
 **Claude Code:**
 
@@ -211,10 +205,10 @@ Personal token for sam@example.com (shown once — this cannot be recovered late
 Send this token privately to sam@example.com only — never post it in a shared channel...
 
 --- Joining the team in Claude Code ---
-0. git config --global user.name / user.email, if not already set.
 1. /plugin marketplace add abdulgeek/teamshare
    /plugin install teamshare
-2. Paste the Server URL and Personal token when prompted.
+2. Paste the Server URL and Personal token when prompted — that token IS your
+   identity; nothing to set up first.
 3. Trust the workspace. 4. Requires Claude Code ≥ 2.1.238. 5. Restart Claude Code.
 
 --- Not using Claude Code? ---
@@ -224,9 +218,9 @@ node teamshare-connect.mjs https://54.90.22.249.sslip.io
 
 Priya sends that whole block to Sam in a DM, never in the team channel.
 
-**Sam joins — Claude Code.** He sets his git identity, runs the two
-`/plugin` commands above, pastes the server URL and his personal token when
-prompted, trusts the workspace, and restarts.
+**Sam joins — Claude Code.** He runs the two `/plugin` commands above, pastes
+the server URL and his personal token when prompted, trusts the workspace,
+and restarts. No git config step — his token already is his identity.
 
 **Sam joins — a non-Claude-Code assistant (Cursor, here).** No clone, no
 install, no build:

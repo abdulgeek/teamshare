@@ -1080,11 +1080,22 @@ describe('doctor', () => {
     }
   }
 
-  it('fails when ~/.teamshare.json is present but missing a required key — a real problem, not the guidance path', async () => {
-    writeFileSync(join(home, '.teamshare.json'), JSON.stringify({ url: 'http://x', token: 't', name: 'A' }));
+  it('fails when ~/.teamshare.json is present but missing url or token — a real problem, not the guidance path', async () => {
+    // token is missing entirely — url/token are the only truly required
+    // keys; name/email are optional identity context (see the test below).
+    writeFileSync(join(home, '.teamshare.json'), JSON.stringify({ url: 'http://x', name: 'A', email: 'a@b.com' }));
     const { exitCode, output } = await runDoctor();
     expect(exitCode).toBe(1);
     expect(output).toContain('/teamshare-setup');
+  });
+
+  it('accepts ~/.teamshare.json with only url/token — a missing name/email is optional identity context, not a broken config', async () => {
+    writeFileSync(join(home, '.teamshare.json'), JSON.stringify({ url: `http://127.0.0.1:${port}`, token: 'tok_secret_value' }));
+    const { exitCode, output } = await runDoctor();
+    expect(exitCode).toBe(0);
+    expect(output).not.toContain('/teamshare-setup');
+    expect(output).not.toContain('[PROBLEM]');
+    expect(output).toContain('[INFO] no git identity configured');
   });
 
   it('passes end-to-end against a reachable, correctly-configured server, and never prints the token', async () => {
@@ -1097,6 +1108,16 @@ describe('doctor', () => {
     expect(output).toMatch(/0 unread/);
   });
 
+  it('reports a missing git identity as informational context, never a [PROBLEM], and does not fail the run over it', async () => {
+    // No writeGitConfig() and no writeConfig(): identity genuinely resolves
+    // to nothing. Passing the server explicitly isolates this from the
+    // separate "no server source found" guidance path.
+    const { exitCode, output } = await runDoctor(`http://127.0.0.1:${port}`, 'a_token');
+    expect(exitCode).toBe(0);
+    expect(output).not.toContain('[PROBLEM]');
+    expect(output).toContain('[INFO] no git identity configured');
+  });
+
   it('flags a 401 on /unread and points to the reconnect remedy', async () => {
     writeConfig();
     respondUnread = (res) => { res.writeHead(401); res.end('{}'); };
@@ -1107,13 +1128,13 @@ describe('doctor', () => {
     expect(output).toContain('teamshare connect');
   });
 
-  it('flags a 400 on /unread and points to git config', async () => {
+  it('reports an unexpected 400 on /unread verbatim, without blaming git config (identity comes from the token, not headers, so this can no longer be an identity problem)', async () => {
     writeConfig();
     respondUnread = (res) => { res.writeHead(400); res.end('{}'); };
     const { exitCode, output } = await runDoctor();
     expect(exitCode).toBe(1);
     expect(output).toContain('400');
-    expect(output.toLowerCase()).toContain('git config');
+    expect(output.toLowerCase()).not.toContain('git config user.name');
   });
 
   it('reports an unexpected status code verbatim rather than mislabeling it', async () => {

@@ -52,7 +52,14 @@ export interface AbortInfo {
 
 export interface ConnectRunResult {
   aborted?: AbortInfo;
-  identity?: GitIdentity;
+  /**
+   * Absent only on an --only-validation abort (before identity is ever
+   * resolved). Otherwise always present: the resolved git identity, or
+   * `null` when none was found — a missing identity is not an error, since
+   * the personal token (not this) is what identifies the caller to the
+   * server.
+   */
+  identity?: GitIdentity | null;
   results: TargetResult[];
   showToken?: boolean;
 }

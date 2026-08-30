@@ -81,7 +81,14 @@ function gitIdentity() {
 //      installed-plugin path and takes precedence over the config file.
 //   2. ~/.teamshare.json — the dev (--plugin-dir) / legacy fallback.
 // Identity (name/email) always tries git config first, then the config file,
-// independent of where url/token came from.
+// independent of where url/token came from — but it is optional, not a
+// second prerequisite alongside url/token. Per-email invites
+// (docs/superpowers/specs/2026-08-30-teamshare-invites-design.md) moved
+// identity into the personal token itself: the server resolves who you are
+// from the token, and these headers are accepted but ignored everywhere. A
+// teammate who has a valid url/token but never ran `git config --global
+// user.name/user.email` must still get their digest — the whole point of
+// this design is that the token alone is enough.
 function loadConfig() {
   const fileCfg = readConfigFile();
 
@@ -91,9 +98,8 @@ function loadConfig() {
 
   const identity =
     gitIdentity() || (fileCfg?.name && fileCfg?.email ? { name: fileCfg.name, email: fileCfg.email } : null);
-  if (!identity) return null;
 
-  return { url, token, name: identity.name, email: identity.email };
+  return { url, token, name: identity?.name ?? '', email: identity?.email ?? '' };
 }
 
 // Defence in depth: neutralise literal fence-looking text so a share cannot

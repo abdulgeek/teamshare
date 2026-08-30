@@ -339,6 +339,66 @@ describe('session-start hook', () => {
     });
   });
 
+  describe('a missing git identity does not block the digest', () => {
+    // Per-email invites moved identity into the personal token itself — the
+    // server resolves who you are from the token, not from these headers —
+    // so a teammate with a valid url/token but no git identity configured
+    // anywhere (no `git config --global user.name/user.email`, no name/email
+    // in ~/.teamshare.json) must still get their digest. This is the
+    // regression this whole describe block guards: loadConfig() used to
+    // return null in exactly this case, silently dropping the digest forever
+    // for anyone who skipped a git-config step that the server never needed.
+    it('still fetches and shows the digest via the installed-plugin (env) path with no identity anywhere', async () => {
+      respond = (res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          total: 1,
+          shares: [{
+            id: 'shr_no_identity',
+            sender_name: 'A',
+            sender_email: 'a@t.com',
+            created_at: '2026-08-29T09:00:00.000Z',
+            priority: 'fyi',
+            what: 'x',
+          }],
+        }));
+      };
+
+      const out = await runHook(
+        { hook_event_name: 'SessionStart', source: 'startup' },
+        {
+          CLAUDE_PLUGIN_OPTION_TEAMSHARE_URL: `http://127.0.0.1:${port}`,
+          CLAUDE_PLUGIN_OPTION_TEAMSHARE_TOKEN: 'tok_env',
+        },
+      );
+
+      expect(out).toContain('shr_no_identity');
+      expect(lastRequestHeaders).not.toBeNull();
+      expect(lastRequestHeaders.authorization).toBe('Bearer tok_env');
+      // Sent empty, not omitted — the server ignores them either way, and
+      // this is never fabricated identity.
+      expect(lastRequestHeaders['x-teamshare-email']).toBe('');
+      expect(lastRequestHeaders['x-teamshare-name']).toBe('');
+    });
+
+    it('still fetches and shows the digest from ~/.teamshare.json when that file has no name/email', async () => {
+      writeFileSync(
+        join(home, '.teamshare.json'),
+        JSON.stringify({ url: `http://127.0.0.1:${port}`, token: 'tok_no_identity' }),
+      );
+      respond = (res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ total: 0, shares: [] }));
+      };
+
+      await runHook();
+      expect(lastRequestHeaders).not.toBeNull();
+      expect(lastRequestHeaders.authorization).toBe('Bearer tok_no_identity');
+      expect(lastRequestHeaders['x-teamshare-email']).toBe('');
+      expect(lastRequestHeaders['x-teamshare-name']).toBe('');
+    });
+  });
+
   describe('deterministic identity resolution', () => {
     it('resolves the global git identity even when run from inside a repo with a different local identity', async () => {
       // The bug this guards against (found via live testing): the hook runs
