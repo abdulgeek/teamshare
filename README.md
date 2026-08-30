@@ -138,8 +138,292 @@ viewed, dismissed, and who's still unseen.
 gone everywhere) or mark it stale (stops showing as unread, stays in
 history). Shares also age out on their own after 14 days.
 
+## Walkthrough
+
+**Priya** has her org's signup secret and server URL from the operator. No
+checkout, no install — she downloads one script and creates her team:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
+TEAMSHARE_SIGNUP_SECRET=<the-org-secret> node teamshare-team.mjs create-team https://teamshare.acme.example.com "Acme Engineering"
+```
+
+```
+teamshare create-team — success
+
+Team: Acme Engineering (tm_de3b55fed47e)
+
+Team token (shown once — this cannot be recovered later; save it in a password manager now):
+
+  ts_<a long generated value>
+
+Verifying the new token against the live server:
+
+[OK] server reachable at https://teamshare.acme.example.com/health
+[OK] https://teamshare.acme.example.com/members returned 200 (0 known email(s))
+...
+This is the ADMIN token for this team, not a personal credential — it cannot be used to join
+teamshare with. To actually use teamshare yourself, mint your own personal token first: ...
+```
+
+She saves the admin token in a password manager, then — because the admin
+token can't itself be used to join — mints her own personal token:
+
+```bash
+TEAMSHARE_ADMIN_TOKEN=<the-admin-token-above> node teamshare-team.mjs invite https://teamshare.acme.example.com priya@example.com "Priya"
+```
+
+That prints her personal token (`tsm_...`) plus the same join instructions
+below, which she follows herself.
+
+**Inviting Sam.** Priya mints Sam his own token the same way:
+
+```bash
+TEAMSHARE_ADMIN_TOKEN=<the-admin-token-above> node teamshare-team.mjs invite https://teamshare.acme.example.com sam@example.com "Sam"
+```
+
+```
+teamshare invite — success
+
+Invited: Sam <sam@example.com>
+
+Personal token for sam@example.com (shown once — this cannot be recovered later; save it in a password manager now):
+
+  tsm_<a long generated value>
+
+Send this token privately to sam@example.com only — never post it in a shared channel...
+
+--- Joining the team in Claude Code ---
+0. git config --global user.name / user.email, if not already set.
+1. /plugin marketplace add abdulgeek/teamshare
+   /plugin install teamshare
+2. Paste the Server URL and Personal token when prompted.
+3. Trust the workspace. 4. Requires Claude Code ≥ 2.1.238. 5. Restart Claude Code.
+
+--- Not using Claude Code? ---
+curl -fsSL .../teamshare-connect.mjs -o teamshare-connect.mjs
+node teamshare-connect.mjs https://teamshare.acme.example.com
+```
+
+Priya sends that whole block to Sam in a DM, never in the team channel.
+
+**Sam joins — Claude Code.** He sets his git identity, runs the two
+`/plugin` commands above, pastes the server URL and his personal token when
+prompted, trusts the workspace, and restarts.
+
+**Sam joins — a non-Claude-Code assistant (Cursor, here).** No clone, no
+install, no build:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-connect.mjs -o teamshare-connect.mjs
+node teamshare-connect.mjs https://teamshare.acme.example.com
+```
+
+It prompts for his personal token (hidden as he types), detects Cursor on
+his machine, and writes its MCP config:
+
+```
+teamshare connect — result
+
+  [written]       Cursor -> ~/.cursor/mcp.json (backup: ~/.cursor/mcp.json.teamshare-backup-1788096310456)
+
+1 assistant(s) configured automatically.
+Restart the affected assistant(s) to pick up the change.
+Run `teamshare doctor` next to confirm the connection actually works.
+```
+
+He confirms it actually works — every delivery failure here is silent by
+design, so this is the one real check:
+
+```bash
+node packages/server/dist/cli.js doctor
+```
+
+```
+[OK] found a teamshare entry in Cursor (~/.cursor/mcp.json)
+[INFO] identity this machine would present: Sam <sam@example.com>
+[OK] server reachable at https://teamshare.acme.example.com/health
+[OK] https://teamshare.acme.example.com/unread returned 200 (0 unread share(s))
+[OK] connected to team: Acme Engineering
+```
+
+**Priya publishes a share.** In Claude Code:
+
+```
+/share Auth middleware refactor lands Friday. Don't touch src/auth this week.
+```
+
+Claude distills it, shows her the result, confirms, then calls the `share`
+tool and reports back: published as `blocking`, 1 teammate notified.
+
+**Sam's next session opens with the digest** — his agent calls `unread` for
+him automatically and tells him:
+
+> 1 unread team share: Priya says the auth middleware refactor lands Friday
+> and not to touch `src/auth` this week — blocking. Want the details?
+
+Sam says yes. Claude calls `read_share`, shows him the full note, and
+records a `viewed` receipt.
+
+**Priya checks who's seen it.** She asks "who's seen the auth share?" —
+Claude calls `receipts` and reports back exactly this:
+
+```
+1 viewed, 0 dismissed. Not yet seen by: nobody.
+```
+
+**Priya retracts it** once the refactor has landed: "retract the auth
+share." Claude calls `retract`. It's gone from `unread`, history, and
+receipts alike — as if it had never been sent.
+
+## Command reference
+
+Grouped by who runs each command. **Needs a checkout + build**: the server
+CLI, `node packages/server/dist/cli.js <cmd>` (built package name is
+`teamshare`, so `teamshare <cmd>` if installed globally). **Curl-and-run, no
+install**: `teamshare-team.mjs` and `teamshare-connect.mjs` — the real
+first-time path if nothing is installed yet.
+
+**Secrets are never positional arguments.** Every command below resolves its
+secret from an environment variable, or an interactive hidden prompt on a
+real terminal:
+
+- `TEAMSHARE_SIGNUP_SECRET` — `create-team` (the standalone script).
+- `TEAMSHARE_ADMIN_TOKEN` (or the older alias `TEAMSHARE_TEAM_TOKEN`) —
+  `invite`, `revoke`, `roster`, `rotate-team`.
+- `TEAMSHARE_URL` / `TEAMSHARE_TOKEN` — `connect` and `doctor` (both, or
+  neither; a half-set pair is flagged, not silently ignored).
+
+`teamshare-connect.mjs` is the one exception: it still accepts the personal
+token as a second positional argument, but warns that it lands in shell
+history — prefer the environment variable or the prompt.
+
+**The operator** — needs a checkout + build. Runs the server, then stays out
+of the loop.
+
+- `serve` — start the server.
+  ```bash
+  node packages/server/dist/cli.js serve --port 8787 --host 127.0.0.1 --db /path/to/teamshare.db --expiry-days 14 --signup-secret <a-secret-you-choose> --open-signup --max-teams 20
+  ```
+- `signup-secret --show` — recover the signup secret if it was auto-generated or forgotten.
+  ```bash
+  node packages/server/dist/cli.js signup-secret --show
+  ```
+
+**The team lead** — curl-and-run, no checkout. Mint an admin token once, then
+invite each teammate.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
+```
+
+- `create-team <url> "<name>"` — create a team; prints an admin token (shown once).
+  ```bash
+  TEAMSHARE_SIGNUP_SECRET=<secret> node teamshare-team.mjs create-team <server-url> "Acme Engineering"
+  ```
+- `rotate-team <url>` — invalidate the current admin token, mint a new one. No teammate's connection is disturbed.
+  ```bash
+  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs rotate-team <server-url>
+  ```
+- `invite <url> <email> ["<name>"]` — mint one person a personal token (shown once); send it to them privately.
+  ```bash
+  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs invite <server-url> sam@example.com "Sam"
+  ```
+- `revoke <url> <email>` — kill every live token for one email, on every device.
+  ```bash
+  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs revoke <server-url> sam@example.com
+  ```
+- `roster <url>` — list who has a live token and who's still "invited, not yet active."
+  ```bash
+  TEAMSHARE_ADMIN_TOKEN=<admin-token> node teamshare-team.mjs roster <server-url>
+  ```
+
+**The lead, from a checkout** — same five identity operations as the local
+database's own break-glass CLI, needing no admin token at all (filesystem
+access to the database already implies that authority). `--team "<name>"` is
+required once the server hosts more than one team, optional and inferred
+otherwise.
+
+```bash
+node packages/server/dist/cli.js create-team "<name>" [--url <server-url>] [--db <path>]
+node packages/server/dist/cli.js invite <email> ["<name>"] [--team "<name>"] [--db <path>]
+node packages/server/dist/cli.js revoke <email> [--team "<name>"] [--db <path>]
+node packages/server/dist/cli.js roster [--team "<name>"] [--db <path>]
+node packages/server/dist/cli.js rotate-token [--team "<name>"] [--db <path>]
+node packages/server/dist/cli.js remove-member <email> [--team "<name>"] [--db <path>]
+```
+
+`remove-member` deletes a departed engineer from the historical roster;
+`revoke` kills their live tokens instead. Removing someone cleanly means
+both — `revoke` first, then `remove-member`.
+
+**Diagnosing a connection** — needs a checkout + build. Anyone can run these
+against any server, regardless of what's configured on this machine.
+
+- `doctor [<url> <token>]` — the real check for a silent connection: resolves a server URL/token (explicit args, `TEAMSHARE_URL`/`TEAMSHARE_TOKEN`, `~/.teamshare.json`, or a discovered assistant config, in that order) and reports identity, reachability, and unread count.
+  ```bash
+  TEAMSHARE_URL=<server-url> TEAMSHARE_TOKEN=<your-token> node packages/server/dist/cli.js doctor
+  ```
+- `connect <url> <token> [--only cursor,codex] [--dry-run] [--force] [--show-token]` — same connector as the standalone script below, built into the CLI.
+  ```bash
+  node packages/server/dist/cli.js connect <server-url> <your-token> --only cursor,codex --dry-run
+  ```
+- `connect --list` — show which assistants this machine has and their config paths, without writing anything.
+  ```bash
+  node packages/server/dist/cli.js connect --list
+  ```
+
+**The teammate** — curl-and-run, no checkout. For every assistant except
+Claude Code.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-connect.mjs -o teamshare-connect.mjs
+```
+
+- `<url> [token]` — configure every detected assistant on this machine in one run; prompts for the token (hidden) if you don't pass it or set `TEAMSHARE_TOKEN`.
+  ```bash
+  node teamshare-connect.mjs <server-url>
+  ```
+- `--only cursor,codex` — restrict to specific targets: `cursor`, `vscode`, `windsurf`, `gemini`, `cline`, `codex`, `zed`, `continue`.
+- `--dry-run` — print what would change, write nothing.
+- `--force` — overwrite an unrelated MCP server that happens to already be named `teamshare`.
+- `--show-token` — print the real token in a manual snippet (needed for Zed and Continue.dev, which are print-only every time).
+- `--list` — detect without writing.
+  ```bash
+  node teamshare-connect.mjs --list
+  ```
+
+**Claude Code slash commands**
+
+- `/share [what you want the team to know]` — distill and publish a share.
+  ```
+  /share Auth middleware refactor lands Friday. Don't touch src/auth this week.
+  ```
+- `/teamshare-create-team [team name] [server-url]` — mint a *second*, independent team on a server this machine already talks to. Not the first-time path — that's the team-lead section above.
+  ```
+  /teamshare-create-team "Platform Team" https://teamshare.acme.example.com
+  ```
+- `/teamshare-setup [server-url] [team-token]` — supply the server URL and token by hand, for `claude --plugin-dir` development or repairing a broken config. Not part of a normal install.
+  ```
+  /teamshare-setup https://teamshare.acme.example.com tsm_...
+  ```
+
+**MCP tools your agent calls for you** — you don't type these; ask in plain
+language ("what's unread", "who's seen this", "retract the auth share") and
+Claude calls the right one.
+
+| Tool | What it does |
+|---|---|
+| `share` | Publish a note to the whole team. |
+| `unread` | Shares this user hasn't viewed or dismissed yet — called at session start. |
+| `read_share` | Full body of one share; records a `viewed` receipt. |
+| `acknowledge` | Marks a share read (`dismissed`) without showing the detail. |
+| `list_shares` | Browse share history, newest first, including expired shares. |
+| `receipts` | Who's viewed, dismissed, or not yet seen one share. |
+| `retract` | Hard-delete a share you authored, and every receipt for it. |
+| `mark_stale` | Soft-retract: stops showing as unread, stays in history. |
+
 ## More
 
-The full reference — every admin command, the trust model, deploy
-requirements, `teamshare doctor` internals, and a worked example — lives in
-[`docs/reference.md`](docs/reference.md).
+Deeper background — the trust model, deploy requirements, and `teamshare
+doctor` internals — lives in [`docs/reference.md`](docs/reference.md).
