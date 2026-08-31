@@ -1,7 +1,7 @@
 {
   "name": "teamshare",
   "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start.",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "author": {
     "name": "teamshare"
   },

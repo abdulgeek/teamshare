@@ -12,6 +12,8 @@ import {
   generateTeamToken,
   getOrCreateSignupSecret,
   getSignupSecret,
+  generateSignupSecret,
+  rotateSignupSecret,
   hashToken,
   listRoster,
   listTeams,
@@ -68,6 +70,8 @@ export interface Args {
   // signup-secret subcommand only: the one supported flag, so revealing the
   // plaintext is always an explicit ask, never a bare-command accident.
   signupSecretShow?: boolean;
+  signupSecretGenerate?: boolean;
+  signupSecretRotate?: boolean;
   connectUrl?: string;
   connectToken?: string;
   connectOnly?: TargetId[];
@@ -166,6 +170,8 @@ export function parseArgs(argv: string[]): Args {
     else if (flag === '--max-teams' && value) { args.maxTeams = Number(value); i++; }
     else if (flag === '--open-signup') { args.openSignup = true; }
     else if (flag === '--show') { args.signupSecretShow = true; }
+    else if (flag === '--generate') { args.signupSecretGenerate = true; }
+    else if (flag === '--rotate') { args.signupSecretRotate = true; }
   }
 
   return args;
@@ -214,7 +220,7 @@ const HELP = `teamshare — shared context for coding agents
 Usage:
   teamshare serve [--port 8787] [--host 127.0.0.1] [--db <path>] [--expiry-days 14]
                   [--signup-secret <secret>] [--open-signup] [--max-teams <n>]
-  teamshare signup-secret --show [--db <path>]
+  teamshare signup-secret --show | --generate | --rotate [--db <path>]
   teamshare rotate-token [--team <name>] [--db <path>]
   teamshare remove-member <email> [--team <name>] [--db <path>]
   teamshare create-team "<name>" [--url <server-url>] [--db <path>]
@@ -780,8 +786,43 @@ export async function main(argv: string[]): Promise<void> {
   mkdirSync(dirname(args.dbPath), { recursive: true });
 
   if (args.cmd === 'signup-secret') {
+    // --generate touches no database: it answers "what should a signup secret
+    // look like?" for someone who has not deployed anything yet, and for
+    // anyone who wants to choose the value before the server exists.
+    if (args.signupSecretGenerate) {
+      if (args.signupSecretRotate || args.signupSecretShow) {
+        process.stderr.write('--generate cannot be combined with --rotate or --show\n');
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(`${generateSignupSecret()}\n`);
+      return;
+    }
+
+    if (args.signupSecretRotate) {
+      if (args.signupSecretShow) {
+        process.stderr.write('--rotate cannot be combined with --show\n');
+        process.exitCode = 1;
+        return;
+      }
+      const rotateDb = openDb(args.dbPath);
+      const rotated = rotateSignupSecret(rotateDb, args.signupSecret);
+      rotateDb.close();
+      process.stdout.write(
+        `${rotated}\n\nThis is now the only value that can create teams on this instance; the previous one stopped\n` +
+          'working immediately. Nothing else is affected — every existing team, admin token and personal\n' +
+          'token keeps working, because this secret only ever gated the creation of new teams.\n',
+      );
+      return;
+    }
+
     if (!args.signupSecretShow) {
-      process.stderr.write('signup-secret needs --show (the only supported flag) to print the current value\n');
+      process.stderr.write(
+        'signup-secret needs one of:\n' +
+          '  --show      print the value this instance is using\n' +
+          '  --generate  print a new, correctly-formed value without storing it\n' +
+          '  --rotate    replace this instance\'s value with a new one (add --signup-secret <v> to choose it)\n',
+      );
       process.exitCode = 1;
       return;
     }

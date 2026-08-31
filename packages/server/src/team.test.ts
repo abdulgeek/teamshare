@@ -42,6 +42,8 @@ import {
   readAdminStore,
   readBundledMcpUrl,
   readSignupSecretFile,
+  readSavedSignupSecret,
+  saveSignupSecret,
   adminEntriesFor,
   adminStorePath,
   saveAdminEntry,
@@ -1692,5 +1694,116 @@ describe('the signup secret can arrive by file', () => {
     expect(parsed.name).toBe('Platform');
     expect(parsed.signupSecretFile).toBeUndefined();
     expect(JSON.stringify(parsed)).not.toContain('my-secret-value');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Creating a team should cost a team name, not a credential hunt. The secret
+// is long, unmemorable, and only recoverable from the server — so it is
+// remembered after the first success, and every later create-team is just a
+// name.
+// ---------------------------------------------------------------------------
+
+describe('the signup secret is remembered after it works once', () => {
+  let db: Db;
+  let server: Server;
+  let base: string;
+  let home: string;
+  const SECRET = 'tss_remembered_secret_value';
+
+  beforeEach(async () => {
+    db = openDb(':memory:');
+    home = mkdtempSync(join(tmpdir(), 'teamshare-remember-'));
+    const app = createApp({ db, expiryDays: 14, signupSecret: SECRET });
+    server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const addr = server.address();
+    if (typeof addr === 'object' && addr) base = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const secretFile = (contents: string) => {
+    const p = join(home, 'secret');
+    writeFileSync(p, contents, { mode: 0o600 });
+    return p;
+  };
+  const run = (argv: string[]) =>
+    runTeamCli(argv, {
+      homeDir: home,
+      env: {},
+      isTTY: false,
+      identity,
+      promptFn: (() => {
+        throw new Error('must not prompt');
+      }) as never,
+    });
+
+  it('a second create-team needs only a name', async () => {
+    const first = await run(['create-team', base, 'AI-Platform', '--signup-secret-file', secretFile(SECRET)]);
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout).toContain('remembered');
+
+    // No file, no environment, no terminal — the point of the whole change.
+    const second = await run(['create-team', base, 'Growth']);
+    expect(second.exitCode).toBe(0);
+    expect(findTeamByName(db, 'Growth')).toBeTruthy();
+  });
+
+  it('remembers per server, so another instance is not silently assumed', () => {
+    saveSignupSecret({ url: base, secret: SECRET, homeDir: home });
+    expect(readSavedSignupSecret({ url: base, homeDir: home })).toBe(SECRET);
+    expect(readSavedSignupSecret({ url: 'https://other.example', homeDir: home })).toBeUndefined();
+    // Normalised, so a trailing slash or /mcp still finds it.
+    expect(readSavedSignupSecret({ url: `${base}/mcp`, homeDir: home })).toBe(SECRET);
+  });
+
+  it('never remembers a secret the server rejected', async () => {
+    const bad = await run(['create-team', base, 'Nope', '--signup-secret-file', secretFile('wrong-secret')]);
+    expect(bad.exitCode).toBe(1);
+    expect(readSavedSignupSecret({ url: base, homeDir: home })).toBeUndefined();
+    // And the next attempt must not silently reuse the bad value.
+    const next = await run(['create-team', base, 'Also Nope']);
+    expect(next.exitCode).toBe(1);
+    expect(findTeamByName(db, 'Also Nope')).toBeUndefined();
+  });
+
+  it('lets an explicit file or environment value override what was remembered', async () => {
+    saveSignupSecret({ url: base, secret: 'stale-value', homeDir: home });
+
+    const byFile = await run(['create-team', base, 'By File', '--signup-secret-file', secretFile(SECRET)]);
+    expect(byFile.exitCode).toBe(0);
+
+    const byEnv = await runTeamCli(['create-team', base, 'By Env'], {
+      homeDir: home,
+      env: { [SIGNUP_SECRET_ENV]: SECRET },
+      isTTY: false,
+      identity,
+    });
+    expect(byEnv.exitCode).toBe(0);
+  });
+
+  it('keeps the saved secret and the saved admin tokens from clobbering each other', async () => {
+    await run(['create-team', base, 'First', '--signup-secret-file', secretFile(SECRET)]);
+    await run(['create-team', base, 'Second']);
+
+    // Both writes go through the same file; neither may drop the other's data.
+    expect(readSavedSignupSecret({ url: base, homeDir: home })).toBe(SECRET);
+    expect(adminEntriesFor(readAdminStore({ homeDir: home }), base).map((t) => t.name).sort()).toEqual([
+      'First',
+      'Second',
+    ]);
+  });
+
+  it('says the secret is remembered, so nobody goes looking for it again', async () => {
+    const result = await run(['create-team', base, 'AI-Platform', '--signup-secret-file', secretFile(SECRET)]);
+    expect(result.stdout).toContain('needs only a');
+    expect(result.stdout).toContain('create-team "<another team>"');
   });
 });

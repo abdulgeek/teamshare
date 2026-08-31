@@ -18,33 +18,36 @@ tells you to do.
    short group name like `Platform` or `Growth`. It is not secret; it shows up
    in `/teamshare:status` for anyone on the team.
 
-2. **Get the signup secret.** It gates team creation on this server. In order:
+2. **Try it with no secret at all first.** The secret is remembered per server
+   after the first successful create-team on this machine, and it may already
+   be in the environment. Either way this succeeds with nothing supplied:
 
-   - **Already in the environment?** Check without printing it:
+   ```bash
+   teamshare-team create-team "<team name>"
+   ```
 
-     ```bash
-     node -e 'process.stdout.write(process.env.TEAMSHARE_SIGNUP_SECRET ? "SET" : "UNSET")'
-     ```
+   If that works, skip to step 4. Most runs after the very first end here.
 
-     If `SET`, use it and skip the rest of this step.
+3. **Only if that failed for want of a secret**, get one and pass it. The
+   signup secret is what the server uses to gate team creation — one value,
+   shared across the organisation. In order of preference:
 
-   - **Given in `$ARGUMENTS`?** Anything after the team name is the secret.
-     Use it, and warn the user once — briefly, not as a lecture — that it is
-     now in this conversation's transcript. Say what that does and does not
-     mean: the signup secret only permits creating teams. It grants no access
-     to any team's shares, receipts or roster, and it is meant to be shared
-     across the org anyway. If they would rather it were not recorded, the
-     alternative is one terminal command, in step 4's fallback.
+   - **In `$ARGUMENTS`?** Anything after the team name is the secret. Use it,
+     and mention once — briefly, not as a lecture — that it is now in this
+     conversation's transcript, that it only permits creating teams (no
+     shares, receipts or roster), and that it will not be needed again here.
 
-   - **Neither?** Ask them to type it as an argument:
-     `/teamshare:create-team <team name> <signup secret>` — with the same
-     one-line note about the transcript. Whoever runs the server has the
-     value; if they deployed from this repo and the server generated it on
-     first boot, `deploy/aws/signup-secret.sh` reads it back.
+   - **Otherwise ask for it**, telling them where to look:
+     - Whoever runs the server has it; it is one value for the whole org.
+     - If they run the server themselves and deployed from this repo,
+       `deploy/aws/signup-secret.sh` prints it and nothing else.
+     - If they are standing up a brand-new server and choosing the value,
+       `teamshare signup-secret --generate` prints a correctly-formed one
+       (`tss_` and 48 hex characters). The server does not require that shape —
+       any string it was configured with works — but this saves inventing one.
 
-3. **Create the team.** The secret must never appear in the command line —
-   argv shows up in `ps` and in the tool-call display. Write it to a private
-   file first, pass the path, and delete the file immediately afterwards:
+   Then run it, with the secret in a private file rather than on the command
+   line, because argv is visible in `ps` and in the tool-call display:
 
    ```bash
    umask 077 && printf '%s' '<the secret>' > "$TMPDIR/ts-signup" && \

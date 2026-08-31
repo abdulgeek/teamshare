@@ -41,12 +41,14 @@ If your team already uses teamshare, ask whoever set it up to run
 
 ## Step 2A · You're setting up the team
 
-You need your organisation's **signup secret** — one value, shared across your
-company. Whoever runs the server has it.
+```
+/teamshare:create-team Platform
+```
 
-```
-/teamshare:create-team Platform <your-signup-secret>
-```
+The first time on a new machine it will ask for your organisation's **signup
+secret** — one value your company shares, which is what stops strangers making
+teams on your server. After that first success it's remembered, and every later
+team is just a name.
 
 ```
 teamshare create-team — success
@@ -71,6 +73,51 @@ with this laptop.
 It's an **admin** token. It can invite people, remove them, and list them. It
 **cannot** read shares. So it can't log you in — which is why the next step
 matters.
+
+<details>
+<summary><b>Where do I get the signup secret?</b></summary>
+
+Whoever runs the server has it. It's one value for the whole organisation, not
+something per-person.
+
+**If you run the server** and deployed it from this repo, one command reads it
+back and prints nothing else:
+
+```bash
+deploy/aws/signup-secret.sh
+```
+
+**If you're standing up a brand-new server** and choosing the value yourself:
+
+```bash
+node packages/server/dist/cli.js signup-secret --generate
+```
+
+```
+tss_dc84723dbc6253353a9a40832a9c518b63df9940d124cc9b
+```
+
+That's the shape the server generates for itself — `tss_` and 48 hex
+characters. The server doesn't *require* it: any string you configure it with
+works, so `--signup-secret hunter2` is valid if that's what you want. The
+generator just saves you inventing one.
+
+To replace an existing server's secret, `signup-secret --rotate` on that
+machine. It disturbs nothing — no team, admin token or personal token is
+affected, because this value only ever gated creating new teams.
+
+**Once you have it**, pass it as the second argument, just this once:
+
+```
+/teamshare:create-team Platform <the-secret>
+```
+
+It's remembered per server from then on. If you'd rather it never appeared in
+this conversation, set `TEAMSHARE_SIGNUP_SECRET` before starting Claude Code,
+or run `node packages/server/src/teamshare-team.mjs create-team "Platform"` in
+a terminal, which prompts with hidden input.
+
+</details>
 
 ### Now invite everyone, starting with yourself
 
@@ -331,7 +378,7 @@ Code commands are this same file with a nicer front door.
 | Command | Does |
 | --- | --- |
 | `/teamshare:share <message>` | Publish a note to the team |
-| `/teamshare:create-team <name> [secret]` | Create a team, save its admin token |
+| `/teamshare:create-team <name>` | Create a team, save its admin token (secret only the first time) |
 | `/teamshare:invite <email> [name]` | One person's token + the message to send them |
 | `/teamshare:roster` | Who's on the team, who never connected |
 | `/teamshare:revoke <email>` | Remove someone completely |
@@ -372,10 +419,12 @@ without a valid token is refused.
 
 **One thing worth knowing:** `/teamshare:invite` prints a real token into your
 Claude Code transcript, because you have to send it to someone. Same if you
-pass the signup secret to `/teamshare:create-team`. That's deliberate — the
-alternative was a tool you couldn't use without leaving it. Neither value ever
-touches a command line. If your threat model cares, run the terminal versions
-instead; and `/teamshare:revoke` invalidates a personal token in one step.
+pass the signup secret to `/teamshare:create-team` — though that's once per
+machine, since it's remembered afterwards. Both are deliberate: the alternative
+was a tool you couldn't use without leaving it. Neither value ever touches a
+command line, where `ps` would see it. If your threat model cares, run the
+terminal versions instead; `/teamshare:revoke` invalidates a personal token in
+one step, and the signup secret opens no team's data at all.
 
 ---
 

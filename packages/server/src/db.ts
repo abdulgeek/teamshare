@@ -460,6 +460,20 @@ export function getSignupSecret(db: Db): string | undefined {
 // operator never has to run an SSM-style ritual to recover it. Absent an
 // explicit value, this reuses whatever secret already exists, and mints one
 // only the very first time, exactly like getOrCreateToken.
+// The shape a generated signup secret takes: `tss_` and 48 hex characters, 52
+// in total, from 24 random bytes — the same strength as every token this
+// server mints.
+//
+// Note what this is NOT: the server does not *require* this shape.
+// verifySignupSecret is a constant-time equality check against whatever was
+// configured, so an operator who passes --signup-secret "hunter2" gets exactly
+// that. This function exists so nobody has to invent a value, and so the
+// answer to "what should it look like?" lives in the product rather than in
+// somebody's head.
+export function generateSignupSecret(): string {
+  return `tss_${randomBytes(24).toString('hex')}`;
+}
+
 export function getOrCreateSignupSecret(db: Db, explicit?: string): { secret: string; generated: boolean } {
   if (explicit) {
     setConfig(db, 'signup_secret', explicit);
@@ -467,9 +481,22 @@ export function getOrCreateSignupSecret(db: Db, explicit?: string): { secret: st
   }
   const existing = readConfig(db, 'signup_secret');
   if (existing) return { secret: existing, generated: false };
-  const secret = `tss_${randomBytes(24).toString('hex')}`;
+  const secret = generateSignupSecret();
   setConfig(db, 'signup_secret', secret);
   return { secret, generated: true };
+}
+
+// Replace the instance's signup secret with a new one, and return it. The old
+// value stops working immediately.
+//
+// This disturbs nothing that already exists: the signup secret gates only the
+// creation of NEW teams. Every existing team, admin token and personal token
+// is untouched, so unlike rotating a team token there is no cost to the people
+// already using the server.
+export function rotateSignupSecret(db: Db, explicit?: string): string {
+  const secret = explicit ?? generateSignupSecret();
+  setConfig(db, 'signup_secret', secret);
+  return secret;
 }
 
 export function upsertMember(scope: TeamScope, email: string, name: string, nowIso: string): void {

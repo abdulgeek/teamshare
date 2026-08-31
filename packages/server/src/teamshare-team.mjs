@@ -241,10 +241,61 @@ export function readAdminStore(opts = {}) {
     // Tolerate anything malformed rather than crashing an admin command over
     // a file the user may have hand-edited: an unreadable store simply means
     // "no saved token", and every caller already handles that.
-    if (!parsed || !Array.isArray(parsed.teams)) return { version: 1, teams: [] };
-    return { version: 1, teams: parsed.teams.filter((t) => t && t.url && t.token) };
+    if (!parsed || !Array.isArray(parsed.teams)) {
+      return { version: 1, teams: [], signupSecrets: {} };
+    }
+    return {
+      version: 1,
+      teams: parsed.teams.filter((t) => t && t.url && t.token),
+      // Carried through rather than rebuilt: saving an admin token must not
+      // silently drop the signup secret stored beside it, and vice versa.
+      signupSecrets:
+        parsed.signupSecrets && typeof parsed.signupSecrets === 'object' ? parsed.signupSecrets : {},
+    };
   } catch {
-    return { version: 1, teams: [] };
+    return { version: 1, teams: [], signupSecrets: {} };
+  }
+}
+
+/**
+ * The signup secret this machine last used successfully against a server.
+ *
+ * Creating a team is the only thing that needs it, and a lead does that once
+ * or twice ever — but the value is long, not memorable, and only recoverable
+ * from the server. Remembering it after the first success turns every later
+ * `create-team` into just a team name.
+ * @param {{ url: string, homeDir?: string, fs?: typeof import('node:fs') }} opts
+ */
+export function readSavedSignupSecret(opts) {
+  const store = readAdminStore({ homeDir: opts.homeDir, fs: opts.fs });
+  const value = store.signupSecrets[normalizeServerUrl(opts.url)];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * @param {{ url: string, secret: string, homeDir?: string, fs?: typeof import('node:fs') }} opts
+ * @returns {{ ok: true, path: string } | { ok: false, message: string }}
+ */
+export function saveSignupSecret(opts) {
+  const fsImpl = opts.fs ?? nodeFs;
+  const target = adminStorePath(opts.homeDir);
+  try {
+    const store = readAdminStore({ homeDir: opts.homeDir, fs: fsImpl });
+    store.signupSecrets[normalizeServerUrl(opts.url)] = opts.secret;
+    fsImpl.mkdirSync(dirnamePath(target), { recursive: true, mode: 0o700 });
+    fsImpl.writeFileSync(
+      target,
+      JSON.stringify({ version: 1, teams: store.teams, signupSecrets: store.signupSecrets }, null, 2) + '\n',
+      { mode: 0o600 },
+    );
+    try {
+      fsImpl.chmodSync(target, 0o600);
+    } catch {
+      // Best effort, same as saveAdminEntry.
+    }
+    return { ok: true, path: target };
+  } catch (err) {
+    return { ok: false, message: err && err.message ? err.message : String(err) };
   }
 }
 
@@ -285,9 +336,11 @@ export function saveAdminEntry(opts) {
     // Write with the restrictive mode from the start, then chmod anyway: the
     // mode argument is masked by the process umask, so a umask of 0 would
     // otherwise leave a world-readable credential on disk.
-    fsImpl.writeFileSync(target, JSON.stringify({ version: 1, teams: kept }, null, 2) + '\n', {
-      mode: 0o600,
-    });
+    fsImpl.writeFileSync(
+      target,
+      JSON.stringify({ version: 1, teams: kept, signupSecrets: store.signupSecrets }, null, 2) + '\n',
+      { mode: 0o600 },
+    );
     try {
       fsImpl.chmodSync(target, 0o600);
     } catch {
@@ -870,6 +923,14 @@ export function formatCreateOutput(opts) {
     );
   }
 
+  if (opts.signupSecretRemembered) {
+    lines.push(
+      '',
+      'The signup secret is remembered for this server, so creating another team here needs only a',
+      `name: ${cmdName} create-team "<another team>"`,
+    );
+  }
+
   lines.push(
     '',
     `Check this machine's setup any time with: ${cmdName} whoami`,
@@ -1370,11 +1431,16 @@ export async function runTeamCli(argv, opts = {}) {
     // with no terminal — notably the /teamshare:create-team slash command,
     // which would otherwise have to put the secret on a command line.
     let secretResult;
+    const savedSecret = readSavedSignupSecret({ url, homeDir, fs: fsImpl });
     if (parsed.signupSecretFile && !(env[SIGNUP_SECRET_ENV] ?? '').trim()) {
       const fromFile = readSignupSecretFile({ path: parsed.signupSecretFile, fs: fsImpl });
       secretResult = fromFile.ok
         ? { ok: true, value: fromFile.value, source: 'file' }
         : { ok: false, reason: fromFile.reason };
+    } else if (savedSecret && !(env[SIGNUP_SECRET_ENV] ?? '').trim()) {
+      // Typed once, on this machine, against this server. This is what makes
+      // every create-team after the first just a team name.
+      secretResult = { ok: true, value: savedSecret, source: 'saved' };
     } else {
       secretResult = await resolveSecret({
         envValue: env[SIGNUP_SECRET_ENV],
@@ -1390,7 +1456,8 @@ export async function runTeamCli(argv, opts = {}) {
         stdout: '',
         stderr:
           `could not resolve the signup secret (${secretResult.reason}). Set ${SIGNUP_SECRET_ENV}, pass ` +
-          '--signup-secret-file <path>, or run this on an interactive terminal so it can prompt you.\n',
+          '--signup-secret-file <path>, or run this on an interactive terminal so it can prompt you. ' +
+          'Once a create-team succeeds here, the secret is remembered and later ones need only a name.\n',
       };
     }
 
@@ -1403,6 +1470,13 @@ export async function runTeamCli(argv, opts = {}) {
     if (!created.ok) {
       return { exitCode: 1, stdout: '', stderr: `failed to create team: ${created.message}\n` };
     }
+
+    // Only ever remembered after the server accepted it, so a typo is never
+    // stored and silently reused.
+    const secretSaved =
+      secretResult.source === 'saved'
+        ? { ok: true }
+        : saveSignupSecret({ url, secret: secretResult.value, homeDir, fs: fsImpl });
 
     const saved = saveAdminEntry({
       url,
@@ -1423,6 +1497,8 @@ export async function runTeamCli(argv, opts = {}) {
         cmdName,
         savedPath: saved.ok ? saved.path : undefined,
         saveError: saved.ok ? undefined : saved.message,
+        signupSecretRemembered: secretSaved.ok && secretResult.source !== 'saved',
+        cmdName,
       }),
       stderr: '',
     };
