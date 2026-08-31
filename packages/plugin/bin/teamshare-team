@@ -154,6 +154,30 @@ export function readBundledMcpUrl(opts = {}) {
 }
 
 /**
+ * The signup secret, read out of a file rather than an argument.
+ *
+ * The secret is never accepted as a command-line value: argv is visible in
+ * `ps` and lands in shell history. A file passed by path keeps the value off
+ * the command line while still letting a caller supply it non-interactively —
+ * which is what the Claude Code slash command needs, since a slash command has
+ * no terminal to prompt on.
+ *
+ * The file is expected to hold the secret and nothing else; surrounding
+ * whitespace is stripped so a trailing newline is harmless.
+ * @param {{ path: string, fs?: typeof import('node:fs') }} opts
+ */
+export function readSignupSecretFile(opts) {
+  const fsImpl = opts.fs ?? nodeFs;
+  try {
+    const value = String(fsImpl.readFileSync(opts.path, 'utf8')).trim();
+    if (!value) return { ok: false, reason: `${opts.path} is empty` };
+    return { ok: true, value };
+  } catch (err) {
+    return { ok: false, reason: `could not read ${opts.path} (${err && err.message ? err.message : err})` };
+  }
+}
+
+/**
  * The server URL for this invocation, by the documented override order.
  * @param {{
  *   positional?: string,
@@ -1017,6 +1041,7 @@ export function parseTeamArgv(argv) {
     url: undefined,
     serverFlag: undefined,
     teamName: undefined,
+    signupSecretFile: undefined,
     name: undefined,
     email: undefined,
     help: false,
@@ -1041,6 +1066,15 @@ export function parseTeamArgv(argv) {
       parsed.serverFlag = value;
       continue;
     }
+    if (arg === '--signup-secret-file') {
+      const value = input.shift();
+      if (value === undefined) {
+        parsed.badFlag = '--signup-secret-file needs a path';
+        return parsed;
+      }
+      parsed.signupSecretFile = value;
+      continue;
+    }
     if (arg === '--team') {
       const value = input.shift();
       if (value === undefined) {
@@ -1050,9 +1084,10 @@ export function parseTeamArgv(argv) {
       parsed.teamName = value;
       continue;
     }
-    const eq = /^--(server|url|team)=(.*)$/.exec(arg);
+    const eq = /^--(server|url|team|signup-secret-file)=(.*)$/.exec(arg);
     if (eq) {
       if (eq[1] === 'team') parsed.teamName = eq[2];
+      else if (eq[1] === 'signup-secret-file') parsed.signupSecretFile = eq[2];
       else parsed.serverFlag = eq[2];
       continue;
     }
@@ -1132,8 +1167,9 @@ Options:
 
 Credentials are never accepted as arguments — they would land in shell history and \`ps\` output.
 
-  create-team  needs the instance signup secret. Set ${SIGNUP_SECRET_ENV}, or be prompted for it
-               (input hidden) on a real terminal.
+  create-team  needs the instance signup secret. Set ${SIGNUP_SECRET_ENV}, pass
+               --signup-secret-file <path> (a file holding just the secret, for callers with no
+               terminal), or be prompted for it (input hidden) on a real terminal.
   the rest     need this team's admin token — the value create-team printed. create-team saves it
                to ~/${ADMIN_STORE_DIRNAME}/${ADMIN_STORE_FILENAME} (owner-only) and these commands
                read it back, so normally there is nothing to supply. Override with
@@ -1329,20 +1365,32 @@ export async function runTeamCli(argv, opts = {}) {
       return { exitCode: 1, stdout: '', stderr: `usage: ${cmdName} create-team "<team name>"\n` };
     }
 
-    const secretResult = await resolveSecret({
-      envValue: env[SIGNUP_SECRET_ENV],
-      isTTY,
-      promptText: 'Signup secret (input hidden): ',
-      promptFn: opts.promptFn,
-      streams: opts.streams,
-    });
+    // Environment first (an explicit export always wins), then a file the
+    // caller wrote, then a hidden prompt. The file tier exists for callers
+    // with no terminal — notably the /teamshare:create-team slash command,
+    // which would otherwise have to put the secret on a command line.
+    let secretResult;
+    if (parsed.signupSecretFile && !(env[SIGNUP_SECRET_ENV] ?? '').trim()) {
+      const fromFile = readSignupSecretFile({ path: parsed.signupSecretFile, fs: fsImpl });
+      secretResult = fromFile.ok
+        ? { ok: true, value: fromFile.value, source: 'file' }
+        : { ok: false, reason: fromFile.reason };
+    } else {
+      secretResult = await resolveSecret({
+        envValue: env[SIGNUP_SECRET_ENV],
+        isTTY,
+        promptText: 'Signup secret (input hidden): ',
+        promptFn: opts.promptFn,
+        streams: opts.streams,
+      });
+    }
     if (!secretResult.ok) {
       return {
         exitCode: 1,
         stdout: '',
         stderr:
-          `could not resolve the signup secret (${secretResult.reason}). Set ${SIGNUP_SECRET_ENV}, or run ` +
-          'this on an interactive terminal so it can prompt you.\n',
+          `could not resolve the signup secret (${secretResult.reason}). Set ${SIGNUP_SECRET_ENV}, pass ` +
+          '--signup-secret-file <path>, or run this on an interactive terminal so it can prompt you.\n',
       };
     }
 

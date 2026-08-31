@@ -378,8 +378,12 @@ after the first token.
 | `/teamshare:connect` | Set teamshare up in your other assistants |
 | `/teamshare:setup` | Repair or dev-configure credentials (rarely needed) |
 
-**Anywhere** — `teamshare-team` and `teamshare-connect` are on your PATH once
-the plugin is installed, or a single `curl` away if it isn't.
+**Anywhere** — the same two commands, outside the slash-command wrapper.
+
+Claude Code puts the plugin's `bin/` on the PATH of the commands *it* runs, so
+inside Claude Code these are bare names. A terminal you open yourself has no
+such entry: run them from a checkout as
+`node packages/server/src/teamshare-team.mjs …`, or `curl` the single file.
 
 | Command | Does | Credential from |
 | --- | --- | --- |

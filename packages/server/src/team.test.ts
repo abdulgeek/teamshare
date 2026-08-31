@@ -41,6 +41,7 @@ import {
   resolveServerUrl,
   readAdminStore,
   readBundledMcpUrl,
+  readSignupSecretFile,
   adminEntriesFor,
   adminStorePath,
   saveAdminEntry,
@@ -1577,5 +1578,119 @@ describe('readBundledMcpUrl: self-hosting is one edited line', () => {
       .toMatchObject({ url: 'https://file.example', source: 'config-file' });
     expect(resolveServerUrl({ env: {}, clientConfig: null, bundledUrl: '' }))
       .toMatchObject({ url: DEFAULT_SERVER_URL, source: 'default' });
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// A slash command has no terminal to be prompted on, so create-team needed a
+// third way to receive the signup secret — without putting it in argv, which
+// is visible in `ps` and in the tool-call display.
+// ---------------------------------------------------------------------------
+
+describe('the signup secret can arrive by file', () => {
+  let home: string;
+  let db: Db;
+  let server: Server;
+  let base: string;
+  const SECRET = 'file-signup-secret';
+
+  beforeEach(async () => {
+    home = mkdtempSync(join(tmpdir(), 'teamshare-secret-'));
+    db = openDb(':memory:');
+    const app = createApp({ db, expiryDays: 14, signupSecret: SECRET });
+    server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const addr = server.address();
+    if (typeof addr === 'object' && addr) base = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const secretFile = (contents: string) => {
+    const p = join(home, 'secret');
+    writeFileSync(p, contents, { mode: 0o600 });
+    return p;
+  };
+
+  it('parses --signup-secret-file, in both spellings', () => {
+    expect(parseTeamArgv(['create-team', 'Platform', '--signup-secret-file', '/tmp/s'])).toMatchObject({
+      cmd: 'create-team',
+      name: 'Platform',
+      signupSecretFile: '/tmp/s',
+    });
+    expect(parseTeamArgv(['create-team', 'Platform', '--signup-secret-file=/tmp/s']).signupSecretFile).toBe('/tmp/s');
+    expect(parseTeamArgv(['create-team', 'Platform', '--signup-secret-file']).badFlag).toContain('--signup-secret-file');
+  });
+
+  it('reads the secret, tolerating the trailing newline a shell would add', () => {
+    expect(readSignupSecretFile({ path: secretFile('abc123\n') })).toMatchObject({ ok: true, value: 'abc123' });
+    expect(readSignupSecretFile({ path: secretFile('  abc123  ') })).toMatchObject({ ok: true, value: 'abc123' });
+  });
+
+  it('reports an empty or missing file rather than sending an empty secret', () => {
+    expect(readSignupSecretFile({ path: secretFile('   ') })).toMatchObject({ ok: false });
+    expect(readSignupSecretFile({ path: join(home, 'nope') })).toMatchObject({ ok: false });
+  });
+
+  it('creates a team from the file with no environment and no terminal', async () => {
+    const promptFn = () => {
+      throw new Error('must not prompt: the secret came from a file');
+    };
+    const result = await runTeamCli(
+      ['create-team', base, 'Platform', '--signup-secret-file', secretFile(SECRET)],
+      { homeDir: home, env: {}, isTTY: false, identity, promptFn: promptFn as never },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('create-team — success');
+    expect(findTeamByName(db, 'Platform')).toBeTruthy();
+    // The secret must not be echoed anywhere, on either stream.
+    expect(result.stdout).not.toContain(SECRET);
+    expect(result.stderr).not.toContain(SECRET);
+  });
+
+  it('lets the environment win over the file, so an explicit export still overrides', async () => {
+    const result = await runTeamCli(
+      ['create-team', base, 'Env Wins', '--signup-secret-file', secretFile('the-wrong-secret')],
+      { homeDir: home, env: { [SIGNUP_SECRET_ENV]: SECRET }, isTTY: false, identity },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(findTeamByName(db, 'Env Wins')).toBeTruthy();
+  });
+
+  it('fails with an actionable message, naming all three ways in, when the file is unreadable', async () => {
+    const result = await runTeamCli(
+      ['create-team', base, 'No Secret', '--signup-secret-file', join(home, 'missing')],
+      { homeDir: home, env: {}, isTTY: false, identity },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(SIGNUP_SECRET_ENV);
+    expect(result.stderr).toContain('--signup-secret-file');
+    expect(result.stderr).toContain('interactive terminal');
+    expect(findTeamByName(db, 'No Secret')).toBeUndefined();
+  });
+
+  it('still rejects a wrong secret supplied this way', async () => {
+    const result = await runTeamCli(
+      ['create-team', base, 'Wrong', '--signup-secret-file', secretFile('not-the-secret')],
+      { homeDir: home, env: {}, isTTY: false, identity },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toLowerCase()).toContain('failed to create team');
+    expect(findTeamByName(db, 'Wrong')).toBeUndefined();
+  });
+
+  it('never accepts the secret as a bare positional, which would put it in ps and shell history', () => {
+    // `create-team <name> <secret>` must read the second positional as nothing
+    // at all — not as the secret. The file is the only non-interactive way in.
+    const parsed = parseTeamArgv(['create-team', 'Platform', 'my-secret-value']);
+    expect(parsed.name).toBe('Platform');
+    expect(parsed.signupSecretFile).toBeUndefined();
+    expect(JSON.stringify(parsed)).not.toContain('my-secret-value');
   });
 });
