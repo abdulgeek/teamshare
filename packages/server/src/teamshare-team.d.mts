@@ -119,12 +119,39 @@ export function canAttemptAwsRecover(opts?: {
   fs?: typeof import('node:fs');
 }): boolean;
 
-export function terraformStateCandidates(opts?: { cwd?: string; scriptPath?: string }): string[];
+export const INSTANCE_PIN_FILENAME: string;
+
+export function instancePinPath(homeDir?: string): string;
+
+export function readOperatorInstancePin(opts?: {
+  homeDir?: string;
+  fs?: typeof import('node:fs');
+}):
+  | { ok: true; instanceId: string; region?: string; source: 'pin' }
+  | { ok: false; reason: string };
+
+export function saveOperatorInstancePin(opts: {
+  instanceId: string;
+  region?: string;
+  homeDir?: string;
+  fs?: typeof import('node:fs');
+}): { ok: true; path: string } | { ok: false; message: string };
+
+export function isHostedDefaultServer(url: string): boolean;
+
+export function terraformStateCandidates(opts?: {
+  cwd?: string;
+  scriptPath?: string;
+  env?: Record<string, string | undefined>;
+  extraRoots?: string[];
+}): string[];
 
 export function readTerraformInstanceTarget(opts?: {
   fs?: typeof import('node:fs');
   cwd?: string;
   scriptPath?: string;
+  env?: Record<string, string | undefined>;
+  extraRoots?: string[];
 }):
   | { ok: true; instanceId: string; region?: string; source: 'terraform-state'; path: string }
   | { ok: false; reason: string };
@@ -136,8 +163,9 @@ export function resolveInstanceTarget(opts?: {
   fs?: typeof import('node:fs');
   cwd?: string;
   scriptPath?: string;
+  homeDir?: string;
 }):
-  | { ok: true; instanceId: string; region?: string; source: 'argument' | 'env' | 'terraform-state'; path?: string }
+  | { ok: true; instanceId: string; region?: string; source: 'argument' | 'env' | 'terraform-state' | 'pin'; path?: string }
   | { ok: false; reason: string };
 
 export function recoverSignupSecretFromAws(opts?: {

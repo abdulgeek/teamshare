@@ -59,29 +59,27 @@ clear error.
 ## The team lead, in full
 
 Once the operator has a server running, **anyone with Claude Code creates a
-team as a plugin command** — secret first, then the org name:
+team as a plugin command** — the org name only:
 
 ```
-/teamshare:generate-secret
 /teamshare:create-team <org-name>
 ```
 
-`generate-secret` mints a correctly-formed signup secret. It recovers the
-live instance's value only when this machine already knows the box —
-`TEAMSHARE_INSTANCE_ID` or local terraform state, never an id shipped in
-the plugin. `--new` forces a mint. create-team needs that secret; it
-remembers it after the first success.
+create-team recovers the live signup secret when this machine already knows
+the box — `TEAMSHARE_INSTANCE_ID`, local terraform state, or
+`~/.teamshare/instance.json` after a previous recover, never an id shipped
+in the plugin. `/teamshare:generate-secret` is optional (a password-manager
+copy of the live value). `--new` mints for a server that does not exist yet;
+do not use that mint against the hosted server.
 
 Without the plugin, the same file still works as a download:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
-node teamshare-team.mjs generate-secret
 node teamshare-team.mjs create-team "<org-name>"
 ```
 
 Already have a checkout? Same file, shorter path:
-`node packages/server/src/teamshare-team.mjs generate-secret` then
 `node packages/server/src/teamshare-team.mjs create-team "<org-name>"`.
 
 The signup secret is never a command-line argument — that would land it in

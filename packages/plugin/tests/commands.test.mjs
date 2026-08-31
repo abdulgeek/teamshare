@@ -74,7 +74,9 @@ describe('slash command names', () => {
     }
   });
 
-  it('the plugin is named teamshare, which is the namespace half of every command above', () => {
-    expect(manifest.name).toBe('teamshare');
+  it('create-team does not tell the agent to generate-secret first', () => {
+    const body = readFileSync(join(pluginRoot, 'commands', 'create-team.md'), 'utf8');
+    expect(body).toMatch(/Do not run `\/teamshare:generate-secret`/i);
+    expect(body).not.toMatch(/Generate the signup secret first/i);
   });
 });

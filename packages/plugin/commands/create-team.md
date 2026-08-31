@@ -16,27 +16,24 @@ tells you to do.
 
 1. **Get the org name** from `$ARGUMENTS`. If there is none, ask for one — a
    short name like `acme` or `Platform`. It is not secret; it shows up in
-   `/teamshare:status` for anyone on the team.
+   `/teamshare:status` for anyone on the team. Never leave the literal
+   `<org-name>` placeholder in the command.
 
-2. **Generate the signup secret first.** Create-team needs it. Skip this only
-   when a previous create-team on this machine already remembered one:
-
-   ```bash
-   teamshare-team generate-secret
-   ```
-
-   Relay the output as-is, including the secret, once.
-
-3. **Create the team:**
+2. **Create the team. Name only.** Do not run `/teamshare:generate-secret`
+   first. Do not pass a `tss_…` value from this conversation or from a
+   previous generate-secret. create-team recovers the live signup secret on
+   this machine (terraform state, a local instance pin, or
+   `TEAMSHARE_INSTANCE_ID`) and the hosted server will reject a freshly
+   minted secret with 401.
 
    ```bash
    teamshare-team create-team "<org-name>"
    ```
 
-   If create-team fails for want of a secret that generate-secret did not
-   recover (this machine cannot name the instance), they need the org-wide
-   value from whoever deployed the server. Write it to a private file — never
-   a command line, and never an instance id from this conversation:
+   If create-team fails for want of a secret this machine cannot recover,
+   they need the org-wide value from whoever deployed the server. Write it
+   to a private file — never a command line, and never an instance id from
+   this conversation:
 
    ```bash
    umask 077 && printf '%s' '<the secret>' > "$TMPDIR/ts-signup" && \
@@ -46,7 +43,10 @@ tells you to do.
 
    Delete the file even when the command fails.
 
-4. **Relay the output as-is.** It contains the admin token, printed once, plus
+   **Never** put a generate-secret mint that said "not yet on any server"
+   into that file. That value is not the hosted server's secret.
+
+3. **Relay the output as-is.** It contains the admin token, printed once, plus
    where it was saved and what to do next. Do not summarise it away or hide the
    token: the user needs a copy in their password manager, because the saved
    file dies with this machine.
@@ -67,11 +67,12 @@ Read the command's own error text and relay it; it is written to be actionable.
 - `command not found` — this session started before the plugin's `bin/` was on
   PATH. Restart Claude Code.
 - `401` — the signup secret this machine offered is not this server's. Do not
-  guess again. On an operator machine, `/teamshare:generate-secret` recovers
-  the live value from local terraform state or `TEAMSHARE_INSTANCE_ID`. Do
-  not invent an instance id. If recover is not available, they need the
-  org-wide secret from whoever runs the server — it is not the team name, an
-  admin token (`ts_…`) or a personal token (`tsm_…`).
+  guess again, and do **not** retry with a `tss_…` that generate-secret
+  printed as "not yet on any server". On an operator machine, create-team
+  recovers the live value from local terraform state, `~/.teamshare/instance.json`,
+  or `TEAMSHARE_INSTANCE_ID`. Do not invent an instance id. If recover is not
+  available, they need the org-wide secret from whoever runs the server — it
+  is not the team name, an admin token (`ts_…`) or a personal token (`tsm_…`).
 - `403` — the server has hit its team cap.
 - `429` — rate-limited; wait and retry.
 - `400` — the name was rejected (empty, or an unsubstituted placeholder). Ask
