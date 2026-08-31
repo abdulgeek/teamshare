@@ -55,7 +55,7 @@ Use it when the user says something like "set this up in Cursor too".
 
 Be accurate about this: they get the teamshare **tools** — publishing a share,
 reading unread ones, receipts, retracting. They do **not** get the automatic
-session-start digest or `/share`; those are Claude Code plugin features. In
+session-start digest or `/teamshare:share`; those are Claude Code plugin features. In
 another assistant the user asks for their unread shares in plain language
 instead.
 

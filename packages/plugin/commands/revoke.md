@@ -11,7 +11,7 @@ one-command remedy when somebody leaves, or when a token has leaked.
 ## Steps
 
 1. **Get the email** from `$ARGUMENTS`. If there is none, ask — and consider
-   running `/teamshare-roster` first so the user picks from real addresses
+   running `/teamshare:roster` first so the user picks from real addresses
    rather than a remembered one.
 
 2. **Confirm before running.** This is not reversible: the person is locked
@@ -29,7 +29,7 @@ one-command remedy when somebody leaves, or when a token has leaked.
 
 4. **Relay the count.** `0` revoked means that email had no live tokens —
    usually a typo, or somebody already revoked. Check the spelling against
-   `/teamshare-roster` rather than assuming it worked.
+   `/teamshare:roster` rather than assuming it worked.
 
    Their past shares stay: revoking removes access, it does not erase what
    they published. Only the author can retract a share.
@@ -37,6 +37,6 @@ one-command remedy when somebody leaves, or when a token has leaked.
 ## Failure handling
 
 - `no admin token` — this machine never created a team; see
-  `/teamshare-create-team`.
+  `/teamshare:create-team`.
 - `401` — the saved admin token was rotated or revoked elsewhere.
 - `command not found` — restart Claude Code so the plugin's `bin/` is on PATH.

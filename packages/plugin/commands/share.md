@@ -15,5 +15,5 @@ next session start.
 4. Report the share id and the number of teammates who will be notified.
 
 If the teamshare tools are not available, tell the user the connection is down
-and point them at `/teamshare-status`, which distinguishes "not connected" from
+and point them at `/teamshare:status`, which distinguishes "not connected" from
 "nothing new" — the two look identical otherwise. Do not retry.

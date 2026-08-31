@@ -9,14 +9,14 @@ Creates a team on the teamshare server and saves its admin token here, so
 every later admin command works without anyone pasting a credential again.
 
 Run this once per team. To use teamshare yourself afterwards you still need a
-personal token — `/teamshare-invite` your own email, which the final step
+personal token — `/teamshare:invite` your own email, which the final step
 below tells you to do.
 
 ## Steps
 
 1. **Get the team name** from `$ARGUMENTS`. If there is none, ask for one — a
    short group name like `Platform` or `Growth`. It is not secret; it appears
-   in `/teamshare-status` for anyone on the team.
+   in `/teamshare:status` for anyone on the team.
 
 2. **Check the signup secret is available**, without ever asking for it in
    chat. It gates team creation on this server and must come from the
@@ -51,12 +51,12 @@ below tells you to do.
 
    Then say, in your own words:
    - The admin token is saved at `~/.teamshare/admin.json`, so
-     `/teamshare-invite`, `/teamshare-roster` and `/teamshare-revoke` on this
+     `/teamshare:invite`, `/teamshare:roster` and `/teamshare:revoke` on this
      machine need nothing pasted.
    - It is worth putting a copy in a password manager now.
    - It is an **admin** credential: it invites, revokes, reads the roster and
      rotates itself. It cannot read shares and cannot be used to join.
-   - **Next step:** `/teamshare-invite <their own email>` — otherwise they own
+   - **Next step:** `/teamshare:invite <their own email>` — otherwise they own
      a team they cannot use.
 
 ## Failure handling
@@ -72,7 +72,7 @@ The cases worth naming:
 - `400` — the name was rejected (empty, or an unsubstituted placeholder).
   Ask for a real name and retry.
 - Anything about not reaching the server — report the URL it tried. Check with
-  `/teamshare-status`.
+  `/teamshare:status`.
 
 ## Rules
 

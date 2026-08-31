@@ -806,7 +806,7 @@ describe('platform-specific paths: VS Code and Cline are detected on Linux and W
 // subcommand onto *this* parser's positional `<url> <token>` form instead —
 // that would silently break every documented `node teamshare-connect.mjs
 // <server-url> <team-token>` invocation (README.md, the plugin's
-// `/teamshare-setup`, and this file's own USAGE text), since a real team
+// `/teamshare:setup`, and this file's own USAGE text), since a real team
 // name or URL could easily collide with a word this parser started treating
 // specially.
 describe('parseConnectArgv: pinned <url> <token> positional contract (never a leading subcommand)', () => {

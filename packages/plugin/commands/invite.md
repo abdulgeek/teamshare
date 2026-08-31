@@ -18,7 +18,7 @@ guess.
    both to one name.
 
 2. **Mint it.** The admin token comes from `~/.teamshare/admin.json`, saved by
-   `/teamshare-create-team`, so nothing is pasted:
+   `/teamshare:create-team`, so nothing is pasted:
 
    ```bash
    teamshare-team invite <email> "<name>"
@@ -36,7 +36,7 @@ guess.
      a shared channel. Whoever holds it can publish shares and record receipts
      as that person.
    - This token is in this conversation's transcript now. If that matters,
-     `/teamshare-revoke <email>` invalidates it and a fresh invite replaces it.
+     `/teamshare:revoke <email>` invalidates it and a fresh invite replaces it.
    - The token is shown once and is not recoverable; re-inviting mints a new
      one rather than recovering the old.
 

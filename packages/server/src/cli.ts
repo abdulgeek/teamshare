@@ -581,9 +581,9 @@ function resolveServer(
   if (legacyExists && !legacyConfig) {
     // The file is there but broken — unlike "the file doesn't exist at all"
     // (normal under the plugin-managed install), this is an actual problem:
-    // something wrote it and got it wrong, or it wants a `/teamshare-setup`
+    // something wrote it and got it wrong, or it wants a `/teamshare:setup`
     // re-run.
-    lines.push(`[PROBLEM] ${legacyPath} exists but is missing url or token — run /teamshare-setup`);
+    lines.push(`[PROBLEM] ${legacyPath} exists but is missing url or token — run /teamshare:setup`);
     return { server: null, legacyConfig: null, lines, problem: true };
   }
   if (legacyConfig) {

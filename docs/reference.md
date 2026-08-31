@@ -183,7 +183,7 @@ new value.
 
 **Already have teamshare working on this machine and need a second,
 independent team** — e.g. spinning one up for another group? Claude Code
-users can run `/teamshare-create-team` instead; it never prints the token
+users can run `/teamshare:create-team` instead; it never prints the token
 into the session transcript, writing it to a local file you open yourself
 instead. This is **not** the first-time path — installing the plugin itself
 prompts for a personal token from `invite`, not the admin token this command
@@ -200,7 +200,7 @@ connects exactly the same as one that has it.
 For local development without a real install, point Claude Code straight at
 the plugin directory instead — `claude --plugin-dir packages/plugin` —
 which skips the install prompts entirely. That's the one case
-`/teamshare-setup <server-url> <team-token>` still matters: it's how you
+`/teamshare:setup <server-url> <team-token>` still matters: it's how you
 supply the server URL and token when there was no install step to prompt
 you for them, or to repair a machine whose stored values have gone wrong.
 It is **not** part of a normal install.
@@ -293,7 +293,7 @@ channel) along with the join instructions the command prints. Sam installs
 the Claude Code plugin, pastes in the server URL and the token Priya sent
 him, and restarts Claude Code — no git identity to set up first, since the
 token he pasted already is his identity. Before any of that,
-Priya had already run `/share` to publish `Auth middleware refactor lands
+Priya had already run `/teamshare:share` to publish `Auth middleware refactor lands
 Friday. Don't touch src/auth this week.` as `blocking`.
 
 Sam's first session opens with: *"1 unread team share published by
@@ -401,7 +401,7 @@ one it used:
    neither; a half-set pair is a `[PROBLEM]`, not a silent fall-through.
    Prefer this form right after `create-team`/`rotate-team` mints a token,
    rather than pasting a live credential as a positional argument.
-3. `~/.teamshare.json`, if present (the `--plugin-dir`/`/teamshare-setup`
+3. `~/.teamshare.json`, if present (the `--plugin-dir`/`/teamshare:setup`
    development path).
 4. Any other assistant's config that `teamshare connect` knows how to
    write. If more than one disagrees on the URL/token, doctor reports every

@@ -1116,14 +1116,14 @@ describe('doctor', () => {
     writeFileSync(join(home, '.teamshare.json'), JSON.stringify({ url: 'http://x', name: 'A', email: 'a@b.com' }));
     const { exitCode, output } = await runDoctor();
     expect(exitCode).toBe(1);
-    expect(output).toContain('/teamshare-setup');
+    expect(output).toContain('/teamshare:setup');
   });
 
   it('accepts ~/.teamshare.json with only url/token — a missing name/email is optional identity context, not a broken config', async () => {
     writeFileSync(join(home, '.teamshare.json'), JSON.stringify({ url: `http://127.0.0.1:${port}`, token: 'tok_secret_value' }));
     const { exitCode, output } = await runDoctor();
     expect(exitCode).toBe(0);
-    expect(output).not.toContain('/teamshare-setup');
+    expect(output).not.toContain('/teamshare:setup');
     expect(output).not.toContain('[PROBLEM]');
     expect(output).toContain('[INFO] no git identity configured');
   });

@@ -42,12 +42,12 @@ and you're on the board. No server address, no config file, no git setup.
 
 > **No token yet?** You don't need one to read this page — skip to
 > [Starting a team](#starting-a-team-lead) and make one. If your team already
-> has a lead, ask them for `/teamshare-invite <your-email>`.
+> has a lead, ask them for `/teamshare:invite <your-email>`.
 
 ### Starting a team (lead)
 
 ```
-/teamshare-create-team Platform
+/teamshare:create-team Platform
 ```
 
 ```
@@ -83,16 +83,32 @@ You cannot log in with it, which is why the next step matters.
 
 Creating a team needs your organisation's signup secret. It has to come from
 the environment rather than this chat, so that a live credential never lands
-in a stored transcript:
+in a stored transcript — start Claude Code with it set:
 
 ```bash
 TEAMSHARE_SIGNUP_SECRET=<your-org-secret> claude
 ```
 
+Or skip Claude Code entirely and run the same command in a terminal, which
+prompts for the secret without it appearing anywhere:
+
+```bash
+teamshare-team create-team "Platform"
+```
+
+**Don't know the secret?** Whoever runs the server has it. If that's you and
+the server was deployed from this repo, `deploy/aws/signup-secret.sh` reads it
+back over SSM and prints nothing else, so it composes into one command that
+never shows the value:
+
+```bash
+TEAMSHARE_SIGNUP_SECRET=$(deploy/aws/signup-secret.sh) teamshare-team create-team "Platform"
+```
+
 ### Inviting people
 
 ```
-/teamshare-invite sam@acme.com Sam
+/teamshare:invite sam@acme.com Sam
 ```
 
 ```
@@ -127,7 +143,7 @@ You talk to your assistant in plain language. You never type a tool name.
 **Publish something:**
 
 ```
-/share Auth middleware refactor lands Friday. Session validation moves into
+/teamshare:share Auth middleware refactor lands Friday. Session validation moves into
 middleware/auth.ts. Don't merge anything touching src/auth this week.
 ```
 
@@ -189,7 +205,7 @@ after 14 days.
 ### Running the team
 
 ```
-/teamshare-roster
+/teamshare:roster
 ```
 
 ```
@@ -207,7 +223,7 @@ Several active tokens for one person is normal: a laptop, a desktop, CI.
 **Someone left:**
 
 ```
-/teamshare-revoke sam@acme.com
+/teamshare:revoke sam@acme.com
 ```
 
 ```
@@ -225,7 +241,7 @@ interrupts your work. The cost is that "nothing new today" and "not connected
 at all" look identical. This tells them apart:
 
 ```
-/teamshare-status
+/teamshare:status
 ```
 
 ```
@@ -281,7 +297,7 @@ teamshare connect — result
 Restart the affected assistant(s) to pick up the change.
 ```
 
-Already in Claude Code? Skip the download — `/teamshare-connect` does the same
+Already in Claude Code? Skip the download — `/teamshare:connect` does the same
 thing, and the connector is already on your PATH as `teamshare-connect`.
 
 **Look before it writes:**
@@ -323,7 +339,7 @@ and your assistant calls the tools:
 | "retract that share" | Removes it everywhere |
 
 **One honest difference.** Claude Code gets the automatic session-start digest
-and `/share`; those are plugin features. Everywhere else you ask for your
+and `/teamshare:share`; those are plugin features. Everywhere else you ask for your
 unread shares rather than being told. Publishing, reading, receipts and
 retraction are identical.
 
@@ -353,14 +369,14 @@ after the first token.
 
 | Command | Does |
 | --- | --- |
-| `/share <message>` | Publish a note to the team |
-| `/teamshare-create-team <name>` | Create a team; saves its admin token here |
-| `/teamshare-invite <email> [name]` | Mint one person's token + the message to send them |
-| `/teamshare-roster` | Who's on the team, who never connected |
-| `/teamshare-revoke <email>` | Kill every token that person holds |
-| `/teamshare-status` | Is this machine actually connected? |
-| `/teamshare-connect` | Set teamshare up in your other assistants |
-| `/teamshare-setup` | Repair or dev-configure credentials (rarely needed) |
+| `/teamshare:share <message>` | Publish a note to the team |
+| `/teamshare:create-team <name>` | Create a team; saves its admin token here |
+| `/teamshare:invite <email> [name]` | Mint one person's token + the message to send them |
+| `/teamshare:roster` | Who's on the team, who never connected |
+| `/teamshare:revoke <email>` | Kill every token that person holds |
+| `/teamshare:status` | Is this machine actually connected? |
+| `/teamshare:connect` | Set teamshare up in your other assistants |
+| `/teamshare:setup` | Repair or dev-configure credentials (rarely needed) |
 
 **Anywhere** — `teamshare-team` and `teamshare-connect` are on your PATH once
 the plugin is installed, or a single `curl` away if it isn't.
@@ -403,13 +419,13 @@ disturbing anyone else.
 Two credentials, deliberately kept apart: an **admin** token invites, revokes,
 reads the roster and rotates itself, and can read nothing; a **personal** token
 reads and publishes, and can invite nobody. Pasting one where the other belongs
-gets a 401 — `/teamshare-status` names that mistake specifically, because it
+gets a 401 — `/teamshare:status` names that mistake specifically, because it
 looks exactly like a bad token otherwise.
 
-**Worth knowing:** `/teamshare-invite` prints a live token into your Claude
+**Worth knowing:** `/teamshare:invite` prints a live token into your Claude
 Code transcript, because you have to send it to someone. If that matters for
 your threat model, run `teamshare-team invite` in a terminal instead — same
-command, same output, no transcript. Either way `/teamshare-revoke` undoes it
+command, same output, no transcript. Either way `/teamshare:revoke` undoes it
 in one step.
 
 ---

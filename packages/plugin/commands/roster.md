@@ -26,13 +26,13 @@ and which are still sitting on an invite they never used.
    - Several active tokens for one person is normal — a laptop, a desktop, CI.
      It is not a duplicate to clean up.
 
-3. If somebody has left, `/teamshare-revoke <email>` kills every token they
+3. If somebody has left, `/teamshare:revoke <email>` kills every token they
    hold in one command.
 
 ## Failure handling
 
 - `no admin token` — this machine never created a team; see
-  `/teamshare-create-team`, or set `TEAMSHARE_ADMIN_TOKEN` for a team owned
+  `/teamshare:create-team`, or set `TEAMSHARE_ADMIN_TOKEN` for a team owned
   elsewhere.
 - `401` — the saved admin token was rotated or revoked elsewhere.
 - `command not found` — restart Claude Code so the plugin's `bin/` is on PATH.

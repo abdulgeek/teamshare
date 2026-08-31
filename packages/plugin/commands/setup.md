@@ -17,7 +17,7 @@ Two cases still need this command:
   `.mcp.json` cannot do — see the caveat at the bottom before using it for
   that.
 
-Reach for `/teamshare-status` first. It usually names the actual problem, and
+Reach for `/teamshare:status` first. It usually names the actual problem, and
 most of what people used to run this command for is now a
 `/plugin configure teamshare@teamshare` away.
 

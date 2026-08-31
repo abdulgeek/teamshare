@@ -132,6 +132,15 @@ whatever channel you'd otherwise have used to hand out tokens individually —
 Slack, a wiki page, however you'd announce any other new internal tool. That
 single secret replaces distributing a token per team.
 
+**Recovering the secret**, if it was generated on first boot rather than set
+via the `signup_secret` variable: `deploy/aws/signup-secret.sh` runs the
+break-glass SSM read for you and prints the bare value and nothing else, so it
+composes without the secret ever reaching a screen or shell history:
+
+```bash
+TEAMSHARE_SIGNUP_SECRET=$(deploy/aws/signup-secret.sh) teamshare-team create-team "My Team"
+```
+
 **A team lead creates their own team** with the standalone script — needing
 nothing beyond `curl` and `node`:
 

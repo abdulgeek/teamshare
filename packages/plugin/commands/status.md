@@ -26,7 +26,7 @@ identical from the inside. This is the command that tells them apart.
    - **rejected (401)** — the token was revoked, or it is an admin token
      rather than a personal one. Those are different credentials: an admin
      token invites and revokes, and can read nothing. Ask the lead for
-     `/teamshare-invite <your-email>`.
+     `/teamshare:invite <your-email>`.
    - **could not reach** — the server is down or the network is blocking it.
      Report the address it tried.
 
