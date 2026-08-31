@@ -10,6 +10,7 @@ export const ADMIN_TOKEN_ENV: string;
 export const SERVER_URL_ENV: string;
 /** teamshare's own deployment — the address baked in so nobody has to paste one. */
 export const DEFAULT_SERVER_URL: string;
+export const INSTANCE_ID_ENV: string;
 export const ADMIN_STORE_DIRNAME: string;
 export const ADMIN_STORE_FILENAME: string;
 export const TEAM_COMMANDS: string[];
@@ -54,6 +55,7 @@ export interface AdminStoreEntry {
 export interface AdminStore {
   version: number;
   teams: AdminStoreEntry[];
+  signupSecrets: Record<string, string>;
 }
 
 export function adminStorePath(homeDir?: string): string;
@@ -108,6 +110,75 @@ export interface ResolveIdentityOptions {
 
 export function resolveGitIdentity(opts?: ResolveIdentityOptions): GitIdentity | null;
 export function normalizeServerUrl(url: string): string;
+
+export function generateSignupSecret(bytesFn?: (n: number) => { toString: (enc: string) => string }): string;
+
+export function canAttemptAwsRecover(opts?: {
+  env?: Record<string, string | undefined>;
+  homeDir?: string;
+  fs?: typeof import('node:fs');
+}): boolean;
+
+export function terraformStateCandidates(opts?: { cwd?: string; scriptPath?: string }): string[];
+
+export function readTerraformInstanceTarget(opts?: {
+  fs?: typeof import('node:fs');
+  cwd?: string;
+  scriptPath?: string;
+}):
+  | { ok: true; instanceId: string; region?: string; source: 'terraform-state'; path: string }
+  | { ok: false; reason: string };
+
+export function resolveInstanceTarget(opts?: {
+  instanceId?: string;
+  region?: string;
+  env?: Record<string, string | undefined>;
+  fs?: typeof import('node:fs');
+  cwd?: string;
+  scriptPath?: string;
+}):
+  | { ok: true; instanceId: string; region?: string; source: 'argument' | 'env' | 'terraform-state'; path?: string }
+  | { ok: false; reason: string };
+
+export function recoverSignupSecretFromAws(opts?: {
+  execFileSync?: typeof import('node:child_process').execFileSync;
+  instanceId?: string;
+  region?: string;
+  env?: Record<string, string | undefined>;
+  homeDir?: string;
+  fs?: typeof import('node:fs');
+  cwd?: string;
+  scriptPath?: string;
+  sleep?: (ms: number) => Promise<void>;
+  attempts?: number;
+  delayMs?: number;
+}): Promise<{ ok: true; value: string; source: 'aws' } | { ok: false; reason: string }>;
+
+export function formatGenerateSecretOutput(opts: {
+  value: string;
+  source: 'aws' | 'new';
+  url?: string;
+  cmdName?: string;
+  saved?: boolean;
+}): string;
+
+export function readSignupSecretFile(opts: {
+  path: string;
+  fs?: typeof import('node:fs');
+}): { ok: true; value: string } | { ok: false; reason: string };
+
+export function readSavedSignupSecret(opts: {
+  url: string;
+  homeDir?: string;
+  fs?: typeof import('node:fs');
+}): string | undefined;
+
+export function saveSignupSecret(opts: {
+  url: string;
+  secret: string;
+  homeDir?: string;
+  fs?: typeof import('node:fs');
+}): { ok: true; path: string } | { ok: false; message: string };
 
 export type SecretSource = 'env' | 'prompt' | 'none';
 
@@ -297,11 +368,13 @@ export interface FormatWhoamiOutputOptions {
 export function formatWhoamiOutput(opts: FormatWhoamiOutputOptions): string;
 
 export interface ParsedTeamArgv {
-  cmd?: 'create-team' | 'rotate-team' | 'invite' | 'revoke' | 'roster' | 'whoami' | 'unknown';
+  cmd?: 'create-team' | 'generate-secret' | 'rotate-team' | 'invite' | 'revoke' | 'roster' | 'whoami' | 'unknown';
   /** Only set when a leading positional actually looked like a URL. */
   url?: string;
   serverFlag?: string;
   teamName?: string;
+  signupSecretFile?: string;
+  generateNew?: boolean;
   name?: string;
   email?: string;
   help: boolean;
@@ -326,8 +399,16 @@ export interface RunTeamCliOptions {
   fs?: typeof import('node:fs');
   /** Stand-in for process.argv[1], which decides how printed commands are spelled. */
   argv1?: string;
+  /** Override process.cwd() for terraform-state discovery. */
+  cwd?: string;
   /** Fixed timestamp for saved store entries, so output is deterministic under test. */
   now?: string;
+  /** Injected so tests never talk to AWS. Omitted → real SSM recover. */
+  recoverSignupSecret?: (opts?: object) => Promise<
+    { ok: true; value: string; source?: string } | { ok: false; reason: string }
+  >;
+  /** Injected so tests can pin the minted secret. Omitted → crypto.randomBytes. */
+  generateSecret?: () => string;
 }
 
 export interface RunTeamCliResult {

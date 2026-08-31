@@ -3,10 +3,10 @@
 Your whole team uses AI coding assistants. None of them know what the others
 have been told.
 
-teamshare fixes that. One person says *"share with the team that the auth
-refactor lands Friday"*. Everyone else's assistant tells them at the start of
+teamshare fixes that. One person says _"share with the team that the auth
+refactor lands Friday"_. Everyone else's assistant tells them at the start of
 their next session, and asks if they want the details. Saying yes **or** no
-counts as read — so you can always ask *"who's seen this?"* and get a real
+counts as read — so you can always ask _"who's seen this?"_ and get a real
 answer.
 
 A server is already running. You never need its address. Everything below is
@@ -41,14 +41,18 @@ If your team already uses teamshare, ask whoever set it up to run
 
 ## Step 2A · You're setting up the team
 
+Two commands, in this order. The secret first — create-team needs it.
+
 ```
-/teamshare:create-team Platform
+/teamshare:generate-secret
+/teamshare:create-team <org-name>
 ```
 
-The first time on a new machine it will ask for your organisation's **signup
-secret** — one value your company shares, which is what stops strangers making
-teams on your server. After that first success it's remembered, and every later
-team is just a name.
+`generate-secret` mints a signup secret (or recovers the live one if this
+machine already knows the instance via local terraform state or
+`TEAMSHARE_INSTANCE_ID` — never an id shipped in the plugin). Save what it
+prints. Then create-team uses it and remembers it, so every later team is
+just a name.
 
 ```
 teamshare create-team — success
@@ -73,51 +77,6 @@ with this laptop.
 It's an **admin** token. It can invite people, remove them, and list them. It
 **cannot** read shares. So it can't log you in — which is why the next step
 matters.
-
-<details>
-<summary><b>Where do I get the signup secret?</b></summary>
-
-Whoever runs the server has it. It's one value for the whole organisation, not
-something per-person.
-
-**If you run the server** and deployed it from this repo, one command reads it
-back and prints nothing else:
-
-```bash
-deploy/aws/signup-secret.sh
-```
-
-**If you're standing up a brand-new server** and choosing the value yourself:
-
-```bash
-node packages/server/dist/cli.js signup-secret --generate
-```
-
-```
-tss_dc84723dbc6253353a9a40832a9c518b63df9940d124cc9b
-```
-
-That's the shape the server generates for itself — `tss_` and 48 hex
-characters. The server doesn't *require* it: any string you configure it with
-works, so `--signup-secret hunter2` is valid if that's what you want. The
-generator just saves you inventing one.
-
-To replace an existing server's secret, `signup-secret --rotate` on that
-machine. It disturbs nothing — no team, admin token or personal token is
-affected, because this value only ever gated creating new teams.
-
-**Once you have it**, pass it as the second argument, just this once:
-
-```
-/teamshare:create-team Platform <the-secret>
-```
-
-It's remembered per server from then on. If you'd rather it never appeared in
-this conversation, set `TEAMSHARE_SIGNUP_SECRET` before starting Claude Code,
-or run `node packages/server/src/teamshare-team.mjs create-team "Platform"` in
-a terminal, which prompts with hidden input.
-
-</details>
 
 ### Now invite everyone, starting with yourself
 
@@ -171,7 +130,7 @@ moves into middleware/auth.ts. Don't merge anything touching src/auth.
 Your assistant tightens it up, shows you, and publishes when you confirm:
 
 ```json
-{"id":"shr_ddd81b0b4b92","notified":5}
+{ "id": "shr_ddd81b0b4b92", "notified": 5 }
 ```
 
 Five teammates will see it at their next session start.
@@ -195,13 +154,13 @@ it. Either way it's marked read and won't nag them again.
 
 **Everything else is plain English:**
 
-| Say this | Get this |
-| --- | --- |
-| "what's unread?" | Your waiting shares |
-| "show me the auth one" | Full note, marks it read |
+| Say this                     | Get this                                                |
+| ---------------------------- | ------------------------------------------------------- |
+| "what's unread?"             | Your waiting shares                                     |
+| "show me the auth one"       | Full note, marks it read                                |
 | "who's seen the auth share?" | `1 viewed, 0 dismissed. Not yet seen by: ada@acme.com…` |
-| "retract my auth share" | Deleted everywhere |
-| "mark it stale" | Stops showing as unread, stays in history |
+| "retract my auth share"      | Deleted everywhere                                      |
+| "mark it stale"              | Stops showing as unread, stays in history               |
 
 Only the author can retract. Shares expire on their own after 14 days.
 
@@ -264,12 +223,12 @@ Admin tokens saved on this machine (invite / revoke / roster / rotate-team):
   - Platform (tm_6c772dbd6de4) — saved 2026-08-30T17:28:32.033Z
 ```
 
-| It says | Do this |
-| --- | --- |
-| `working` | Nothing — you're fine. `0 unread` really means nothing new. |
-| `not set on this machine` | `/plugin configure teamshare@teamshare` |
-| `rejected (401)` | Your token was revoked, or you pasted the admin token by mistake. Ask for a new invite. |
-| `could not reach` | Server or network issue, at the address shown. |
+| It says                   | Do this                                                                                 |
+| ------------------------- | --------------------------------------------------------------------------------------- |
+| `working`                 | Nothing — you're fine. `0 unread` really means nothing new.                             |
+| `not set on this machine` | `/plugin configure teamshare@teamshare`                                                 |
+| `rejected (401)`          | Your token was revoked, or you pasted the admin token by mistake. Ask for a new invite. |
+| `could not reach`         | Server or network issue, at the address shown.                                          |
 
 If the commands themselves are missing, restart Claude Code. If the tools are
 missing, check `/mcp` and make sure you trusted the workspace.
@@ -340,13 +299,13 @@ does the same thing.
 
 No slash commands here — just ask:
 
-| Say this | Get this |
-| --- | --- |
-| "what has my team shared?" | Your unread shares |
-| "show me shr_ddd81b0b4b92" | Full note, marks it read |
-| "share with the team that the auth refactor lands Friday" | Publishes it |
-| "who's seen my auth share?" | Read receipts |
-| "retract that share" | Deletes it everywhere |
+| Say this                                                  | Get this                 |
+| --------------------------------------------------------- | ------------------------ |
+| "what has my team shared?"                                | Your unread shares       |
+| "show me shr_ddd81b0b4b92"                                | Full note, marks it read |
+| "share with the team that the auth refactor lands Friday" | Publishes it             |
+| "who's seen my auth share?"                               | Read receipts            |
+| "retract that share"                                      | Deletes it everywhere    |
 
 **One difference, honestly:** Claude Code gets the automatic start-of-session
 digest and `/teamshare:share`. Those are plugin features. Everywhere else you
@@ -359,7 +318,8 @@ Same thing, one file, no address needed:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
-node teamshare-team.mjs create-team "Platform"
+node teamshare-team.mjs generate-secret
+node teamshare-team.mjs create-team "<org-name>"
 node teamshare-team.mjs invite sam@acme.com "Sam"
 node teamshare-team.mjs roster
 node teamshare-team.mjs revoke sam@acme.com
@@ -375,21 +335,22 @@ Code commands are this same file with a nicer front door.
 
 **Claude Code**
 
-| Command | Does |
-| --- | --- |
-| `/teamshare:share <message>` | Publish a note to the team |
-| `/teamshare:create-team <name>` | Create a team, save its admin token (secret only the first time) |
-| `/teamshare:invite <email> [name]` | One person's token + the message to send them |
-| `/teamshare:roster` | Who's on the team, who never connected |
-| `/teamshare:revoke <email>` | Remove someone completely |
-| `/teamshare:status` | Am I actually connected? |
-| `/teamshare:connect` | Set up your other AI assistants |
-| `/teamshare:setup` | Repair a broken config (rarely needed) |
+| Command                             | Does                                                  |
+| ----------------------------------- | ----------------------------------------------------- |
+| `/teamshare:share <message>`        | Publish a note to the team                            |
+| `/teamshare:generate-secret`        | Mint a signup secret (first — create-team needs this) |
+| `/teamshare:create-team <org-name>` | Create a team, save its admin token                   |
+| `/teamshare:invite <email> [name]`  | One person's token + the message to send them         |
+| `/teamshare:roster`                 | Who's on the team, who never connected                |
+| `/teamshare:revoke <email>`         | Remove someone completely                             |
+| `/teamshare:status`                 | Am I actually connected?                              |
+| `/teamshare:connect`                | Set up your other AI assistants                       |
+| `/teamshare:setup`                  | Repair a broken config (rarely needed)                |
 
 **Terminal** — `node teamshare-team.mjs <command>` after the `curl` above.
-`create-team`, `invite`, `revoke`, `roster`, `rotate-team`, `whoami`. Add
-`--server <url>` for your own server, or `--team "<name>"` if you run more than
-one team.
+`generate-secret`, `create-team`, `invite`, `revoke`, `roster`, `rotate-team`,
+`whoami`. Add `--server <url>` for your own server, or `--team "<name>"` if you
+run more than one team.
 
 ---
 
@@ -397,17 +358,17 @@ one team.
 
 **Why do I need a token?**
 
-Because it's how the server knows *which* teammate you are. Every share and
+Because it's how the server knows _which_ teammate you are. Every share and
 every "read" is attributed by your token, not by a name your app claims. That's
 what makes "who's seen this?" trustworthy instead of a guess — and it means one
 command removes one person without disturbing anyone else.
 
 There are two kinds, and mixing them up is the most common mistake:
 
-| | Can do | Cannot do |
-| --- | --- | --- |
-| **Personal** (`tsm_…`) | Read and publish shares | Invite anyone |
-| **Admin** (`ts_…`) | Invite, revoke, list the team | Read a single share |
+|                        | Can do                        | Cannot do           |
+| ---------------------- | ----------------------------- | ------------------- |
+| **Personal** (`tsm_…`) | Read and publish shares       | Invite anyone       |
+| **Admin** (`ts_…`)     | Invite, revoke, list the team | Read a single share |
 
 `/teamshare:status` will tell you if you've pasted the wrong one.
 
@@ -418,13 +379,11 @@ plugin and into both terminal commands. It isn't secret either — every request
 without a valid token is refused.
 
 **One thing worth knowing:** `/teamshare:invite` prints a real token into your
-Claude Code transcript, because you have to send it to someone. Same if you
-pass the signup secret to `/teamshare:create-team` — though that's once per
-machine, since it's remembered afterwards. Both are deliberate: the alternative
-was a tool you couldn't use without leaving it. Neither value ever touches a
-command line, where `ps` would see it. If your threat model cares, run the
-terminal versions instead; `/teamshare:revoke` invalidates a personal token in
-one step, and the signup secret opens no team's data at all.
+Claude Code transcript, because you have to send it to someone. Same for
+`/teamshare:generate-secret`. Both are deliberate: the alternative was a tool
+you couldn't use without leaving it. Neither value ever touches a command
+line, where `ps` would see it. `/teamshare:revoke` invalidates a personal
+token in one step, and the signup secret opens no team's data at all.
 
 ---
 

@@ -34,6 +34,7 @@
 // terminal — never accepted as argv.
 import { createInterface } from 'node:readline';
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { basename as basenamePath, dirname as dirnamePath, join as joinPath } from 'node:path';
@@ -90,6 +91,11 @@ export function adminTokenFromEnv(env) {
 //   4. DEFAULT_SERVER_URL below
 export const SERVER_URL_ENV = 'TEAMSHARE_URL';
 export const DEFAULT_SERVER_URL = 'https://54.90.22.249.sslip.io';
+// Never a default instance id. A public plugin must not name the production
+// box — anyone who installs it would learn where to point SSM. Recover is
+// operator-only: TEAMSHARE_INSTANCE_ID in the environment, or local
+// terraform state (gitignored) on the machine that applied the stack.
+export const INSTANCE_ID_ENV = 'TEAMSHARE_INSTANCE_ID';
 
 /**
  * Whether a positional argument is a server URL rather than a team name or an
@@ -518,6 +524,316 @@ export async function resolveSecret(opts) {
     return { ok: true, value: trimmed, source: 'prompt' };
   }
   return { ok: false, reason: 'not running on a terminal and no environment variable is set' };
+}
+
+// ---------------------------------------------------------------------------
+// Signup secret: generate a correctly-formed one, or recover the live
+// instance's value over AWS SSM. This is what lets `/teamshare:create-team`
+// and `/teamshare:generate-secret` work as plugin commands — no curl, no
+// `.sh`, no `node …cli.js`. Same SSM path deploy/aws/signup-secret.sh uses;
+// that file remains as a compose-friendly operator helper, not the product.
+// ---------------------------------------------------------------------------
+
+/**
+ * `tss_` + 48 hex characters. The server does not require this shape — any
+ * configured string works — but this is what it generates for itself, so it
+ * is also what we mint when someone asks for a new one.
+ * @param {(n: number) => { toString: (enc: string) => string }} [bytesFn]
+ */
+export function generateSignupSecret(bytesFn = randomBytes) {
+  return `tss_${bytesFn(24).toString('hex')}`;
+}
+
+/**
+ * Whether it is even worth spawning `aws`. Isolated test HOMEs, CI, and
+ * machines that have never configured AWS fail here in microseconds instead
+ * of waiting on a credentials timeout.
+ * @param {{ env?: Record<string, string | undefined>, homeDir?: string, fs?: typeof import('node:fs') }} [opts]
+ */
+export function canAttemptAwsRecover(opts = {}) {
+  const env = opts.env ?? process.env;
+  if (
+    (env.AWS_ACCESS_KEY_ID ?? '').trim() ||
+    (env.AWS_PROFILE ?? '').trim() ||
+    (env.AWS_SESSION_TOKEN ?? '').trim() ||
+    (env.AWS_SHARED_CREDENTIALS_FILE ?? '').trim()
+  ) {
+    return true;
+  }
+  const home = opts.homeDir ?? homedir();
+  const fsImpl = opts.fs ?? nodeFs;
+  for (const rel of [joinPath('.aws', 'credentials'), joinPath('.aws', 'config')]) {
+    try {
+      fsImpl.accessSync(joinPath(home, rel));
+      return true;
+    } catch {
+      // keep looking
+    }
+  }
+  return false;
+}
+
+/**
+ * Places a checkout might keep local terraform state. Marketplace installs
+ * of the plugin never contain deploy/aws, so this list is empty there —
+ * which is the point: recovering via SSM is not something a teammate's
+ * plugin is allowed to know how to aim.
+ * @param {{ cwd?: string, scriptPath?: string }} [opts]
+ */
+export function terraformStateCandidates(opts = {}) {
+  const cwd = opts.cwd ?? process.cwd();
+  const scriptPath = opts.scriptPath ?? process.argv[1];
+  const paths = [];
+  const seen = new Set();
+  const add = (p) => {
+    if (p && !seen.has(p)) {
+      seen.add(p);
+      paths.push(p);
+    }
+  };
+  add(joinPath(cwd, 'terraform.tfstate'));
+  add(joinPath(cwd, 'deploy', 'aws', 'terraform.tfstate'));
+  if (typeof scriptPath === 'string' && scriptPath.trim()) {
+    let dir = dirnamePath(scriptPath.trim());
+    for (let i = 0; i < 8; i++) {
+      add(joinPath(dir, 'deploy', 'aws', 'terraform.tfstate'));
+      const parent = dirnamePath(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  return paths;
+}
+
+/**
+ * @param {{ fs?: typeof import('node:fs'), cwd?: string, scriptPath?: string }} [opts]
+ * @returns {{ ok: true, instanceId: string, region?: string, source: 'terraform-state', path: string } | { ok: false, reason: string }}
+ */
+export function readTerraformInstanceTarget(opts = {}) {
+  const fsImpl = opts.fs ?? nodeFs;
+  for (const statePath of terraformStateCandidates(opts)) {
+    try {
+      const state = JSON.parse(fsImpl.readFileSync(statePath, 'utf8'));
+      const id = state?.outputs?.instance_id?.value;
+      if (typeof id !== 'string' || !/^i-[0-9a-f]+$/i.test(id.trim())) continue;
+      const regionRaw = state?.outputs?.aws_region?.value;
+      const region = typeof regionRaw === 'string' && regionRaw.trim() ? regionRaw.trim() : undefined;
+      return { ok: true, instanceId: id.trim(), region, source: 'terraform-state', path: statePath };
+    } catch {
+      // unreadable or not terraform state — try the next candidate
+    }
+  }
+  return { ok: false, reason: 'no local terraform state' };
+}
+
+/**
+ * The instance to recover from, if and only if this machine already knows
+ * it. Never a compiled-in default.
+ * @param {{
+ *   instanceId?: string,
+ *   region?: string,
+ *   env?: Record<string, string | undefined>,
+ *   fs?: typeof import('node:fs'),
+ *   cwd?: string,
+ *   scriptPath?: string,
+ * }} [opts]
+ */
+export function resolveInstanceTarget(opts = {}) {
+  const env = opts.env ?? process.env;
+  const explicit = String(opts.instanceId ?? env[INSTANCE_ID_ENV] ?? '').trim();
+  const region = String(opts.region ?? env.AWS_REGION ?? env.AWS_DEFAULT_REGION ?? '').trim() || undefined;
+  if (explicit) {
+    return {
+      ok: true,
+      instanceId: explicit,
+      region,
+      source: opts.instanceId ? 'argument' : 'env',
+    };
+  }
+  const fromTf = readTerraformInstanceTarget(opts);
+  if (fromTf.ok) {
+    return { ...fromTf, region: fromTf.region ?? region };
+  }
+  return {
+    ok: false,
+    reason:
+      `no instance id — set ${INSTANCE_ID_ENV}, or run this from a checkout that has local terraform state. ` +
+      'The plugin does not ship a production instance id.',
+  };
+}
+
+/**
+ * Recover the live instance's signup secret via AWS SSM. Injectable exec so
+ * tests never talk to AWS. Returns a reason, never throws.
+ * @param {{
+ *   execFileSync?: typeof execFileSync,
+ *   instanceId?: string,
+ *   region?: string,
+ *   env?: Record<string, string | undefined>,
+ *   homeDir?: string,
+ *   fs?: typeof import('node:fs'),
+ *   sleep?: (ms: number) => Promise<void>,
+ *   attempts?: number,
+ *   delayMs?: number,
+ * }} [opts]
+ * @returns {Promise<{ ok: true, value: string, source: 'aws' } | { ok: false, reason: string }>}
+ */
+export async function recoverSignupSecretFromAws(opts = {}) {
+  const env = opts.env ?? process.env;
+  const exec = opts.execFileSync ?? execFileSync;
+  const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const homeDir = opts.homeDir ?? env.HOME ?? homedir();
+
+  const target = resolveInstanceTarget({
+    instanceId: opts.instanceId,
+    region: opts.region,
+    env,
+    fs: opts.fs,
+    cwd: opts.cwd,
+    scriptPath: opts.scriptPath,
+  });
+  if (!target.ok) return { ok: false, reason: target.reason };
+
+  if (!canAttemptAwsRecover({ env, homeDir, fs: opts.fs })) {
+    return { ok: false, reason: 'no AWS credentials on this machine' };
+  }
+
+  const instanceId = target.instanceId;
+  const region = target.region;
+  const regionArgs = region ? ['--region', region] : [];
+  const attempts = opts.attempts ?? 30;
+  const delayMs = opts.delayMs ?? 2000;
+
+  try {
+    exec('aws', ['sts', 'get-caller-identity'], {
+      encoding: 'utf8',
+      timeout: 8000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env,
+    });
+  } catch {
+    return { ok: false, reason: 'no usable AWS credentials' };
+  }
+
+  let commandId;
+  try {
+    commandId = String(
+      exec(
+        'aws',
+        [
+          'ssm',
+          'send-command',
+          '--instance-ids',
+          instanceId,
+          ...regionArgs,
+          '--document-name',
+          'AWS-RunShellScript',
+          '--comment',
+          'read teamshare signup secret',
+          '--parameters',
+          'commands=["/usr/local/bin/node /opt/teamshare/packages/server/dist/cli.js signup-secret --show --db /var/lib/teamshare/teamshare.db"]',
+          '--query',
+          'Command.CommandId',
+          '--output',
+          'text',
+        ],
+        { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'], env },
+      ),
+    ).trim();
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `aws ssm send-command failed (${err && err.message ? err.message : err})`,
+    };
+  }
+  if (!commandId) return { ok: false, reason: 'aws ssm send-command returned no command id' };
+
+  for (let i = 0; i < attempts; i++) {
+    let raw = '';
+    try {
+      raw = String(
+        exec(
+          'aws',
+          [
+            'ssm',
+            'get-command-invocation',
+            '--command-id',
+            commandId,
+            '--instance-id',
+            instanceId,
+            ...regionArgs,
+            '--output',
+            'json',
+          ],
+          { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'], env },
+        ),
+      );
+    } catch {
+      await sleep(delayMs);
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      await sleep(delayMs);
+      continue;
+    }
+    const status = parsed.Status;
+    if (status === 'Success') {
+      const value = String(parsed.StandardOutputContent ?? '').replace(/\r|\n/g, '').trim();
+      if (!value) return { ok: false, reason: 'empty secret returned from the instance' };
+      return { ok: true, value, source: 'aws' };
+    }
+    if (status === 'Failed' || status === 'TimedOut' || status === 'Cancelled') {
+      const errText = String(parsed.StandardErrorContent ?? '').trim();
+      return { ok: false, reason: `SSM command ${status}${errText ? `: ${errText}` : ''}` };
+    }
+    await sleep(delayMs);
+  }
+  return { ok: false, reason: 'timed out waiting for SSM' };
+}
+
+/**
+ * @param {{
+ *   value: string,
+ *   source: 'aws' | 'new',
+ *   url?: string,
+ *   cmdName?: string,
+ *   saved?: boolean,
+ * }} opts
+ */
+export function formatGenerateSecretOutput(opts) {
+  const { value, source, url, cmdName = 'teamshare-team', saved } = opts;
+  if (source === 'new') {
+    return [
+      'teamshare generate-secret — new value (not yet on any server)',
+      '',
+      `  ${value}`,
+      '',
+      'This is a correctly-formed signup secret. Configure the server with it BEFORE creating a',
+      'team — TEAMSHARE_SIGNUP_SECRET when you start serve, or the signup_secret Terraform variable.',
+      'A server that is already running will reject it until you rotate that instance onto this value.',
+      '',
+      `Then: ${cmdName} create-team "<team name>"`,
+      '',
+    ].join('\n');
+  }
+  const lines = [
+    'teamshare generate-secret — recovered from the live server',
+    '',
+    `  ${value}`,
+    '',
+  ];
+  if (saved && url) {
+    lines.push(`Saved against ${url}. ${cmdName} create-team now needs only a team name.`, '');
+  } else {
+    lines.push(
+      `${cmdName} create-team "<name>" will remember this after the first success.`,
+      '',
+    );
+  }
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,11 +1399,19 @@ export function formatRotateOutput(opts) {
 
 // ---------------------------------------------------------------------------
 // Argv parsing — a SEPARATE contract from teamshare-connect.mjs's
-// parseConnectArgv. Five subcommands (create-team, rotate-team, invite,
+// parseConnectArgv. Six subcommands (create-team, generate-secret, rotate-team, invite,
 // revoke, roster), never a secret positional.
 // ---------------------------------------------------------------------------
 
-export const TEAM_COMMANDS = ['create-team', 'rotate-team', 'invite', 'revoke', 'roster', 'whoami'];
+export const TEAM_COMMANDS = [
+  'create-team',
+  'generate-secret',
+  'rotate-team',
+  'invite',
+  'revoke',
+  'roster',
+  'whoami',
+];
 
 /**
  * Flags are pulled out first, then positionals are read in order, because the
@@ -1103,6 +1427,7 @@ export function parseTeamArgv(argv) {
     serverFlag: undefined,
     teamName: undefined,
     signupSecretFile: undefined,
+    generateNew: false,
     name: undefined,
     email: undefined,
     help: false,
@@ -1125,6 +1450,10 @@ export function parseTeamArgv(argv) {
         return parsed;
       }
       parsed.serverFlag = value;
+      continue;
+    }
+    if (arg === '--new') {
+      parsed.generateNew = true;
       continue;
     }
     if (arg === '--signup-secret-file') {
@@ -1213,6 +1542,7 @@ Standalone, dependency-free — no clone, no pnpm install, no build required.
 
 Usage:
   ${cmdName} create-team "<team name>"
+  ${cmdName} generate-secret [--new]
   ${cmdName} invite <email> ["<name>"]
   ${cmdName} revoke <email>
   ${cmdName} roster
@@ -1229,8 +1559,12 @@ Options:
 Credentials are never accepted as arguments — they would land in shell history and \`ps\` output.
 
   create-team  needs the instance signup secret. Set ${SIGNUP_SECRET_ENV}, pass
-               --signup-secret-file <path> (a file holding just the secret, for callers with no
-               terminal), or be prompted for it (input hidden) on a real terminal.
+               --signup-secret-file <path>, run ${cmdName} generate-secret, or be prompted
+               on a real terminal. Recovers via AWS SSM only when this machine already
+               knows the instance (${INSTANCE_ID_ENV} or local terraform state) — never
+               from a compiled-in id.
+  generate-secret  mint a correctly-formed signup secret. Recovers the live value
+               instead when ${INSTANCE_ID_ENV} or local terraform state names the box.
   the rest     need this team's admin token — the value create-team printed. create-team saves it
                to ~/${ADMIN_STORE_DIRNAME}/${ADMIN_STORE_FILENAME} (owner-only) and these commands
                read it back, so normally there is nothing to supply. Override with
@@ -1318,6 +1652,8 @@ export async function checkMemberToken(opts) {
  *   fs?: typeof import('node:fs'),
  *   argv1?: string,
  *   now?: string,
+ *   recoverSignupSecret?: (opts?: object) => Promise<{ ok: true, value: string, source?: string } | { ok: false, reason: string }>,
+ *   generateSecret?: () => string,
  * }} [opts]
  */
 export async function runTeamCli(argv, opts = {}) {
@@ -1327,6 +1663,8 @@ export async function runTeamCli(argv, opts = {}) {
   const fsImpl = opts.fs ?? nodeFs;
   const homeDir = opts.homeDir;
   const cmdName = invocationName(opts.argv1 ?? process.argv[1]);
+  const recoverSignupSecret = opts.recoverSignupSecret;
+  const mintSecret = opts.generateSecret ?? generateSignupSecret;
   const identity =
     opts.identity !== undefined ? opts.identity : resolveGitIdentity(opts.gitIdentityOptions);
 
@@ -1407,6 +1745,70 @@ export async function runTeamCli(argv, opts = {}) {
     };
   }
 
+  if (parsed.cmd === 'generate-secret') {
+    if (parsed.generateNew) {
+      const value = mintSecret();
+      return {
+        exitCode: 0,
+        stdout: formatGenerateSecretOutput({ value, source: 'new', url, cmdName }),
+        stderr: '',
+      };
+    }
+
+    const target = resolveInstanceTarget({
+      env,
+      fs: fsImpl,
+      cwd: opts.cwd,
+      scriptPath: opts.argv1 ?? process.argv[1],
+    });
+    // No named box on this machine → mint. Recovering via SSM is operator-
+    // only (env or local terraform state). A public plugin must not aim SSM
+    // at a compiled-in instance.
+    if (!target.ok && !recoverSignupSecret) {
+      const value = mintSecret();
+      return {
+        exitCode: 0,
+        stdout: formatGenerateSecretOutput({ value, source: 'new', url, cmdName }),
+        stderr: '',
+      };
+    }
+
+    const recovered = recoverSignupSecret
+      ? await recoverSignupSecret({ env, homeDir, fs: fsImpl })
+      : await recoverSignupSecretFromAws({
+          env,
+          homeDir,
+          fs: fsImpl,
+          cwd: opts.cwd,
+          scriptPath: opts.argv1 ?? process.argv[1],
+        });
+    if (!recovered.ok) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr:
+          `could not recover the live signup secret (${recovered.reason}).\n\n` +
+          `Recover needs ${INSTANCE_ID_ENV} or local terraform state — never a compiled-in instance id.\n` +
+          `Standing up a brand-new server instead? ${cmdName} generate-secret --new prints a\n` +
+          `correctly-formed value to configure it with. That value will not work against a\n` +
+          `server that is already running.\n`,
+      };
+    }
+
+    const saved = saveSignupSecret({ url, secret: recovered.value, homeDir, fs: fsImpl });
+    return {
+      exitCode: 0,
+      stdout: formatGenerateSecretOutput({
+        value: recovered.value,
+        source: 'aws',
+        url,
+        cmdName,
+        saved: saved.ok,
+      }),
+      stderr: '',
+    };
+  }
+
   if (parsed.cmd === 'whoami') {
     const adminTeams = adminEntriesFor(readAdminStore({ homeDir, fs: fsImpl }), url);
     const memberCheck = await checkMemberToken({
@@ -1427,9 +1829,10 @@ export async function runTeamCli(argv, opts = {}) {
     }
 
     // Environment first (an explicit export always wins), then a file the
-    // caller wrote, then a hidden prompt. The file tier exists for callers
-    // with no terminal — notably the /teamshare:create-team slash command,
-    // which would otherwise have to put the secret on a command line.
+    // caller wrote, then a secret this machine already used successfully,
+    // then AWS SSM only when this machine already knows the instance id
+    // (env or local terraform state — never a compiled-in default), then a
+    // hidden prompt.
     let secretResult;
     const savedSecret = readSavedSignupSecret({ url, homeDir, fs: fsImpl });
     if (parsed.signupSecretFile && !(env[SIGNUP_SECRET_ENV] ?? '').trim()) {
@@ -1441,6 +1844,49 @@ export async function runTeamCli(argv, opts = {}) {
       // Typed once, on this machine, against this server. This is what makes
       // every create-team after the first just a team name.
       secretResult = { ok: true, value: savedSecret, source: 'saved' };
+    } else if (!(env[SIGNUP_SECRET_ENV] ?? '').trim()) {
+      const target = resolveInstanceTarget({
+        env,
+        fs: fsImpl,
+        cwd: opts.cwd,
+        scriptPath: opts.argv1 ?? process.argv[1],
+      });
+      if (recoverSignupSecret || target.ok) {
+        const recovered = recoverSignupSecret
+          ? await recoverSignupSecret({ env, homeDir, fs: fsImpl })
+          : await recoverSignupSecretFromAws({
+              env,
+              homeDir,
+              fs: fsImpl,
+              cwd: opts.cwd,
+              scriptPath: opts.argv1 ?? process.argv[1],
+            });
+        if (recovered.ok) {
+          secretResult = { ok: true, value: recovered.value, source: recovered.source ?? 'aws' };
+        } else {
+          secretResult = await resolveSecret({
+            envValue: undefined,
+            isTTY,
+            promptText: 'Signup secret (input hidden): ',
+            promptFn: opts.promptFn,
+            streams: opts.streams,
+          });
+          if (!secretResult.ok) {
+            secretResult = {
+              ok: false,
+              reason: `${secretResult.reason}; AWS recover: ${recovered.reason}`,
+            };
+          }
+        }
+      } else {
+        secretResult = await resolveSecret({
+          envValue: undefined,
+          isTTY,
+          promptText: 'Signup secret (input hidden): ',
+          promptFn: opts.promptFn,
+          streams: opts.streams,
+        });
+      }
     } else {
       secretResult = await resolveSecret({
         envValue: env[SIGNUP_SECRET_ENV],
@@ -1455,8 +1901,9 @@ export async function runTeamCli(argv, opts = {}) {
         exitCode: 1,
         stdout: '',
         stderr:
-          `could not resolve the signup secret (${secretResult.reason}). Set ${SIGNUP_SECRET_ENV}, pass ` +
-          '--signup-secret-file <path>, or run this on an interactive terminal so it can prompt you. ' +
+          `could not resolve the signup secret (${secretResult.reason}). Run \`${cmdName} generate-secret\` ` +
+          `to mint one, set ${SIGNUP_SECRET_ENV}, ` +
+          'pass --signup-secret-file <path>, or run this on an interactive terminal so it can prompt you. ' +
           'Once a create-team succeeds here, the secret is remembered and later ones need only a name.\n',
       };
     }

@@ -9,14 +9,14 @@ and validated (`init`/`validate`/`fmt`) but never applied. Review it, then run
 
 ## What this creates, and what it costs
 
-| Resource | Purpose | Rough monthly cost (us-east-1, always-on) |
-|---|---|---|
-| 1x `t4g.small` EC2 instance | Runs teamshare + Caddy | ~$12.30 |
-| 20 GB `gp3` EBS root volume, encrypted | Holds the SQLite DB | ~$1.60 |
-| 1x Elastic IP (associated) | Stable address for TLS | ~$3.60 (AWS bills all public IPv4 addresses hourly since Feb 2024, attached or not) |
-| Dedicated VPC, subnet, IGW, route table | Network path (see below) | $0 |
-| Security group, IAM role/instance profile | Access control, SSM | $0 |
-| S3 bucket (versioned, encrypted) | Daily database backups | pennies — a few KB/day, lifecycle-managed (see below) |
+| Resource                                  | Purpose                  | Rough monthly cost (us-east-1, always-on)                                           |
+| ----------------------------------------- | ------------------------ | ----------------------------------------------------------------------------------- |
+| 1x `t4g.small` EC2 instance               | Runs teamshare + Caddy   | ~$12.30                                                                             |
+| 20 GB `gp3` EBS root volume, encrypted    | Holds the SQLite DB      | ~$1.60                                                                              |
+| 1x Elastic IP (associated)                | Stable address for TLS   | ~$3.60 (AWS bills all public IPv4 addresses hourly since Feb 2024, attached or not) |
+| Dedicated VPC, subnet, IGW, route table   | Network path (see below) | $0                                                                                  |
+| Security group, IAM role/instance profile | Access control, SSM      | $0                                                                                  |
+| S3 bucket (versioned, encrypted)          | Daily database backups   | pennies — a few KB/day, lifecycle-managed (see below)                               |
 
 **Total: roughly $15–20/month**, before data transfer (usage-dependent, and
 small for an internal team tool).
@@ -112,6 +112,7 @@ delay) resolves — no custom wait loop needed, but give it a minute or two
 after `apply` finishes before hitting the HTTPS URL.
 
 Terraform prints, on success:
+
 - `elastic_ip` — the static IP.
 - `url` — `https://<ip>.sslip.io`.
 - `ssm_read_team_token_command` / `ssm_show_signup_secret_command` —
@@ -141,13 +142,18 @@ composes without the secret ever reaching a screen or shell history:
 TEAMSHARE_SIGNUP_SECRET=$(deploy/aws/signup-secret.sh) teamshare-team create-team "My Team"
 ```
 
-**A team lead creates their own team** with the standalone script — needing
-nothing beyond `curl` and `node`:
+**A team lead creates their own team** with the plugin command — needing
+nothing beyond Claude Code with teamshare installed:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
-node teamshare-team.mjs create-team https://<ip>.sslip.io "<your team name>"
 ```
+/teamshare:generate-secret
+/teamshare:create-team <org-name>
+```
+
+`generate-secret` first — create-team needs that secret. Recovering the live
+value needs local terraform state or `TEAMSHARE_INSTANCE_ID`, never an id
+shipped in the plugin. The curl'd `teamshare-team.mjs` file remains the
+no-plugin fallback.
 
 The signup secret is never a command-line argument — that would land it in
 shell history and `ps` output. It's read from `TEAMSHARE_SIGNUP_SECRET` in
@@ -185,7 +191,7 @@ self-serve it** — no operator involvement:
 node teamshare-team.mjs rotate-team https://<ip>.sslip.io
 ```
 
-Same env-var-or-prompt rule, this time for the team's *current* admin token
+Same env-var-or-prompt rule, this time for the team's _current_ admin token
 (required to authenticate the rotation). This invalidates the old admin
 token immediately — but **no teammate has to do anything**: member tokens
 minted by `invite` are stored independently of the admin token, so this only
@@ -205,7 +211,7 @@ SSH key on this box at all, so both go over SSM Session Manager:
   deliberately never logged anywhere (see the design doc's §Creating a
   team). This reads it back directly off the box. Not needed at all if you
   set `signup_secret` explicitly in Terraform.
-- **`ssm_read_team_token_command`** — reads the *original* pre-multi-team
+- **`ssm_read_team_token_command`** — reads the _original_ pre-multi-team
   token out of journal history: the one plaintext token this server ever
   printed unprompted, on its very first boot, before multi-team existed. It
   now belongs to the team named `default` (created during migration). Useful
@@ -293,11 +299,11 @@ the hostname from instance metadata before Caddy starts.
 
 **Both halves were tested for real (2026-08-29):**
 
-- *Before* the Elastic IP: the instance was stopped and started, the IP changed
+- _Before_ the Elastic IP: the instance was stopped and started, the IP changed
   (`44.223.81.180` → `100.54.34.193`), the boot unit rewrote the Caddyfile,
   Caddy issued a fresh certificate, and the server was healthy again in 25
   seconds unattended — where previously it would simply have died.
-- *After* the Elastic IP: stopped and started again, and the IP **stayed**
+- _After_ the Elastic IP: stopped and started again, and the IP **stayed**
   `54.90.22.249`. Service back in 20 seconds, all three units active, database
   intact. The URL now survives a stop/start, so teammates never have to
   reconnect.
@@ -325,7 +331,7 @@ The same `lifecycle` block also sets `ignore_changes = [user_data]`. Since
 `user_data.sh.tpl` is expected to keep gaining setup steps over time (the S3
 backup automation added here is the first), that attribute will keep
 differing from the template's rendered output on every future `apply` from
-now on. Without `ignore_changes`, *every* such `apply` — even one only
+now on. Without `ignore_changes`, _every_ such `apply` — even one only
 touching unrelated resources, like an S3 bucket that has nothing to do with
 the instance — would attempt to replace this box, which `prevent_destroy`
 then turns into a hard error blocking the entire apply. `ignore_changes`
@@ -363,7 +369,7 @@ up. Each run:
    protection and isn't.
 3. Uploads to `s3://<bucket>/teamshare/YYYY/MM/DD/teamshare-<UTC timestamp>.db`
    in the bucket from the `backup_bucket` output (`teamshare-backups-<this
-   account's ID>` — see `backup.tf`).
+account's ID>` — see `backup.tf`).
 4. Deletes the temp file.
 
 The bucket blocks all public access, encrypts everything by default (SSE-S3),
@@ -377,7 +383,7 @@ The **entire backup script is one file**,
 [`deploy/aws/files/teamshare-backup.sh`](files/teamshare-backup.sh) — it's
 embedded verbatim into `user_data.sh.tpl` (base64, so it never passes through
 Terraform's own `${...}` templating and can't drift from this copy) and can
-also be delivered as-is to the *already-running* instance over SSM, without
+also be delivered as-is to the _already-running_ instance over SSM, without
 touching `user_data` or replacing the box:
 
 ```bash
@@ -389,7 +395,7 @@ printf '{"commands":["echo %s | base64 -d > /usr/local/bin/teamshare-backup.sh",
   "$B64" > /tmp/deliver-teamshare-backup.json
 
 aws ssm send-command \
-  --instance-ids i-06218a66d9378d97b \
+  --instance-ids "$(terraform output -raw instance_id)" \
   --document-name "AWS-RunShellScript" \
   --parameters file:///tmp/deliver-teamshare-backup.json \
   --region us-east-1 \
@@ -407,7 +413,7 @@ Check that a run actually happened, and see any failures, with:
 
 ```bash
 aws ssm send-command \
-  --instance-ids i-06218a66d9378d97b \
+  --instance-ids "$(terraform output -raw instance_id)" \
   --document-name "AWS-RunShellScript" \
   --parameters 'commands=["journalctl -u teamshare-backup --no-pager -n 50"]' \
   --region us-east-1
@@ -427,7 +433,7 @@ the `list_recent_backups_command` Terraform output.)
 **A backup nobody has restored is not yet a backup.**
 
 This procedure has been tested end to end against the live instance
-(2026-08-29): a canary share was published *after* a backup was taken, the
+(2026-08-29): a canary share was published _after_ a backup was taken, the
 backup was restored by these exact steps, and the canary was confirmed gone
 afterwards with the service healthy — proving the database was genuinely
 replaced rather than the restore silently no-opping. Re-test it yourself
@@ -444,7 +450,7 @@ hand-escaping shell commands inside JSON, and lets you watch each step:
 
 ```bash
 # 1. Open an interactive shell on the instance (no SSH key needed)
-aws ssm start-session --target i-06218a66d9378d97b --region us-east-1
+aws ssm start-session --target "$(terraform output -raw instance_id)"
 
 # --- everything below runs *inside* that session, as root ---
 
