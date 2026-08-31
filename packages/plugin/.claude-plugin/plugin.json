@@ -1,7 +1,7 @@
 {
   "name": "teamshare",
   "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "author": {
     "name": "teamshare"
   },
@@ -15,7 +15,7 @@
     "TEAMSHARE_TOKEN": {
       "type": "string",
       "title": "Your personal token",
-      "description": "The token your team lead sent you — it starts with tsm_ and identifies you specifically. Keep it private: whoever holds it can publish shares and record read receipts as you. Don't have one? Ask your lead to run /teamshare-invite <your-email>.",
+      "description": "The token your team lead sent you — it starts with tsm_ and identifies you specifically. Keep it private: whoever holds it can publish shares and record read receipts as you. Don't have one? Ask your lead to run /teamshare:invite <your-email>.",
       "sensitive": true
     }
   }

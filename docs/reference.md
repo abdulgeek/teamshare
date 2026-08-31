@@ -58,18 +58,31 @@ clear error.
 
 ## The team lead, in full
 
-Once the operator has a server running and has shared the signup secret,
-**anyone can create a team** — no checkout required beyond one script, no
-AWS, no Terraform, no SSM:
+Once the operator has a server running, **anyone with Claude Code creates a
+team as a plugin command** — secret first, then the org name:
+
+```
+/teamshare:generate-secret
+/teamshare:create-team <org-name>
+```
+
+`generate-secret` mints a correctly-formed signup secret. It recovers the
+live instance's value only when this machine already knows the box —
+`TEAMSHARE_INSTANCE_ID` or local terraform state, never an id shipped in
+the plugin. `--new` forces a mint. create-team needs that secret; it
+remembers it after the first success.
+
+Without the plugin, the same file still works as a download:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
-node teamshare-team.mjs create-team "<your team name>"
+node teamshare-team.mjs generate-secret
+node teamshare-team.mjs create-team "<org-name>"
 ```
 
-Already have a checkout? Same script, shorter path: `node
-packages/server/src/teamshare-team.mjs create-team "<your team
-name>"`.
+Already have a checkout? Same file, shorter path:
+`node packages/server/src/teamshare-team.mjs generate-secret` then
+`node packages/server/src/teamshare-team.mjs create-team "<org-name>"`.
 
 The signup secret is never a command-line argument — that would land it in
 shell history and `ps` output. It's read from `TEAMSHARE_SIGNUP_SECRET` in
@@ -157,7 +170,7 @@ channel or a place the whole team can see it:
 **This is one message per person, not one Slack post — and that's the
 point, not a rough edge.** A previous design let anyone holding one shared
 token claim to be anyone on the team, which made a forged read receipt
-indistinguishable from a genuine one. Under this model, *you* — the lead —
+indistinguishable from a genuine one. Under this model, _you_ — the lead —
 vouch for each teammate's identity at the moment you mint their token: the
 server binds that token to the email you typed, and everything that person
 does afterward is attributed to it.
@@ -174,7 +187,7 @@ it's self-serve** — no operator needed:
 node teamshare-team.mjs rotate-team <server-url>
 ```
 
-This needs the team's *current* admin token (same env-var-or-prompt rule)
+This needs the team's _current_ admin token (same env-var-or-prompt rule)
 and invalidates the old one the instant it runs. **It does not disturb any
 teammate's connection.** Member tokens minted by `invite` are stored
 independently of the admin token and keep working exactly as before — only
@@ -260,7 +273,7 @@ is required and cannot be empty`), so an empty or purely decorative share
 never gets published in the first place.
 
 A share nobody answers at all stays unread and reappears at the start of
-the next session — Claude won't re-ask about it again later in the *same*
+the next session — Claude won't re-ask about it again later in the _same_
 session, but it isn't marked read until you actually respond to it once.
 
 Shares age out on their own: after `--expiry-days` (default 14), a share
@@ -296,15 +309,15 @@ token he pasted already is his identity. Before any of that,
 Priya had already run `/teamshare:share` to publish `Auth middleware refactor lands
 Friday. Don't touch src/auth this week.` as `blocking`.
 
-Sam's first session opens with: *"1 unread team share published by
+Sam's first session opens with: _"1 unread team share published by
 teammates: Priya says the auth middleware refactor lands Friday and not to
-touch `src/auth` this week — blocking. Want the details?"* Sam says yes;
+touch `src/auth` this week — blocking. Want the details?"_ Sam says yes;
 Claude calls `read_share` and shows him the full note, recording a `viewed`
 receipt.
 
 Later that day, Priya asks her agent "who's seen the auth share?" Claude
-calls `receipts` and reports: *"1 viewed, 0 dismissed. Not yet seen by:
-nobody."* Everyone on the team has read it.
+calls `receipts` and reports: _"1 viewed, 0 dismissed. Not yet seen by:
+nobody."_ Everyone on the team has read it.
 
 By Friday the refactor has landed and the note no longer matters. Priya
 says "retract the auth share" — Claude calls `retract`, and it's gone from
@@ -329,7 +342,7 @@ node teamshare-team.mjs roster <server-url>
 ```
 
 `invite` mints a brand-new personal token for one named email — there is no
-redemption step, the printed value *is* that person's credential. `revoke`
+redemption step, the printed value _is_ that person's credential. `revoke`
 kills **every** live token for an email in one command, on every device it
 was ever issued to — the one-command remedy for a departed engineer.
 `roster` lists who holds a live token and who is still "invited, not yet
@@ -337,7 +350,7 @@ active," with a per-person count of active tokens.
 
 **Rotation is the remedy for a lost or leaked admin token, and it's
 self-serve — teams don't need the operator.** Run this with the team's
-*current* admin token (same env-var-or-prompt rule as `create-team` — never
+_current_ admin token (same env-var-or-prompt rule as `create-team` — never
 a positional argument):
 
 ```bash
@@ -368,10 +381,10 @@ names the known teams and refuses to guess if you omit it on a multi-team
 server.
 
 `remove-member` and `revoke` are different levers: `remove-member` deletes
-a departed engineer from a team's *historical* roster (the `members` rows
+a departed engineer from a team's _historical_ roster (the `members` rows
 that accumulate once a token is actually used) so they stop counting
 against `notified` totals and the unseen side of `receipts`; `revoke` kills
-their *live tokens* so those devices actually start getting 401s. Removing
+their _live tokens_ so those devices actually start getting 401s. Removing
 an ex-employee cleanly means both: `revoke` first (so their credential stops
 working immediately), then `remove-member` once they no longer need to
 appear in the roster at all.
@@ -487,7 +500,7 @@ share ever published, and every teammate's session-start hook then fails
 against a server that no longer recognizes their token — with no error
 surfaced to them. Mount a real volume and point `--db` at a path on it, and
 pass `--host 0.0.0.0` explicitly: `serve` binds to `127.0.0.1` by default
-(see above), which is only correct when a proxy runs on the *same* host
+(see above), which is only correct when a proxy runs on the _same_ host
 over loopback. Fly's and Railway's edge proxies terminate TLS off-host and
 forward over the network, not loopback, so the process must bind every
 interface there.
@@ -507,8 +520,8 @@ with Caddy and `sslip.io`.
 ## Requirements
 
 - **Node ≥ 20.** `better-sqlite3` is pinned to `^12.11.1` — v13 requires
-  Node ≥ 22 and segfaults on Node 20. This only affects *running the
-  server* (`teamshare serve`); `teamshare-connect.mjs`, `teamshare-team.mjs`,
+  Node ≥ 22 and segfaults on Node 20. This only affects _running the
+  server_ (`teamshare serve`); `teamshare-connect.mjs`, `teamshare-team.mjs`,
   and `teamshare doctor` never load `better-sqlite3` and need nothing
   beyond plain Node.
 - **Claude Code ≥ 2.1.238** for `headersHelper` support in a plugin's
@@ -516,6 +529,5 @@ with Caddy and `sslip.io`.
   without a bridge process.
 - **A workspace with persisted trust.** `headersHelper` is skipped by
   Claude Code if the current workspace hasn't been trusted, in which case
-  the MCP connection sends no auth headers and the server rejects it with
-  401. Trust the workspace (accept the trust dialog once) before installing
+  the MCP connection sends no auth headers and the server rejects it with 401. Trust the workspace (accept the trust dialog once) before installing
   the plugin.

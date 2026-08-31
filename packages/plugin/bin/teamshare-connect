@@ -101,7 +101,7 @@ export function looksLikeServerUrl(value) {
 // command aimed at the wrong one of the two PATH binaries is named rather than
 // silently misread as a token. Kept in sync by hand with TEAM_COMMANDS in
 // teamshare-team.mjs; connect.test.ts asserts they agree.
-export const TEAM_VERBS = ['create-team', 'rotate-team', 'invite', 'revoke', 'roster', 'whoami'];
+export const TEAM_VERBS = ['create-team', 'generate-secret', 'rotate-team', 'invite', 'revoke', 'roster', 'whoami'];
 
 // ---------------------------------------------------------------------------
 // Identity

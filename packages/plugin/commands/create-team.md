@@ -1,6 +1,6 @@
 ---
 description: Create a new teamshare team and save its admin token on this machine
-argument-hint: "<team name> [signup secret]"
+argument-hint: "<org-name>"
 ---
 
 # Create a team
@@ -14,49 +14,37 @@ tells you to do.
 
 ## Steps
 
-1. **Get the team name** from `$ARGUMENTS`. If there is none, ask for one — a
-   short group name like `Platform` or `Growth`. It is not secret; it shows up
-   in `/teamshare:status` for anyone on the team.
+1. **Get the org name** from `$ARGUMENTS`. If there is none, ask for one — a
+   short name like `acme` or `Platform`. It is not secret; it shows up in
+   `/teamshare:status` for anyone on the team.
 
-2. **Try it with no secret at all first.** The secret is remembered per server
-   after the first successful create-team on this machine, and it may already
-   be in the environment. Either way this succeeds with nothing supplied:
+2. **Generate the signup secret first.** Create-team needs it. Skip this only
+   when a previous create-team on this machine already remembered one:
 
    ```bash
-   teamshare-team create-team "<team name>"
+   teamshare-team generate-secret
    ```
 
-   If that works, skip to step 4. Most runs after the very first end here.
+   Relay the output as-is, including the secret, once.
 
-3. **Only if that failed for want of a secret**, get one and pass it. The
-   signup secret is what the server uses to gate team creation — one value,
-   shared across the organisation. In order of preference:
+3. **Create the team:**
 
-   - **In `$ARGUMENTS`?** Anything after the team name is the secret. Use it,
-     and mention once — briefly, not as a lecture — that it is now in this
-     conversation's transcript, that it only permits creating teams (no
-     shares, receipts or roster), and that it will not be needed again here.
+   ```bash
+   teamshare-team create-team "<org-name>"
+   ```
 
-   - **Otherwise ask for it**, telling them where to look:
-     - Whoever runs the server has it; it is one value for the whole org.
-     - If they run the server themselves and deployed from this repo,
-       `deploy/aws/signup-secret.sh` prints it and nothing else.
-     - If they are standing up a brand-new server and choosing the value,
-       `teamshare signup-secret --generate` prints a correctly-formed one
-       (`tss_` and 48 hex characters). The server does not require that shape —
-       any string it was configured with works — but this saves inventing one.
-
-   Then run it, with the secret in a private file rather than on the command
-   line, because argv is visible in `ps` and in the tool-call display:
+   If create-team fails for want of a secret that generate-secret did not
+   recover (this machine cannot name the instance), they need the org-wide
+   value from whoever deployed the server. Write it to a private file — never
+   a command line, and never an instance id from this conversation:
 
    ```bash
    umask 077 && printf '%s' '<the secret>' > "$TMPDIR/ts-signup" && \
-     teamshare-team create-team "<team name>" --signup-secret-file "$TMPDIR/ts-signup"; \
+     teamshare-team create-team "<org-name>" --signup-secret-file "$TMPDIR/ts-signup"; \
      rc=$?; rm -f "$TMPDIR/ts-signup"; exit $rc
    ```
 
-   Delete the file even when the command fails — hence the `rm` outside the
-   success path.
+   Delete the file even when the command fails.
 
 4. **Relay the output as-is.** It contains the admin token, printed once, plus
    where it was saved and what to do next. Do not summarise it away or hide the
@@ -72,33 +60,18 @@ tells you to do.
    - **Next:** `/teamshare:invite <their own email>` — otherwise they own a
      team they cannot use.
 
-   **Fallback, if they would rather no secret touched this conversation:** the
-   same command in their own terminal prompts for it with hidden input.
-   `teamshare-team` is on PATH only inside Claude Code, so give them a form
-   that works in a plain terminal — from a checkout,
-   `node packages/server/src/teamshare-team.mjs create-team "<name>"`, or with
-   no checkout, `curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs && node teamshare-team.mjs create-team "<name>"`.
-
 ## Failure handling
 
 Read the command's own error text and relay it; it is written to be actionable.
 
 - `command not found` — this session started before the plugin's `bin/` was on
   PATH. Restart Claude Code.
-- `401` — that value is not this server's signup secret. **Do not guess
-  again, and do not retry with a different argument from the same message.**
-  Tell the user where the real one comes from:
-  - Whoever runs the server has it. It is a single value shared across the
-    organisation, not something per-person and not something you can derive.
-  - If they run the server themselves and deployed it from this repo, it is
-    one command — `deploy/aws/signup-secret.sh` (needs AWS credentials for
-    that account) prints the value and nothing else.
-  - It is **not** the team name, an admin token (`ts_…`) or a personal token
-    (`tsm_…`). Those are different credentials and none of them work here.
-
-  If what they passed looks like a placeholder rather than a real secret —
-  `12345`, `secret`, `xxx` — say so plainly; they were probably filling in the
-  shape of the command rather than supplying a value.
+- `401` — the signup secret this machine offered is not this server's. Do not
+  guess again. On an operator machine, `/teamshare:generate-secret` recovers
+  the live value from local terraform state or `TEAMSHARE_INSTANCE_ID`. Do
+  not invent an instance id. If recover is not available, they need the
+  org-wide secret from whoever runs the server — it is not the team name, an
+  admin token (`ts_…`) or a personal token (`tsm_…`).
 - `403` — the server has hit its team cap.
 - `429` — rate-limited; wait and retry.
 - `400` — the name was rejected (empty, or an unsubstituted placeholder). Ask
@@ -109,6 +82,7 @@ Read the command's own error text and relay it; it is written to be actionable.
 ## Rules
 
 - **The secret never goes in a command line or an environment assignment on
-  one.** It moves through a file you create and delete, and nothing else.
+  one.** It moves through AWS recover, the remembered store, or a file you
+  create and delete.
 - Print the admin token once, as the command emits it, and don't repeat it
   later in the conversation.
