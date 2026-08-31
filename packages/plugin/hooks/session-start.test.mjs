@@ -267,9 +267,9 @@ describe('session-start hook', () => {
   });
 
   describe('CLAUDE_PLUGIN_OPTION_* config resolution (installed-plugin path)', () => {
-    it('resolves url/token from env and identity from git with no config file present', async () => {
+    it('resolves url/token from env with no config file present, and sends no identity headers', async () => {
       // No writeConfig() call: ~/.teamshare.json does not exist at all. Only
-      // CLAUDE_PLUGIN_OPTION_* env and git identity are available.
+      // CLAUDE_PLUGIN_OPTION_* env is available.
       const gitConfigPath = writeGitIdentity('Priya', 'Priya@Team.com');
       respond = (res) => {
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -298,9 +298,13 @@ describe('session-start hook', () => {
       expect(out).toContain('shr_env_path');
       expect(lastRequestHeaders).not.toBeNull();
       expect(lastRequestHeaders.authorization).toBe('Bearer tok_env');
-      // git config email lowercased, matching headers.sh's behaviour.
-      expect(lastRequestHeaders['x-teamshare-email']).toBe('priya@team.com');
-      expect(lastRequestHeaders['x-teamshare-name']).toBe('Priya');
+      // Identity headers are gone. Per-email invites bound identity to the
+      // token itself, and http.ts states outright that these are never read —
+      // so sending them meant shelling out to git on every session start to
+      // compute a value the server discards. A configured git identity is
+      // present here precisely to prove it is no longer consulted.
+      expect(lastRequestHeaders['x-teamshare-email']).toBeUndefined();
+      expect(lastRequestHeaders['x-teamshare-name']).toBeUndefined();
     });
 
     it('prefers env over a config file when both url/token sources are present', async () => {
@@ -330,7 +334,7 @@ describe('session-start hook', () => {
       await runHook();
       expect(lastRequestHeaders).not.toBeNull();
       expect(lastRequestHeaders.authorization).toBe('Bearer tok_test');
-      expect(lastRequestHeaders['x-teamshare-email']).toBe('priya@team.com');
+      expect(lastRequestHeaders['x-teamshare-email']).toBeUndefined();
     });
 
     it('with neither env nor config file, prints nothing, makes no request, and exits 0', async () => {
@@ -377,8 +381,8 @@ describe('session-start hook', () => {
       expect(lastRequestHeaders.authorization).toBe('Bearer tok_env');
       // Sent empty, not omitted — the server ignores them either way, and
       // this is never fabricated identity.
-      expect(lastRequestHeaders['x-teamshare-email']).toBe('');
-      expect(lastRequestHeaders['x-teamshare-name']).toBe('');
+      expect(lastRequestHeaders['x-teamshare-email']).toBeUndefined();
+      expect(lastRequestHeaders['x-teamshare-name']).toBeUndefined();
     });
 
     it('still fetches and shows the digest from ~/.teamshare.json when that file has no name/email', async () => {
@@ -394,20 +398,25 @@ describe('session-start hook', () => {
       await runHook();
       expect(lastRequestHeaders).not.toBeNull();
       expect(lastRequestHeaders.authorization).toBe('Bearer tok_no_identity');
-      expect(lastRequestHeaders['x-teamshare-email']).toBe('');
-      expect(lastRequestHeaders['x-teamshare-name']).toBe('');
+      expect(lastRequestHeaders['x-teamshare-email']).toBeUndefined();
+      expect(lastRequestHeaders['x-teamshare-name']).toBeUndefined();
     });
   });
 
-  describe('deterministic identity resolution', () => {
-    it('resolves the global git identity even when run from inside a repo with a different local identity', async () => {
-      // The bug this guards against (found via live testing): the hook runs
-      // with cwd = the user's project, while headers.sh is invoked by Claude
-      // Code with cwd = the plugin directory. If either resolved a
-      // repo-local `user.email` instead of forcing resolution to the global
-      // one, the two processes would disagree about who the user is —
-      // misattributing receipts and leaving the real reader's share
+  describe('git config cannot influence the digest at all', () => {
+    it('sends the same request from inside a repo with a conflicting local identity', async () => {
+      // This used to guard a real bug: the hook ran with cwd = the user's
+      // project while headers.sh ran with cwd = the plugin directory, so a
+      // repo-local `user.email` could make the two disagree about who the user
+      // is — misattributing receipts and leaving the real reader's share
       // reappearing forever.
+      //
+      // That whole class is now unreachable, because the hook sends no
+      // identity at all: per-email invites bound identity to the token, and
+      // the server never reads these headers. The test remains, inverted, to
+      // pin that git config has no bearing on the digest — if identity
+      // resolution is ever reintroduced here, this fails and the old hazard
+      // gets a fresh look rather than sneaking back.
       const globalGitConfig = writeGitIdentity('Global Person', 'Global@Team.com');
       repo = initRepoWithLocalIdentity('Local Person', 'local@repo.com');
 
@@ -416,11 +425,6 @@ describe('session-start hook', () => {
         res.end(JSON.stringify({ total: 0, shares: [] }));
       };
 
-      // No writeConfig(): url/token come only from CLAUDE_PLUGIN_OPTION_*
-      // env. Crucially, the hook process itself runs with cwd = repo — the
-      // same relationship production has between the hook and the user's
-      // project — which is exactly what the fix must render irrelevant to
-      // the resolved identity.
       await runHook(
         { hook_event_name: 'SessionStart', source: 'startup' },
         {
@@ -432,9 +436,9 @@ describe('session-start hook', () => {
       );
 
       expect(lastRequestHeaders).not.toBeNull();
-      // Must match the GLOBAL identity, never the repo-local one.
-      expect(lastRequestHeaders['x-teamshare-email']).toBe('global@team.com');
-      expect(lastRequestHeaders['x-teamshare-name']).toBe('Global Person');
+      expect(lastRequestHeaders.authorization).toBe('Bearer tok_env');
+      expect(lastRequestHeaders['x-teamshare-email']).toBeUndefined();
+      expect(lastRequestHeaders['x-teamshare-name']).toBeUndefined();
     });
   });
 });

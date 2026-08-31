@@ -78,8 +78,10 @@ describe('one server address, written in four places that cannot import each oth
     expect(constantIn('packages/server/src/teamshare-connect.mjs')).toBe(origin);
   });
 
-  it('agrees with the fallback in the session-start hook', () => {
-    expect(constantIn('packages/plugin/hooks/session-start.mjs')).toBe(declared.replace(/\/mcp$/, ''));
+  it('agrees with the fallback the hooks share', () => {
+    // Both hooks resolve the address through hooks/shared.mjs, so there is one
+    // constant here rather than one per hook.
+    expect(constantIn('packages/plugin/hooks/shared.mjs')).toBe(declared.replace(/\/mcp$/, ''));
   });
 });
 

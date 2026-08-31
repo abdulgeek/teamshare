@@ -154,6 +154,21 @@ cap is why people keep reading them.
 Their assistant asks if they want details. Yes shows the full note; no skips
 it. Either way it's marked read and won't nag them again.
 
+**And if they're already mid-session**, they don't have to wait until tomorrow.
+Anyone with Claude Code open gets told on their next message:
+
+```
+teamshare: 1 new share from Priya (blocking)
+```
+
+Their assistant mentions it in one line at the top of its reply and then
+carries on with whatever they actually asked — it won't hijack what they were
+doing. Details on request.
+
+That check is throttled to once a minute, capped at 1.2 seconds, and silent on
+failure, so it costs about 25ms on a typical message and never blocks you.
+Change the interval with `TEAMSHARE_POLL_SECONDS` (`0` polls every message).
+
 **Everything else is plain English:**
 
 | Say this                     | Get this                                                |
@@ -310,9 +325,10 @@ No slash commands here — just ask:
 | "retract that share"                                      | Deletes it everywhere    |
 
 **One difference, honestly:** Claude Code gets the automatic start-of-session
-digest and `/teamshare:share`. Those are plugin features. Everywhere else you
-ask for your unread shares instead of being told. Publishing, reading, receipts
-and retracting all work identically.
+digest, the mid-session nudge when something new lands, and
+`/teamshare:share`. Those are plugin features. Everywhere else you ask for your
+unread shares instead of being told. Publishing, reading, receipts and
+retracting all work identically.
 
 ## Step 3 · Running a team from here
 
