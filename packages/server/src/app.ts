@@ -133,7 +133,16 @@ export function createApp(opts: AppOptions): express.Express {
     if (!openSignup) {
       const provided = (req.get('x-teamshare-signup-secret') ?? '').trim();
       if (!signupSecret || !provided || !verifySignupSecret(signupSecret, provided)) {
-        res.status(401).json({ error: 'invalid or missing signup secret' });
+        // Names the remedy, not just the fault. Whoever hits this is trying
+        // to create their first team and has no way to tell "I typed it
+        // wrong" from "I was never given one" — and the value is deliberately
+        // not recoverable from the client side.
+        res.status(401).json({
+          error:
+            'invalid or missing signup secret — this is the one value your organisation shares to ' +
+            'allow team creation. Ask whoever runs this teamshare server for it. It is not a team ' +
+            'token or a personal token; neither of those works here.',
+        });
         return;
       }
     }

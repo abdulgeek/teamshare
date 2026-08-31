@@ -82,7 +82,20 @@ Read the command's own error text and relay it; it is written to be actionable.
 
 - `command not found` — this session started before the plugin's `bin/` was on
   PATH. Restart Claude Code.
-- `401` — the signup secret is wrong.
+- `401` — that value is not this server's signup secret. **Do not guess
+  again, and do not retry with a different argument from the same message.**
+  Tell the user where the real one comes from:
+  - Whoever runs the server has it. It is a single value shared across the
+    organisation, not something per-person and not something you can derive.
+  - If they run the server themselves and deployed it from this repo, it is
+    one command — `deploy/aws/signup-secret.sh` (needs AWS credentials for
+    that account) prints the value and nothing else.
+  - It is **not** the team name, an admin token (`ts_…`) or a personal token
+    (`tsm_…`). Those are different credentials and none of them work here.
+
+  If what they passed looks like a placeholder rather than a real secret —
+  `12345`, `secret`, `xxx` — say so plainly; they were probably filling in the
+  shape of the command rather than supplying a value.
 - `403` — the server has hit its team cap.
 - `429` — rate-limited; wait and retry.
 - `400` — the name was rejected (empty, or an unsubstituted placeholder). Ask

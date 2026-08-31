@@ -666,3 +666,37 @@ describe('inviting a team is not treated as an attack', () => {
     }
   });
 });
+
+
+describe('a rejected signup secret says what to do next', () => {
+  // Someone creating their first team cannot tell "I typed it wrong" from "I
+  // was never given one", and the value is deliberately not recoverable from
+  // the client side. A bare "invalid or missing signup secret" dead-ends them.
+  it('names the remedy and rules out the credentials people try instead', async () => {
+    const db = openDb(':memory:');
+    const app = createApp({ db, expiryDays: 14, now: () => NOW, signupSecret: 'the-real-secret' });
+    const server = await new Promise<Server>((resolve) => {
+      const srv = app.listen(0, () => resolve(srv));
+    });
+    const addr = server.address();
+    const base = typeof addr === 'object' && addr ? `http://127.0.0.1:${addr.port}` : '';
+    try {
+      const res = await fetch(`${base}/teams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Teamshare-Signup-Secret': '12345' },
+        body: JSON.stringify({ name: 'AI-Platform' }),
+      });
+      expect(res.status).toBe(401);
+      const { error } = await res.json();
+      expect(error.toLowerCase()).toContain('ask whoever runs this teamshare server');
+      // The two credentials people reach for by mistake, named explicitly.
+      expect(error.toLowerCase()).toContain('team token');
+      expect(error.toLowerCase()).toContain('personal token');
+      // And it still must not confirm or deny anything about the real value.
+      expect(error).not.toContain('the-real-secret');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      db.close();
+    }
+  });
+});
