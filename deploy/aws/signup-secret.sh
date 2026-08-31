@@ -41,7 +41,7 @@ aws sts get-caller-identity >/dev/null 2>&1 || {
 
 command_id=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
-  "${region_args[@]}" \
+  ${region_args[@]+"${region_args[@]}"} \
   --document-name AWS-RunShellScript \
   --comment "read teamshare signup secret" \
   --parameters 'commands=["/usr/local/bin/node /opt/teamshare/packages/server/dist/cli.js signup-secret --show --db /var/lib/teamshare/teamshare.db"]' \
@@ -52,21 +52,21 @@ command_id=$(aws ssm send-command \
 # exactly like "there is no secret".
 for _ in $(seq 1 30); do
   status=$(aws ssm get-command-invocation --command-id "$command_id" \
-    --instance-id "$INSTANCE_ID" "${region_args[@]}" \
+    --instance-id "$INSTANCE_ID" ${region_args[@]+"${region_args[@]}"} \
     --query 'Status' --output text 2>/dev/null || echo Pending)
   case "$status" in
     Success) break ;;
     Failed|TimedOut|Cancelled)
       echo "SSM command $status" >&2
       aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" \
-        "${region_args[@]}" --query 'StandardErrorContent' --output text >&2
+        ${region_args[@]+"${region_args[@]}"} --query 'StandardErrorContent' --output text >&2
       exit 1 ;;
   esac
   sleep 2
 done
 
 secret=$(aws ssm get-command-invocation --command-id "$command_id" \
-  --instance-id "$INSTANCE_ID" "${region_args[@]}" \
+  --instance-id "$INSTANCE_ID" ${region_args[@]+"${region_args[@]}"} \
   --query 'StandardOutputContent' --output text | tr -d '\r\n')
 
 [ -n "$secret" ] || { echo "empty secret returned — is teamshare running on $INSTANCE_ID?" >&2; exit 1; }

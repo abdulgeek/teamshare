@@ -2541,9 +2541,29 @@ describe("resolveInstanceTarget", () => {
       resolveInstanceTarget({
         env: {},
         cwd: home,
+        // homeDir is load-bearing, not decoration: without it the operator-pin
+        // lookup falls back to the real ~/.teamshare/instance.json, so on any
+        // machine that has ever run this for real the assertion passes or
+        // fails according to the developer's home directory rather than the
+        // code. It failed exactly that way once a pin existed locally.
+        homeDir: home,
         scriptPath: join(home, "bin", "teamshare-team"),
       }).ok,
     ).toBe(false);
+  });
+
+  it("reads no operator pin from the real home directory when given one to use", () => {
+    // Pins the isolation the test above depends on: an unset homeDir must not
+    // silently mean "the developer's home".
+    const home = tmp();
+    const pinned = resolveInstanceTarget({
+      env: {},
+      cwd: home,
+      homeDir: home,
+      scriptPath: join(home, "bin", "teamshare-team"),
+    });
+    expect(pinned.ok).toBe(false);
+    if (!pinned.ok) expect(pinned.reason).toContain("does not ship a production instance id");
   });
 
   it(`reads ${"TEAMSHARE_INSTANCE_ID"} from the environment`, () => {
