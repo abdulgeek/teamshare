@@ -146,14 +146,13 @@ TEAMSHARE_SIGNUP_SECRET=$(deploy/aws/signup-secret.sh) teamshare-team create-tea
 nothing beyond Claude Code with teamshare installed:
 
 ```
-/teamshare:generate-secret
 /teamshare:create-team <org-name>
 ```
 
-`generate-secret` first — create-team needs that secret. Recovering the live
-value needs local terraform state or `TEAMSHARE_INSTANCE_ID`, never an id
-shipped in the plugin. The curl'd `teamshare-team.mjs` file remains the
-no-plugin fallback.
+create-team recovers the live secret (local terraform state,
+`TEAMSHARE_INSTANCE_ID`, or a pin written after a previous recover — never
+an id shipped in the plugin). `/teamshare:generate-secret` is optional.
+The curl'd `teamshare-team.mjs` file remains the no-plugin fallback.
 
 The signup secret is never a command-line argument — that would land it in
 shell history and `ps` output. It's read from `TEAMSHARE_SIGNUP_SECRET` in

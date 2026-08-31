@@ -72,6 +72,9 @@ import {
   formatGenerateSecretOutput,
   INSTANCE_ID_ENV,
   resolveInstanceTarget,
+  readOperatorInstancePin,
+  saveOperatorInstancePin,
+  isHostedDefaultServer,
 } from "./team.js";
 
 const NOW = "2026-08-29T00:00:00.000Z";
@@ -2489,6 +2492,13 @@ describe("the signup secret is remembered after it works once", () => {
 // needs no extra step when this machine can talk to AWS.
 // ---------------------------------------------------------------------------
 
+describe("isHostedDefaultServer", () => {
+  it("is true only for the bundled default", () => {
+    expect(isHostedDefaultServer(DEFAULT_SERVER_URL)).toBe(true);
+    expect(isHostedDefaultServer("https://ts.example.com")).toBe(false);
+  });
+});
+
 describe("generateSignupSecret", () => {
   it("is tss_ plus 48 hex characters", () => {
     const secret = generateSignupSecret();
@@ -2550,6 +2560,7 @@ describe("resolveInstanceTarget", () => {
 
   it("reads instance_id from local terraform state, which is gitignored", () => {
     const root = tmp();
+    const home = tmp();
     mkdirSync(join(root, "deploy", "aws"), { recursive: true });
     writeFileSync(
       join(root, "deploy", "aws", "terraform.tfstate"),
@@ -2563,6 +2574,7 @@ describe("resolveInstanceTarget", () => {
     const got = resolveInstanceTarget({
       env: {},
       cwd: root,
+      homeDir: home,
       scriptPath: join(root, "packages", "server", "src", "cli.js"),
     });
     expect(got).toMatchObject({
@@ -2570,6 +2582,54 @@ describe("resolveInstanceTarget", () => {
       instanceId: "i-0abcdef",
       region: "eu-west-1",
       source: "terraform-state",
+    });
+    expect(readOperatorInstancePin({ homeDir: home })).toMatchObject({
+      ok: true,
+      instanceId: "i-0abcdef",
+      region: "eu-west-1",
+      source: "pin",
+    });
+  });
+
+  it("finds terraform state by walking up from a nested cwd (plugin cache / subdir)", () => {
+    const root = tmp();
+    mkdirSync(join(root, "deploy", "aws"), { recursive: true });
+    mkdirSync(join(root, "packages", "plugin", "bin"), { recursive: true });
+    writeFileSync(
+      join(root, "deploy", "aws", "terraform.tfstate"),
+      JSON.stringify({ outputs: { instance_id: { value: "i-0aabbcc" } } }),
+    );
+    const got = resolveInstanceTarget({
+      env: {},
+      cwd: join(root, "packages", "plugin"),
+      scriptPath: join(root, "packages", "plugin", "bin", "teamshare-team"),
+    });
+    expect(got).toMatchObject({
+      ok: true,
+      instanceId: "i-0aabbcc",
+      source: "terraform-state",
+    });
+  });
+
+  it("reads a previously pinned instance when cwd has no terraform state", () => {
+    const home = tmp();
+    const cwd = tmp();
+    saveOperatorInstancePin({
+      instanceId: "i-0eeeeeee",
+      region: "us-east-1",
+      homeDir: home,
+    });
+    const got = resolveInstanceTarget({
+      env: {},
+      cwd,
+      homeDir: home,
+      scriptPath: join(cwd, "bin", "teamshare-team"),
+    });
+    expect(got).toMatchObject({
+      ok: true,
+      instanceId: "i-0eeeeeee",
+      region: "us-east-1",
+      source: "pin",
     });
   });
 });
@@ -2730,8 +2790,20 @@ describe("runTeamCli: generate-secret and create-team recovering via AWS", () =>
     expect(readSavedSignupSecret({ url: base, homeDir: home })).toBe(SECRET);
   });
 
-  it("generate-secret with no instance id mints, and never aims SSM at a compiled-in box", async () => {
+  it("generate-secret against the hosted server with no instance id does not mint", async () => {
     const result = await run(["generate-secret"], {
+      generateSecret: () =>
+        "tss_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr.toLowerCase()).toContain("401");
+    expect(result.stderr).toContain("create-team");
+    expect(result.stdout).not.toContain("tss_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  });
+
+  it("generate-secret against a custom server with no instance id still mints", async () => {
+    const result = await run(["generate-secret", "--server", "https://ts.example.com"], {
       generateSecret: () =>
         "tss_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
@@ -2770,6 +2842,23 @@ describe("runTeamCli: generate-secret and create-team recovering via AWS", () =>
     expect(result.stdout).toContain("create-team — success");
     expect(result.stdout).toContain("AI-Platform");
     expect(findTeamByName(db, "AI-Platform")).toBeTruthy();
+    expect(readSavedSignupSecret({ url: base, homeDir: home })).toBe(SECRET);
+  });
+
+  it("create-team recovers after a minted secret is 401d", async () => {
+    const recover = vi.fn(async () => ({
+      ok: true as const,
+      value: SECRET,
+      source: "aws" as const,
+    }));
+    const result = await run(["create-team", base, "AfterMint"], {
+      env: { [SIGNUP_SECRET_ENV]: "tss_minted_not_on_server" },
+      recoverSignupSecret: recover,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(recover).toHaveBeenCalledOnce();
+    expect(result.stdout).toContain("create-team — success");
+    expect(findTeamByName(db, "AfterMint")).toBeTruthy();
     expect(readSavedSignupSecret({ url: base, homeDir: home })).toBe(SECRET);
   });
 

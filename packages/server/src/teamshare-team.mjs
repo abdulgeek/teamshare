@@ -230,10 +230,80 @@ export function resolveServerUrl(opts = {}) {
 
 export const ADMIN_STORE_DIRNAME = '.teamshare';
 export const ADMIN_STORE_FILENAME = 'admin.json';
+/** Local operator pin: instance id from terraform, never shipped in the plugin. */
+export const INSTANCE_PIN_FILENAME = 'instance.json';
 
 /** @param {string} [homeDir] */
 export function adminStorePath(homeDir) {
   return joinPath(homeDir ?? homedir(), ADMIN_STORE_DIRNAME, ADMIN_STORE_FILENAME);
+}
+
+/** @param {string} [homeDir] */
+export function instancePinPath(homeDir) {
+  return joinPath(homeDir ?? homedir(), ADMIN_STORE_DIRNAME, INSTANCE_PIN_FILENAME);
+}
+
+/**
+ * This machine's remembered EC2 target, written after terraform state is
+ * found once. Marketplace plugin commands often run with cwd = the plugin
+ * cache, so they cannot see deploy/aws/terraform.tfstate — this pin is how
+ * `/teamshare:create-team` still recovers on the operator laptop.
+ * @param {{ homeDir?: string, fs?: typeof import('node:fs') }} [opts]
+ * @returns {{ ok: true, instanceId: string, region?: string, source: 'pin' } | { ok: false, reason: string }}
+ */
+export function readOperatorInstancePin(opts = {}) {
+  const fsImpl = opts.fs ?? nodeFs;
+  try {
+    const parsed = JSON.parse(fsImpl.readFileSync(instancePinPath(opts.homeDir), 'utf8'));
+    const instanceId = typeof parsed.instanceId === 'string' ? parsed.instanceId.trim() : '';
+    if (!/^i-[0-9a-f]+$/i.test(instanceId)) {
+      return { ok: false, reason: 'instance pin has no instance id' };
+    }
+    const regionRaw = typeof parsed.region === 'string' ? parsed.region.trim() : '';
+    return {
+      ok: true,
+      instanceId,
+      region: regionRaw || undefined,
+      source: 'pin',
+    };
+  } catch {
+    return { ok: false, reason: 'no instance pin' };
+  }
+}
+
+/**
+ * @param {{ instanceId: string, region?: string, homeDir?: string, fs?: typeof import('node:fs') }} opts
+ * @returns {{ ok: true, path: string } | { ok: false, message: string }}
+ */
+export function saveOperatorInstancePin(opts) {
+  const fsImpl = opts.fs ?? nodeFs;
+  const instanceId = String(opts.instanceId ?? '').trim();
+  if (!/^i-[0-9a-f]+$/i.test(instanceId)) {
+    return { ok: false, message: 'refusing to pin an invalid instance id' };
+  }
+  const target = instancePinPath(opts.homeDir);
+  try {
+    fsImpl.mkdirSync(dirnamePath(target), { recursive: true, mode: 0o700 });
+    const body = {
+      version: 1,
+      instanceId,
+      ...(opts.region ? { region: String(opts.region).trim() } : {}),
+    };
+    fsImpl.writeFileSync(target, JSON.stringify(body, null, 2) + '\n', { mode: 0o600 });
+    try {
+      fsImpl.chmodSync(target, 0o600);
+    } catch {
+      // Best effort, same as saveAdminEntry.
+    }
+    return { ok: true, path: target };
+  } catch (err) {
+    return { ok: false, message: err && err.message ? err.message : String(err) };
+  }
+}
+
+/** @param {string} url */
+export function isHostedDefaultServer(url) {
+  return normalizeServerUrl(url) === normalizeServerUrl(DEFAULT_SERVER_URL);
 }
 
 /**
@@ -583,6 +653,7 @@ export function canAttemptAwsRecover(opts = {}) {
 export function terraformStateCandidates(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const scriptPath = opts.scriptPath ?? process.argv[1];
+  const env = opts.env ?? process.env;
   const paths = [];
   const seen = new Set();
   const add = (p) => {
@@ -591,16 +662,29 @@ export function terraformStateCandidates(opts = {}) {
       paths.push(p);
     }
   };
-  add(joinPath(cwd, 'terraform.tfstate'));
-  add(joinPath(cwd, 'deploy', 'aws', 'terraform.tfstate'));
-  if (typeof scriptPath === 'string' && scriptPath.trim()) {
-    let dir = dirnamePath(scriptPath.trim());
+  const addWalk = (start) => {
+    if (typeof start !== 'string' || !start.trim()) return;
+    let dir = start.trim();
     for (let i = 0; i < 8; i++) {
+      add(joinPath(dir, 'terraform.tfstate'));
       add(joinPath(dir, 'deploy', 'aws', 'terraform.tfstate'));
       const parent = dirnamePath(dir);
       if (parent === dir) break;
       dir = parent;
     }
+  };
+  addWalk(cwd);
+  if (typeof scriptPath === 'string' && scriptPath.trim()) {
+    addWalk(dirnamePath(scriptPath.trim()));
+  }
+  // Plugin bins often run with cwd = the plugin cache. Claude Code still
+  // leaves the workspace in PWD / INIT_CWD; walk those too.
+  for (const key of ['PWD', 'INIT_CWD', 'CLAUDE_PROJECT_DIR']) {
+    const value = env[key];
+    if (typeof value === 'string') addWalk(value);
+  }
+  if (Array.isArray(opts.extraRoots)) {
+    for (const root of opts.extraRoots) addWalk(root);
   }
   return paths;
 }
@@ -650,9 +734,24 @@ export function resolveInstanceTarget(opts = {}) {
       source: opts.instanceId ? 'argument' : 'env',
     };
   }
-  const fromTf = readTerraformInstanceTarget(opts);
+  const fromTf = readTerraformInstanceTarget({ ...opts, env });
   if (fromTf.ok) {
-    return { ...fromTf, region: fromTf.region ?? region };
+    const resolvedRegion = fromTf.region ?? region;
+    // Only pin when the caller named a homeDir (runTeamCli always does).
+    // Tests that omit it must not write into the real ~/.teamshare.
+    if (opts.homeDir) {
+      saveOperatorInstancePin({
+        instanceId: fromTf.instanceId,
+        region: resolvedRegion,
+        homeDir: opts.homeDir,
+        fs: opts.fs,
+      });
+    }
+    return { ...fromTf, region: resolvedRegion };
+  }
+  const fromPin = readOperatorInstancePin({ homeDir: opts.homeDir, fs: opts.fs });
+  if (fromPin.ok) {
+    return { ...fromPin, region: fromPin.region ?? region };
   }
   return {
     ok: false,
@@ -691,6 +790,7 @@ export async function recoverSignupSecretFromAws(opts = {}) {
     fs: opts.fs,
     cwd: opts.cwd,
     scriptPath: opts.scriptPath,
+    homeDir,
   });
   if (!target.ok) return { ok: false, reason: target.reason };
 
@@ -1563,8 +1663,10 @@ Credentials are never accepted as arguments — they would land in shell history
                on a real terminal. Recovers via AWS SSM only when this machine already
                knows the instance (${INSTANCE_ID_ENV} or local terraform state) — never
                from a compiled-in id.
-  generate-secret  mint a correctly-formed signup secret. Recovers the live value
-               instead when ${INSTANCE_ID_ENV} or local terraform state names the box.
+  generate-secret  recover the live signup secret when this machine can name the
+               instance. Against the hosted default server it will not mint — a
+               fresh tss_ value 401s there. Use --new only when standing up a
+               server that does not exist yet.
   the rest     need this team's admin token — the value create-team printed. create-team saves it
                to ~/${ADMIN_STORE_DIRNAME}/${ADMIN_STORE_FILENAME} (owner-only) and these commands
                read it back, so normally there is nothing to supply. Override with
@@ -1760,11 +1862,31 @@ export async function runTeamCli(argv, opts = {}) {
       fs: fsImpl,
       cwd: opts.cwd,
       scriptPath: opts.argv1 ?? process.argv[1],
+      homeDir,
     });
-    // No named box on this machine → mint. Recovering via SSM is operator-
-    // only (env or local terraform state). A public plugin must not aim SSM
-    // at a compiled-in instance.
+    // No named box on this machine → mint only for a server you are about
+    // to stand up. Recovering via SSM is operator-only (env, local
+    // terraform state, or a pin written after the first find). A public
+    // plugin must not aim SSM at a compiled-in instance.
     if (!target.ok && !recoverSignupSecret) {
+      // Minting is for a server you are about to configure. The hosted
+      // default is already running: a fresh tss_ is the 401 that
+      // `/teamshare:create-team` just hit. Fail instead of handing the
+      // agent a value it will paste.
+      if (isHostedDefaultServer(url)) {
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr:
+            `could not recover the live signup secret (${target.reason}).\n\n` +
+            `This plugin talks to the hosted server at ${url}. A newly minted secret is not ` +
+            `on that server and create-team will reject it (401).\n\n` +
+            `Open the checkout that applied Terraform so this command can see ` +
+            `deploy/aws/terraform.tfstate, or set ${INSTANCE_ID_ENV}. Then run ` +
+            `\`${cmdName} create-team "<name>"\` — create-team recovers the live secret itself.\n\n` +
+            `Standing up a brand-new server instead? ${cmdName} generate-secret --new\n`,
+        };
+      }
       const value = mintSecret();
       return {
         exitCode: 0,
@@ -1850,6 +1972,7 @@ export async function runTeamCli(argv, opts = {}) {
         fs: fsImpl,
         cwd: opts.cwd,
         scriptPath: opts.argv1 ?? process.argv[1],
+        homeDir,
       });
       if (recoverSignupSecret || target.ok) {
         const recovered = recoverSignupSecret
@@ -1908,12 +2031,42 @@ export async function runTeamCli(argv, opts = {}) {
       };
     }
 
-    const created = await createTeamOverHttp({
+    let created = await createTeamOverHttp({
       url,
       name: parsed.name,
       secret: secretResult.value,
       fetchImpl,
     });
+    // Plugin agents were piping a generate-secret mint into create-team.
+    // That 401s on the live server. If this machine can recover, do that
+    // once instead of dying on the minted value.
+    if (
+      !created.ok &&
+      created.status === 401 &&
+      secretResult.source !== 'aws'
+    ) {
+      const recovered = recoverSignupSecret
+        ? await recoverSignupSecret({ env, homeDir, fs: fsImpl })
+        : await recoverSignupSecretFromAws({
+            env,
+            homeDir,
+            fs: fsImpl,
+            cwd: opts.cwd,
+            scriptPath: opts.argv1 ?? process.argv[1],
+          });
+      if (recovered.ok && recovered.value !== secretResult.value) {
+        const retried = await createTeamOverHttp({
+          url,
+          name: parsed.name,
+          secret: recovered.value,
+          fetchImpl,
+        });
+        if (retried.ok) {
+          created = retried;
+          secretResult = { ok: true, value: recovered.value, source: recovered.source ?? 'aws' };
+        }
+      }
+    }
     if (!created.ok) {
       return { exitCode: 1, stdout: '', stderr: `failed to create team: ${created.message}\n` };
     }

@@ -41,18 +41,20 @@ If your team already uses teamshare, ask whoever set it up to run
 
 ## Step 2A · You're setting up the team
 
-Two commands, in this order. The secret first — create-team needs it.
+One command — the org name only. Do not paste a signup secret.
 
 ```
-/teamshare:generate-secret
 /teamshare:create-team <org-name>
 ```
 
-`generate-secret` mints a signup secret (or recovers the live one if this
-machine already knows the instance via local terraform state or
-`TEAMSHARE_INSTANCE_ID` — never an id shipped in the plugin). Save what it
-prints. Then create-team uses it and remembers it, so every later team is
-just a name.
+create-team recovers the live signup secret on this machine (local terraform
+state, a pin from a previous recover, or `TEAMSHARE_INSTANCE_ID` — never an
+id shipped in the plugin). A freshly minted `tss_…` is **not** that secret
+and the hosted server will reject it.
+
+`/teamshare:generate-secret` is optional: it prints a copy of the live value
+for a password manager. Use `--new` only when you are standing up a server
+that does not exist yet.
 
 ```
 teamshare create-team — success
@@ -318,7 +320,6 @@ Same thing, one file, no address needed:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdulgeek/teamshare/main/packages/server/src/teamshare-team.mjs -o teamshare-team.mjs
-node teamshare-team.mjs generate-secret
 node teamshare-team.mjs create-team "<org-name>"
 node teamshare-team.mjs invite sam@acme.com "Sam"
 node teamshare-team.mjs roster
@@ -338,7 +339,7 @@ Code commands are this same file with a nicer front door.
 | Command                             | Does                                                  |
 | ----------------------------------- | ----------------------------------------------------- |
 | `/teamshare:share <message>`        | Publish a note to the team                            |
-| `/teamshare:generate-secret`        | Mint a signup secret (first — create-team needs this) |
+| `/teamshare:generate-secret`        | Recover the live signup secret (optional; not required before create-team) |
 | `/teamshare:create-team <org-name>` | Create a team, save its admin token                   |
 | `/teamshare:invite <email> [name]`  | One person's token + the message to send them         |
 | `/teamshare:roster`                 | Who's on the team, who never connected                |
