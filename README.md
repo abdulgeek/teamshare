@@ -47,8 +47,12 @@ and you're on the board. No server address, no config file, no git setup.
 ### Starting a team (lead)
 
 ```
-/teamshare:create-team Platform
+/teamshare:create-team Platform <your-org-signup-secret>
 ```
+
+The signup secret is what your server uses to gate team creation — your
+organisation has one, and whoever runs the server can give it to you. It is the
+only time you ever supply it.
 
 ```
 teamshare create-team — success
@@ -81,28 +85,35 @@ This is an **admin** token. It invites, revokes, reads the roster and rotates
 itself, and it can read nothing — not shares, not receipts, not the digest.
 You cannot log in with it, which is why the next step matters.
 
-Creating a team needs your organisation's signup secret. It has to come from
-the environment rather than this chat, so that a live credential never lands
-in a stored transcript — start Claude Code with it set:
+**About typing the secret here.** It lands in this conversation's transcript.
+That is a smaller thing than it sounds: the signup secret only permits creating
+teams — it opens no team's shares, receipts or roster — and it is meant to be
+distributed across your org anyway. It never reaches a command line either: the
+command writes it to a private file, passes the path, and deletes it.
+
+If you would still rather it were not recorded, set it in the environment
+instead and leave it out of the command:
 
 ```bash
 TEAMSHARE_SIGNUP_SECRET=<your-org-secret> claude
 ```
 
-Or skip Claude Code entirely and run the same command in a terminal, which
-prompts for the secret without it appearing anywhere:
+Or stay out of Claude Code entirely — this prompts for the secret with hidden
+input. (`teamshare-team` is a bare command only *inside* Claude Code, which
+puts the plugin's `bin/` on the PATH of commands it runs; a terminal you open
+yourself needs the file.)
 
 ```bash
-teamshare-team create-team "Platform"
+node packages/server/src/teamshare-team.mjs create-team "Platform"
 ```
 
-**Don't know the secret?** Whoever runs the server has it. If that's you and
-the server was deployed from this repo, `deploy/aws/signup-secret.sh` reads it
-back over SSM and prints nothing else, so it composes into one command that
-never shows the value:
+**Don't know the secret?** Whoever runs the server has it. If that is you and
+you deployed from this repo, `deploy/aws/signup-secret.sh` reads it back over
+SSM and prints nothing else, so it composes into one command that never shows
+the value:
 
 ```bash
-TEAMSHARE_SIGNUP_SECRET=$(deploy/aws/signup-secret.sh) teamshare-team create-team "Platform"
+TEAMSHARE_SIGNUP_SECRET=$(deploy/aws/signup-secret.sh) node packages/server/src/teamshare-team.mjs create-team "Platform"
 ```
 
 ### Inviting people
@@ -370,7 +381,7 @@ after the first token.
 | Command | Does |
 | --- | --- |
 | `/teamshare:share <message>` | Publish a note to the team |
-| `/teamshare:create-team <name>` | Create a team; saves its admin token here |
+| `/teamshare:create-team <name> [secret]` | Create a team; saves its admin token here |
 | `/teamshare:invite <email> [name]` | Mint one person's token + the message to send them |
 | `/teamshare:roster` | Who's on the team, who never connected |
 | `/teamshare:revoke <email>` | Kill every token that person holds |
@@ -387,7 +398,7 @@ such entry: run them from a checkout as
 
 | Command | Does | Credential from |
 | --- | --- | --- |
-| `teamshare-team create-team "<name>"` | New team + admin token | `TEAMSHARE_SIGNUP_SECRET`, or prompt |
+| `teamshare-team create-team "<name>"` | New team + admin token | `TEAMSHARE_SIGNUP_SECRET`, `--signup-secret-file`, or prompt |
 | `teamshare-team invite <email> ["<name>"]` | One person's personal token | saved store |
 | `teamshare-team revoke <email>` | Kill all of that person's tokens | saved store |
 | `teamshare-team roster` | Who's joined, who hasn't | saved store |
@@ -397,8 +408,10 @@ such entry: run them from a checkout as
 | `teamshare-connect --list` | Show what it detects, write nothing | — |
 
 Shared options: `--server <url>` for your own server, `--team "<name>"` when
-one machine administers several teams. Connector flags: `--dry-run`,
-`--only cursor,codex`, `--force`.
+one machine administers several teams. `create-team` also takes
+`--signup-secret-file <path>`, for callers with no terminal to be prompted on —
+that is how the slash command supplies the secret without putting it in `ps`.
+Connector flags: `--dry-run`, `--only cursor,codex`, `--force`.
 
 **Tools your assistant calls for you** — ask in plain language, never type
 these: `share`, `unread`, `read_share`, `acknowledge`, `list_shares`,
@@ -427,10 +440,15 @@ gets a 401 — `/teamshare:status` names that mistake specifically, because it
 looks exactly like a bad token otherwise.
 
 **Worth knowing:** `/teamshare:invite` prints a live token into your Claude
-Code transcript, because you have to send it to someone. If that matters for
-your threat model, run `teamshare-team invite` in a terminal instead — same
-command, same output, no transcript. Either way `/teamshare:revoke` undoes it
-in one step.
+Code transcript, because you have to send it to someone — and
+`/teamshare:create-team` records the signup secret if you pass it there. Both
+are deliberate: the alternative was a tool you could not use without leaving
+it. Neither value ever reaches a command line, where `ps` would see it.
+
+If that matters for your threat model, run either command in a terminal
+instead — same code, same output, no transcript — and note that
+`/teamshare:revoke` invalidates a personal token in one step, while the signup
+secret opens no team's data at all.
 
 ---
 
