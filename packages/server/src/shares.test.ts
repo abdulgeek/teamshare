@@ -130,6 +130,66 @@ describe('createShare', () => {
   });
 });
 
+describe('createShare: recipients (Task 7)', () => {
+  it('defaults to an empty recipients list, meaning the whole team', () => {
+    const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    expect(getShare(scope, id)?.recipients).toEqual([]);
+  });
+
+  it('stores normalized, deduplicated recipient addresses and reports them back sorted', () => {
+    const { id } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'x', priority: 'fyi', recipients: ['SAM@Team.com ', 'priya@team.com', 'priya@team.com'] },
+      NOW,
+    );
+    expect(getShare(scope, id)?.recipients).toEqual(['priya@team.com', 'sam@team.com']);
+  });
+
+  it('never counts the sender as notified, even if they name themselves as a recipient', () => {
+    const { notified } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'x', priority: 'fyi', recipients: ['adnan@team.com', 'sam@team.com'] },
+      NOW,
+    );
+    expect(notified).toBe(1);
+  });
+
+  it('writes share_recipients rows scoped to the calling team only', () => {
+    const { id } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'x', priority: 'fyi', recipients: ['sam@team.com'] },
+      NOW,
+    );
+    const rows = db.prepare('SELECT team_id, email FROM share_recipients WHERE share_id = ?').all(id) as {
+      team_id: string;
+      email: string;
+    }[];
+    expect(rows).toEqual([{ team_id: scope.teamId, email: 'sam@team.com' }]);
+  });
+});
+
+describe('retractShare: recipients cascade', () => {
+  it('deletes share_recipients rows via ON DELETE CASCADE, same as receipts', () => {
+    const { id } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'x', priority: 'fyi', recipients: ['sam@team.com'] },
+      NOW,
+    );
+    const before = db
+      .prepare('SELECT COUNT(*) AS n FROM share_recipients WHERE team_id = ? AND share_id = ?')
+      .get(scope.teamId, id) as { n: number };
+    expect(before.n).toBe(1);
+
+    const result = retractShare(scope, id, 'adnan@team.com');
+    expect(result.ok).toBe(true);
+
+    const after = db
+      .prepare('SELECT COUNT(*) AS n FROM share_recipients WHERE team_id = ? AND share_id = ?')
+      .get(scope.teamId, id) as { n: number };
+    expect(after.n).toBe(0);
+  });
+});
+
 describe('listShares', () => {
   it('returns newest first and filters by tag and sender', () => {
     createShare(scope, 'adnan@team.com', { what: 'first', priority: 'fyi', tags: ['auth'] }, '2026-08-01T00:00:00.000Z');

@@ -74,6 +74,21 @@ const AND_RELEVANT = `AND (s.priority = 'blocking' OR s.created_at >= ?)`;
 // See project.ts / the design doc for why "no remote, no scope" on both ends.
 const AND_PROJECT = `AND (s.project IS NULL OR s.project = ?)`;
 
+// Task 7 (address a share to specific people): a share with no
+// share_recipients rows is unaddressed and team-wide — the first EXISTS arm
+// is what makes that true; drop it and every share ever created before this
+// table existed (and every future team-wide share) would vanish for
+// everyone. A share WITH rows is visible only to the people named in them —
+// never to the sender, who WHERE_UNREAD already excludes regardless. Unlike
+// AND_PROJECT this clause is never omitted: eligibility to see a share at
+// all isn't optional the way narrowing-by-repo is.
+const AND_RECIPIENT = `
+  AND (
+    NOT EXISTS (SELECT 1 FROM share_recipients sr WHERE sr.team_id = ? AND sr.share_id = s.id)
+    OR EXISTS (SELECT 1 FROM share_recipients sr WHERE sr.team_id = ? AND sr.share_id = s.id AND sr.email = ?)
+  )
+`;
+
 export interface UnreadOptions {
   /** Include shares past the relevance window. `list_shares` and an explicit ask do; the digest does not. */
   includeOld?: boolean;
@@ -121,8 +136,12 @@ export function getUnread(
   // back in in the right order.
   const relevance: Clause | null = includeOld ? null : { sql: AND_RELEVANT, args: [relevantFrom] };
   const project: Clause | null = options.project ? { sql: AND_PROJECT, args: [options.project] } : null;
+  // Not optional like `project` — always active, so never a `Clause | null`.
+  // A share addressed to someone else was never unread for this reader at
+  // all, exactly like a share scoped to a repo they're not in.
+  const recipient: Clause = { sql: AND_RECIPIENT, args: [scope.teamId, scope.teamId, me] };
 
-  const { sql: extraSql, args: extraArgs } = composeClauses(relevance, project);
+  const { sql: extraSql, args: extraArgs } = composeClauses(relevance, project, recipient);
 
   const { n: total } = scope.db
     .prepare(`SELECT COUNT(*) AS n FROM shares s ${base.sql} ${extraSql}`)
@@ -131,10 +150,11 @@ export function getUnread(
   // Counted separately rather than inferred from `total`, so a caller can say
   // exactly how many it is not showing without a second round trip. This is
   // relevance's own count (shares hidden ONLY by the window), so it composes
-  // with `project` — a share outside the reader's repo was never unread for
-  // them at all, and must not inflate "older" — but never with `relevance`
-  // itself, which is what "older" is counting the absence of.
-  const { sql: olderExtraSql, args: olderExtraArgs } = composeClauses(project);
+  // with `project` and `recipient` — a share outside the reader's repo, or
+  // not addressed to them, was never unread for them at all, and must not
+  // inflate "older" — but never with `relevance` itself, which is what
+  // "older" is counting the absence of.
+  const { sql: olderExtraSql, args: olderExtraArgs } = composeClauses(project, recipient);
   const { n: older } = includeOld
     ? { n: 0 }
     : (scope.db

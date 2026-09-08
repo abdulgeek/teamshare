@@ -503,6 +503,116 @@ function seedV4FatShape(raw: Database.Database, teamId: string, tokenHash: strin
     .run(hashToken('tsm_v4fat_member0'), teamId, 'member0@team.com', 'Member 0', T0);
 }
 
+// A v5-shaped database: today's real production shape post project-scoping
+// migration (shares.project column and its index present; no
+// share_recipients table yet). Built by hand for the same reason
+// createV3Db/createV4Db are: openDb always carries a file all the way to
+// CURRENT_SCHEMA_VERSION in one call, so fault-injecting the 5->6 step needs
+// a genuine v5 starting point, not one already migrated further.
+function createV5Db(dbPath: string): Database.Database {
+  const raw = new Database(dbPath);
+  raw.exec(`
+    CREATE TABLE config (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    CREATE TABLE teams (
+      id               TEXT PRIMARY KEY,
+      name             TEXT NOT NULL,
+      token_hash       TEXT NOT NULL UNIQUE,
+      signup_note      TEXT,
+      created_at       TEXT NOT NULL,
+      created_by_email TEXT
+    );
+    CREATE TABLE members (
+      team_id    TEXT NOT NULL,
+      email      TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      first_seen TEXT NOT NULL,
+      last_seen  TEXT NOT NULL,
+      PRIMARY KEY (team_id, email)
+    );
+    CREATE TABLE shares (
+      id           TEXT NOT NULL,
+      team_id      TEXT NOT NULL,
+      sender_email TEXT NOT NULL,
+      what         TEXT NOT NULL,
+      why          TEXT,
+      action       TEXT,
+      tags         TEXT NOT NULL DEFAULT '[]',
+      priority     TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      stale_at     TEXT,
+      project      TEXT,
+      PRIMARY KEY (id),
+      UNIQUE (team_id, id)
+    );
+    CREATE TABLE receipts (
+      team_id      TEXT NOT NULL,
+      share_id     TEXT NOT NULL,
+      member_email TEXT NOT NULL,
+      status       TEXT NOT NULL,
+      at           TEXT NOT NULL,
+      PRIMARY KEY (team_id, share_id, member_email),
+      FOREIGN KEY (team_id, share_id) REFERENCES shares (team_id, id) ON DELETE CASCADE
+    );
+    CREATE TABLE member_tokens (
+      token_hash   TEXT PRIMARY KEY,
+      team_id      TEXT NOT NULL,
+      email        TEXT NOT NULL,
+      name         TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      last_used_at TEXT,
+      revoked_at   TEXT
+    );
+    CREATE INDEX idx_shares_team_created ON shares (team_id, created_at);
+    CREATE INDEX idx_receipts_team_share ON receipts (team_id, share_id);
+    CREATE INDEX idx_member_tokens_team_email ON member_tokens (team_id, email);
+    CREATE INDEX idx_shares_team_project ON shares (team_id, project);
+  `);
+  raw.prepare(`INSERT INTO config (key, value) VALUES ('schema_version', '5')`).run();
+  return raw;
+}
+
+// Seeds a genuine v5 fixture: one team, two members each with a live
+// member_token, two shares (one stale, one project-scoped), one receipt —
+// the v5 analogue of seedV4FatShape.
+function seedV5FatShape(raw: Database.Database, teamId: string, tokenHash: string): void {
+  raw
+    .prepare(
+      `INSERT INTO teams (id, name, token_hash, signup_note, created_at, created_by_email)
+       VALUES (?, 'v5 team', ?, NULL, ?, NULL)`,
+    )
+    .run(teamId, tokenHash, T0);
+  raw
+    .prepare(`INSERT INTO members (team_id, email, name, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)`)
+    .run(teamId, 'member0@team.com', 'Member 0', T0, T0);
+  raw
+    .prepare(`INSERT INTO members (team_id, email, name, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)`)
+    .run(teamId, 'member1@team.com', 'Member 1', T0, T0);
+  raw
+    .prepare(
+      `INSERT INTO shares (id, team_id, sender_email, what, why, action, tags, priority, created_at, stale_at, project)
+       VALUES (?, ?, ?, ?, NULL, NULL, '[]', 'fyi', ?, NULL, ?)`,
+    )
+    .run('shr_v5fat_a', teamId, 'member0@team.com', 'v5 fat fixture share a', T0, 'github.com/acme/api');
+  raw
+    .prepare(
+      `INSERT INTO shares (id, team_id, sender_email, what, why, action, tags, priority, created_at, stale_at, project)
+       VALUES (?, ?, ?, ?, NULL, NULL, '[]', 'fyi', ?, ?, NULL)`,
+    )
+    .run('shr_v5fat_stale', teamId, 'member1@team.com', 'v5 fat fixture stale share', T0, T0);
+  raw
+    .prepare(`INSERT INTO receipts (team_id, share_id, member_email, status, at) VALUES (?, ?, ?, ?, ?)`)
+    .run(teamId, 'shr_v5fat_a', 'member1@team.com', 'viewed', T0);
+  raw
+    .prepare(
+      `INSERT INTO member_tokens (token_hash, team_id, email, name, created_at, last_used_at, revoked_at)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+    )
+    .run(hashToken('tsm_v5fat_member0'), teamId, 'member0@team.com', 'Member 0', T0);
+}
+
 describe('schema migration', () => {
   let dir: string;
 
@@ -532,7 +642,7 @@ describe('schema migration', () => {
           | undefined;
         const teams = opened.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
         const members = opened.prepare('SELECT COUNT(*) AS n FROM members').get() as { n: number };
-        expect(version?.value).toBe('5');
+        expect(version?.value).toBe('6');
         expect(teams.n).toBe(1);
         expect(members.n).toBe(6);
       } finally {
@@ -598,7 +708,7 @@ describe('schema migration', () => {
           const recoveredVersion = recovered
             .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
             .get() as { value: string };
-          expect(recoveredVersion.value).toBe('5');
+          expect(recoveredVersion.value).toBe('6');
           const teams = recovered.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
           expect(teams.n).toBe(1);
           const members = recovered.prepare('SELECT COUNT(*) AS n FROM members').get() as { n: number };
@@ -657,7 +767,7 @@ describe('schema migration', () => {
           const recoveredVersion = recovered
             .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
             .get() as { value: string };
-          expect(recoveredVersion.value).toBe('5');
+          expect(recoveredVersion.value).toBe('6');
           const shares = recovered.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
           expect(shares.n).toBe(2);
         } finally {
@@ -710,7 +820,7 @@ describe('schema migration', () => {
           const recoveredVersion = recovered
             .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
             .get() as { value: string };
-          expect(recoveredVersion.value).toBe('5');
+          expect(recoveredVersion.value).toBe('6');
           const recoveredCols = recovered.prepare('PRAGMA table_info(shares)').all() as { name: string }[];
           expect(recoveredCols.some((c) => c.name === 'project')).toBe(true);
           const shares = recovered.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
@@ -732,7 +842,81 @@ describe('schema migration', () => {
     const freshScope = makeTeamScope(freshDb, getOrCreateDefaultTeamId(freshDb));
     const { id } = createShare(freshScope, 'a@t.com', { what: 'x', priority: 'fyi' }, T0);
     expect(getShare(freshScope, id)?.project).toBeNull();
-    expect(readConfig(freshDb, 'schema_version')).toBe('5');
+    expect(readConfig(freshDb, 'schema_version')).toBe('6');
+    freshDb.close();
+  });
+
+  // The 5->6 migration (Task 7: address a share to specific people): a
+  // brand-new table, like the 3->4 member_tokens step — a plain CREATE, not
+  // a rebuild. Fault injection here proves the same thing the 3->4 block
+  // does: a fault leaves no trace of the new table (or leaves it completely
+  // empty), and a clean reopen still reaches it.
+  describe('fault injection: the 5->6 migration (share_recipients) is atomic', () => {
+    const subSteps = ['5->6:share_recipients-table', '5->6:index', '5->6:version'];
+
+    for (const label of subSteps) {
+      it(`rolls back completely when the migration throws at "${label}"`, () => {
+        const dbPath = join(dir, `fault56-${label.replace(/[^a-z0-9]/gi, '_')}.db`);
+        const raw = createV5Db(dbPath);
+        seedV5FatShape(raw, 'tm_v5faultinject', hashToken('ts_v5faultinject'));
+        raw.close();
+
+        const probeDb = new Database(dbPath);
+        probeDb.pragma('foreign_keys = ON');
+        expect(() => {
+          migrateSchema(probeDb, '2026-08-29T00:00:00.000Z', (l) => {
+            if (l === label) throw new Error(`injected fault at ${label}`);
+          });
+        }).toThrow(`injected fault at ${label}`);
+
+        const version = probeDb.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as
+          | { value: string }
+          | undefined;
+        expect(version?.value).toBe('5');
+        // Existing v5 data is completely untouched by the failed 5->6 step.
+        const shareCount = probeDb.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
+        expect(shareCount.n).toBe(2);
+        const tableExists = probeDb
+          .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='share_recipients'`)
+          .all();
+        // share_recipients may or may not exist depending on which sub-step
+        // failed, but if it does, it must be empty — a fault must never
+        // leave a half-created (or populated) recipients table.
+        if (tableExists.length > 0) {
+          const recipientCount = probeDb.prepare('SELECT COUNT(*) AS n FROM share_recipients').get() as {
+            n: number;
+          };
+          expect(recipientCount.n).toBe(0);
+        }
+        probeDb.close();
+
+        const recovered = openDb(dbPath);
+        try {
+          const recoveredVersion = recovered
+            .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
+            .get() as { value: string };
+          expect(recoveredVersion.value).toBe('6');
+          const shares = recovered.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
+          expect(shares.n).toBe(2);
+        } finally {
+          recovered.close();
+        }
+      });
+    }
+  });
+
+  // The brief's own shape for Task 7: share_recipients starts out empty
+  // (mints nothing, same principle as member_tokens at the 3->4 step) and an
+  // unaddressed share's recipients read back as [], not as an error or a
+  // populated "everyone" list — see ShareRow.recipients / AND_RECIPIENT.
+  it('adds share_recipients at schema 6 as an empty table, without disturbing existing rows', () => {
+    const freshDb = openDb(':memory:');
+    const freshScope = makeTeamScope(freshDb, getOrCreateDefaultTeamId(freshDb));
+    const { id } = createShare(freshScope, 'a@t.com', { what: 'x', priority: 'fyi' }, T0);
+    expect(getShare(freshScope, id)?.recipients).toEqual([]);
+    const count = freshDb.prepare('SELECT COUNT(*) AS n FROM share_recipients').get() as { n: number };
+    expect(count.n).toBe(0);
+    expect(readConfig(freshDb, 'schema_version')).toBe('6');
     freshDb.close();
   });
 
@@ -773,7 +957,7 @@ describe('schema migration', () => {
     const migrated = openDb(dbPath);
     const fresh = openDb(':memory:');
     try {
-      for (const table of ['teams', 'members', 'shares', 'receipts', 'config', 'member_tokens']) {
+      for (const table of ['teams', 'members', 'shares', 'receipts', 'config', 'member_tokens', 'share_recipients']) {
         expect(migrated.prepare(`PRAGMA table_info(${table})`).all()).toEqual(
           fresh.prepare(`PRAGMA table_info(${table})`).all(),
         );
@@ -928,7 +1112,7 @@ describe('schema migration', () => {
       const version = opened.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as {
         value: string;
       };
-      expect(version.value).toBe('5');
+      expect(version.value).toBe('6');
       const teams = opened.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
       expect(teams.n).toBe(0);
     } finally {
@@ -957,7 +1141,7 @@ describe('schema migration', () => {
       const version = opened.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as {
         value: string;
       };
-      expect(version.value).toBe('5');
+      expect(version.value).toBe('6');
       const cols = opened.prepare('PRAGMA table_info(shares)').all() as { name: string }[];
       expect(cols.some((c) => c.name === 'stale_at')).toBe(true);
       expect(cols.some((c) => c.name === 'team_id')).toBe(true);

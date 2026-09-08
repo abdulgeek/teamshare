@@ -139,6 +139,20 @@ describe('cross-team isolation', () => {
     expect(getUnread(teamB, 'reader@company.com', NOW, 14).total).toBe(1);
     expect(getUnread(teamB, 'reader@company.com', NOW, 14).shares[0].id).toBe(b.id);
   });
+
+  it('addressing a recipient in one team never leaks a share into another team\'s digest for a shared email', () => {
+    // shared@company.com is a member of BOTH teams (see the outer
+    // beforeEach); reader@company.com only of team B. Team A addresses a
+    // share to reader@company.com's exact address — if the recipient check
+    // ever forgot to scope share_recipients by team_id, this share_id/email
+    // pair could wrongly surface in team B's digest for that email.
+    createShare(
+      teamA, 'shared@company.com',
+      { what: 'Team A note misaddressed to a Team B email', priority: 'fyi', recipients: ['reader@company.com'] },
+      NOW,
+    );
+    expect(getUnread(teamB, 'reader@company.com', NOW, 14).total).toBe(0);
+  });
 });
 
 
@@ -297,5 +311,86 @@ describe('getUnread: project scoping', () => {
     const byWhat = Object.fromEntries(digest.shares.map((s) => [s.what, s.project]));
     expect(byWhat['api thing']).toBe('github.com/acme/api');
     expect(byWhat['team-wide note']).toBeNull();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Recipients (Task 7): a share can be addressed to specific people rather
+// than the whole team. Verbatim from the task-7 brief's own Step 1 tests.
+// ---------------------------------------------------------------------------
+
+describe('getUnread: recipients', () => {
+  it('reaches only the people it names, and never the sender', () => {
+    createShare(scope, 'adnan@team.com', { what: 'for sam', priority: 'fyi', recipients: ['sam@team.com'] }, NOW);
+    expect(getUnread(scope, 'sam@team.com', NOW, 14).total).toBe(1);
+    expect(getUnread(scope, 'priya@team.com', NOW, 14).total).toBe(0);
+    expect(getUnread(scope, 'adnan@team.com', NOW, 14).total).toBe(0);
+  });
+
+  it('normalises recipient addresses the way every other email is normalised', () => {
+    createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi', recipients: ['SAM@Team.com '] }, NOW);
+    expect(getUnread(scope, 'sam@team.com', NOW, 14).total).toBe(1);
+  });
+
+  it('counts only the addressed people as notified', () => {
+    const { notified } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'x', priority: 'fyi', recipients: ['sam@team.com', 'priya@team.com'] }, NOW,
+    );
+    expect(notified).toBe(2);
+  });
+
+  it('treats an empty recipient list as the whole team, not as nobody', () => {
+    createShare(scope, 'adnan@team.com', { what: 'everyone', priority: 'fyi', recipients: [] }, NOW);
+    expect(getUnread(scope, 'priya@team.com', NOW, 14).total).toBe(1);
+  });
+
+  // The controller-flagged case: THREE independent conditional clauses
+  // (relevance, project, recipient) all landing in one query is exactly
+  // where a silent cross-wiring shows up — a digest that filters on the
+  // wrong column while every single- and double-feature test above still
+  // passes. This exercises all three together, from both a named
+  // recipient's side and a bystander's.
+  it('composes relevance, project, and recipient filtering together, not just each alone', () => {
+    const daysAgo = (n: number) => new Date(Date.parse(NOW) - n * 86_400_000).toISOString();
+
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'old api note for sam', priority: 'fyi', project: 'github.com/acme/api', recipients: ['sam@team.com'] },
+      daysAgo(10),
+    );
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'fresh api note for sam', priority: 'fyi', project: 'github.com/acme/api', recipients: ['sam@team.com'] },
+      daysAgo(1),
+    );
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'fresh api note for priya', priority: 'fyi', project: 'github.com/acme/api', recipients: ['priya@team.com'] },
+      daysAgo(1),
+    );
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'fresh web note for sam', priority: 'fyi', project: 'github.com/acme/web', recipients: ['sam@team.com'] },
+      daysAgo(1),
+    );
+
+    const sam = getUnread(scope, 'sam@team.com', NOW, 14, { project: 'github.com/acme/api' });
+    // Only the fresh api note addressed to sam survives all three filters:
+    // relevance (not too old), project (api, not web), recipient (sam, not
+    // priya).
+    expect(sam.shares.map((s) => s.what)).toEqual(['fresh api note for sam']);
+    expect(sam.total).toBe(1);
+    // The old api note IS addressed to sam and in scope, but past the
+    // relevance window — held back and counted as "older", never conflated
+    // with the notes that were never addressed to (or in scope for) sam at
+    // all, which must not inflate this count.
+    expect(sam.older).toBe(1);
+
+    // From priya's side, in the same repo: only the note addressed to her.
+    const priya = getUnread(scope, 'priya@team.com', NOW, 14, { project: 'github.com/acme/api' });
+    expect(priya.shares.map((s) => s.what)).toEqual(['fresh api note for priya']);
+    expect(priya.older).toBe(0);
   });
 });

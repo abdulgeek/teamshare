@@ -71,7 +71,17 @@ export function getReceipts(
   const dismissed: string[] = [];
   const unseen: UnseenMember[] = [];
 
-  for (const member of listMembers(scope)) {
+  // An addressed share's "expected reader" set is the people it was sent
+  // to, not the whole team — reporting every other member as "not yet seen
+  // by" would be wrong for a share only Sam was ever meant to read. An
+  // unaddressed (team-wide) share keeps the original denominator: every
+  // current member, same as before Task 7.
+  const recipientSet = share.recipients.length > 0 ? new Set(share.recipients) : null;
+  const expectedReaders = recipientSet
+    ? listMembers(scope).filter((m) => recipientSet.has(m.email))
+    : listMembers(scope);
+
+  for (const member of expectedReaders) {
     if (member.email === share.sender_email) continue; // sender never appears
     const status = byEmail.get(member.email);
     if (status === 'viewed') viewed.push(member.email);

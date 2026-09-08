@@ -20,6 +20,14 @@ export interface ShareInput {
    * today" published from inside a repo is not about that repo).
    */
   project?: string;
+  /**
+   * The people this share is addressed to. Omitted or empty means the whole
+   * team — see unread.ts's AND_RECIPIENT clause and ShareRow.recipients below
+   * for why an empty list must never be read as "nobody". Normalised the same
+   * way every other email in this codebase is (normalizeEmail), deduplicated,
+   * and never includes the sender: a share never notifies its own author.
+   */
+  recipients?: string[];
 }
 
 export interface CleanShare {
@@ -42,6 +50,8 @@ export interface ShareRow {
   created_at: string;
   stale_at: string | null;
   project: string | null;
+  /** Empty means the whole team. See ShareInput.recipients. */
+  recipients: string[];
 }
 
 export type ValidationResult =
@@ -113,7 +123,7 @@ export function validateShare(input: ShareInput): ValidationResult {
   return { ok: true, value: { what, why, action, tags, priority: input.priority, project } };
 }
 
-function rowToShare(row: Record<string, unknown>): ShareRow {
+function rowToShare(row: Record<string, unknown>, recipients: string[]): ShareRow {
   return {
     id: row.id as string,
     sender_email: row.sender_email as string,
@@ -125,7 +135,18 @@ function rowToShare(row: Record<string, unknown>): ShareRow {
     created_at: row.created_at as string,
     stale_at: (row.stale_at as string | null) ?? null,
     project: (row.project as string | null) ?? null,
+    recipients,
   };
+}
+
+// Scoped on both legs, like every other query in this file — a share_id is
+// globally unique, but team_id is still bound so a foreign team's identically
+// -shaped row could never be pulled in even if that stopped being true.
+function getRecipientEmails(scope: TeamScope, shareId: string): string[] {
+  const rows = scope.db
+    .prepare('SELECT email FROM share_recipients WHERE team_id = ? AND share_id = ? ORDER BY email')
+    .all(scope.teamId, shareId) as { email: string }[];
+  return rows.map((r) => r.email);
 }
 
 export function createShare(
@@ -148,18 +169,48 @@ export function createShare(
     )
     .run(id, scope.teamId, sender, what, why, action, JSON.stringify(tags), priority, nowIso, project);
 
-  const row = scope.db
-    .prepare('SELECT COUNT(*) AS n FROM members WHERE team_id = ? AND email != ?')
-    .get(scope.teamId, sender) as { n: number };
+  // Normalised the same way every other email is, deduplicated, and never
+  // includes the sender — a share never notifies its own author, and
+  // WHERE_UNREAD (unread.ts) already excludes them regardless, so a
+  // self-addressed entry here would only ever inflate `notified` for
+  // nothing. An empty (or entirely self-addressed) list writes no rows at
+  // all: unread.ts's AND_RECIPIENT reads "no rows" as "the whole team", not
+  // "nobody" — that is the deliberate empty-list behavior.
+  const recipients = Array.from(
+    new Set((input.recipients ?? []).map(normalizeEmail).filter((email) => email.length > 0 && email !== sender)),
+  );
 
-  return { id, notified: row.n };
+  if (recipients.length > 0) {
+    const insertRecipient = scope.db.prepare(
+      `INSERT INTO share_recipients (team_id, share_id, email) VALUES (?, ?, ?)`,
+    );
+    const insertAll = scope.db.transaction((emails: string[]) => {
+      for (const email of emails) insertRecipient.run(scope.teamId, id, email);
+    });
+    insertAll(recipients);
+  }
+
+  // "notified" means "the people this reaches" — for an addressed share
+  // that is the recipient list itself (already sender-excluded above), not
+  // the whole team minus the sender. See the controller ruling: a share
+  // addressed to two people must report notified: 2, not the team's size.
+  const notified =
+    recipients.length > 0
+      ? recipients.length
+      : (
+          scope.db
+            .prepare('SELECT COUNT(*) AS n FROM members WHERE team_id = ? AND email != ?')
+            .get(scope.teamId, sender) as { n: number }
+        ).n;
+
+  return { id, notified };
 }
 
 export function getShare(scope: TeamScope, id: string): ShareRow | undefined {
   const row = scope.db
     .prepare('SELECT * FROM shares WHERE team_id = ? AND id = ?')
     .get(scope.teamId, id) as Record<string, unknown> | undefined;
-  return row ? rowToShare(row) : undefined;
+  return row ? rowToShare(row, getRecipientEmails(scope, id)) : undefined;
 }
 
 export function listShares(
@@ -190,7 +241,10 @@ export function listShares(
     .prepare(`SELECT * FROM shares ${where} ORDER BY created_at DESC, id DESC LIMIT ?`)
     .all(...params, limit) as Record<string, unknown>[];
 
-  const shares = rows.map(rowToShare);
+  // One extra query per row for its recipients. Lists here are capped at 200
+  // (see `limit` above), so this stays a handful of indexed point lookups,
+  // not an unbounded fan-out.
+  const shares = rows.map((row) => rowToShare(row, getRecipientEmails(scope, row.id as string)));
   // Tag filtering happens in JS because tags are stored as a JSON array.
   const tag = opts.tag?.trim().toLowerCase();
   return tag ? shares.filter((s) => s.tags.includes(tag)) : shares;

@@ -119,6 +119,42 @@ describe('getReceipts', () => {
   });
 });
 
+// getReceipts on an addressed share (Task 7): "not yet seen by" every team
+// member is wrong once a share was only ever meant for specific people —
+// the expected-reader set narrows to the recipients themselves.
+describe('getReceipts: addressed shares', () => {
+  it('lists only the people it was addressed to, never the rest of the team', () => {
+    const { id } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'for sam only', priority: 'fyi', recipients: ['sam@team.com'] }, T0,
+    );
+    const r = getReceipts(scope, id, NOW, 14)!;
+    expect(r.unseen.map((u) => u.email)).toEqual(['sam@team.com']);
+    expect(r.viewed).toEqual([]);
+    expect(r.dismissed).toEqual([]);
+    // Priya was never addressed, so she must not appear in any bucket.
+    const all = [...r.viewed, ...r.dismissed, ...r.unseen.map((u) => u.email)];
+    expect(all).not.toContain('priya@team.com');
+  });
+
+  it('moves an addressed recipient to viewed/dismissed the same way an unaddressed one would', () => {
+    const { id } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'for sam and priya', priority: 'fyi', recipients: ['sam@team.com', 'priya@team.com'] }, T0,
+    );
+    recordReceipt(scope, id, 'sam@team.com', 'viewed', NOW);
+    const r = getReceipts(scope, id, NOW, 14)!;
+    expect(r.viewed).toEqual(['sam@team.com']);
+    expect(r.unseen.map((u) => u.email)).toEqual(['priya@team.com']);
+  });
+
+  it('keeps reporting the whole team when a share names no recipients', () => {
+    const { id } = createShare(scope, 'adnan@team.com', { what: 'everyone', priority: 'fyi' }, T0);
+    const r = getReceipts(scope, id, NOW, 14)!;
+    expect(r.unseen.map((u) => u.email).sort()).toEqual(['priya@team.com', 'sam@team.com']);
+  });
+});
+
 describe('cross-team isolation', () => {
   let otherScope: TeamScope;
 

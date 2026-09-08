@@ -297,11 +297,42 @@ function migrateAddProject(db: Db, _nowIso: string, probe: MigrationProbe): void
   probe('4->5:version');
 }
 
+// Task 7 (address a share to specific people): a brand-new table, exactly
+// like member_tokens above — no existing table changes shape, so this is a
+// plain CREATE, not a rebuild. Copies receipts' composite-FK pattern
+// deliberately: FOREIGN KEY (team_id, share_id) REFERENCES shares(team_id, id)
+// ON DELETE CASCADE, so retractShare deleting a share (see shares.ts) cannot
+// leave a stale recipient row behind it, the same way it cannot leave a
+// stale receipt behind. The index matches how unread.ts's AND_RECIPIENT
+// clause always queries this table — by (team_id, share_id) to check whether
+// a share is addressed at all, and by (team_id, email) to check whether the
+// reader is one of the people it's addressed to — so idx_share_recipients_email
+// covers the second lookup (the first is already covered by the PRIMARY KEY).
+function migrateAddShareRecipients(db: Db, _nowIso: string, probe: MigrationProbe): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS share_recipients (
+      team_id  TEXT NOT NULL,
+      share_id TEXT NOT NULL,
+      email    TEXT NOT NULL,
+      PRIMARY KEY (team_id, share_id, email),
+      FOREIGN KEY (team_id, share_id) REFERENCES shares(team_id, id) ON DELETE CASCADE
+    );
+  `);
+  probe('5->6:share_recipients-table');
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_share_recipients_email ON share_recipients(team_id, email);');
+  probe('5->6:index');
+
+  setConfig(db, 'schema_version', '6');
+  probe('5->6:version');
+}
+
 const MIGRATIONS: Migration[] = [
   { to: 2, run: migrateAddStaleAt },
   { to: 3, run: migrateAddMultiTeam },
   { to: 4, run: migrateAddMemberTokens },
   { to: 5, run: migrateAddProject },
+  { to: 6, run: migrateAddShareRecipients },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].to;
