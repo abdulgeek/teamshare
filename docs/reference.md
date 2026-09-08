@@ -374,13 +374,32 @@ team. The rules, enforced server-side regardless of what the client sends:
   a connected member, the whole share is rejected — never published
   addressed to only the ones that resolved.
 
-An addressed share narrows harder than a scoped one: `unread` for anyone
-not named simply never returns it, regardless of their own project, and
+An addressed share narrows harder than a scoped one, and it narrows on
+*every* surface, not just the digest — being addressed is access control,
+not a delivery preference. For anyone the share doesn't name:
+
+- `unread` never returns it, regardless of their own project;
+- `list_shares` never lists it — not with any tag, sender, limit, or
+  `include_irrelevant` combination;
+- `read_share` and `receipts` answer `no share with id <id>` — the exact
+  reply another team's share id gets. That sameness is deliberate: "you're
+  not allowed to read this" would confirm the share exists and who it
+  concerns, which is most of what an addressed share is trying not to say;
+- no receipt is ever recorded for them, so asking about a share they can't
+  see can't quietly pollute the author's receipt data either.
+
+The author and the named recipients are the people who can see it —
+`read_share`, `list_shares` and `receipts` all work normally for them, and
 `receipts`' expected-reader set narrows to the named recipients instead of
 the whole roster. On every surface that renders it (the `unread` tool, and
 both plugin hooks), it's marked **to you** rather than listing every
 recipient — the other names on the list are other people's business, and
 telling one reader who else got the same note adds nothing for them.
+
+The gate lives in the accessors themselves (`getShare`, `listShares`,
+`recordReceipt`), which require the caller's identity and have no
+"unfiltered" default, so a new tool inherits it rather than having to
+remember it.
 
 ## A worked example
 

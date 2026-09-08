@@ -270,7 +270,10 @@ export function buildMcpServer(ctx: {
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      const share = getShare(scope, id);
+      // Viewer-gated in shares.ts: a share addressed to other people is
+      // undefined here, so it gets the identical "no share with id X" a
+      // foreign team's share does — no third state, and no receipt.
+      const share = getShare(scope, id, identity.email);
       if (!share) return fail(`no share with id ${id}`);
 
       // Withdrawn means withdrawn. The author said it no longer applies, so
@@ -326,7 +329,7 @@ export function buildMcpServer(ctx: {
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      if (!getShare(scope, id)) return fail(`no share with id ${id}`);
+      if (!getShare(scope, id, identity.email)) return fail(`no share with id ${id}`);
       recordReceipt(scope, id, identity.email, 'dismissed', now());
       return ok(`acknowledged ${id}`);
     },
@@ -348,7 +351,7 @@ export function buildMcpServer(ctx: {
       },
     },
     async ({ tag, sender, limit, include_irrelevant }) => {
-      const shares = listShares(scope, {
+      const shares = listShares(scope, identity.email, {
         tag,
         sender,
         limit,
@@ -383,7 +386,9 @@ export function buildMcpServer(ctx: {
     },
     async ({ id }) => {
       const nowIso = now();
-      const summary = getReceipts(scope, id, nowIso, expiryDays);
+      // Author or recipient only — for a team-wide share that is everyone,
+      // so this is unchanged there.
+      const summary = getReceipts(scope, id, identity.email, nowIso, expiryDays);
       if (!summary) return fail(`no share with id ${id}`);
       // The stale prefix wins over expired: staleness is the author's
       // deliberate act and the more informative fact when both are true.

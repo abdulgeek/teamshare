@@ -300,7 +300,10 @@ recipient list itself, which is nobody else's business to see:
 ```
 
 Priya, who wasn't named, doesn't see it at all — her digest still has only
-the team-wide and scoped notes.
+the team-wide and scoped notes. Nor can she reach it any other way: it isn't
+in her `list_shares`, and asking for it by id — or asking who it went to —
+gets her the same *"no share with id …"* that a completely made-up id gets.
+Being addressed isn't a delivery preference, it's who the share belongs to.
 
 **Receipts narrow the same way.** Asking "who's seen the PR share?" reports
 only the person it was actually addressed to:

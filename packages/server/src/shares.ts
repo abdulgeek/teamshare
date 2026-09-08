@@ -186,6 +186,56 @@ export function validateShare(input: ShareInput): ValidationResult {
   };
 }
 
+/** A SQL fragment paired with exactly the positional params it consumes. */
+export interface SqlClause {
+  sql: string;
+  args: unknown[];
+}
+
+/**
+ * "May this person see this share at all?" — the ONE definition of that
+ * question, expressed in SQL so that every read path inherits it instead of
+ * re-deriving it.
+ *
+ * Three ways to qualify, and only three:
+ *   1. you wrote it (an author can always see their own share);
+ *   2. it has no share_recipients rows — unaddressed, i.e. the whole team.
+ *      This arm is what keeps every team-wide share (and every share created
+ *      before that table existed) visible to everyone;
+ *   3. you are one of the people it was addressed to.
+ *
+ * Anything else and the share does not exist as far as you are concerned:
+ * getShare returns undefined, so `read_share`/`receipts` answer with the very
+ * same "no share with id X" a foreign team's share already gets, and
+ * listShares simply omits it. That is deliberate and is NOT a third state —
+ * "you are not allowed to read this share" would confirm the share exists,
+ * which is most of what an addressed share is trying not to say.
+ *
+ * Why here and not in mcp.ts: unread.ts's AND_RECIPIENT was a DELIVERY filter
+ * on one surface, and every other surface simply forgot to apply anything.
+ * A gate that lives in the accessor cannot be forgotten by the next tool that
+ * reads a share — it has to pass a viewer to get a row at all.
+ *
+ * team_id is bound explicitly on both recipient legs, like every other query
+ * in this codebase, rather than being inherited via the outer row's team_id.
+ */
+export function visibleToClause(scope: TeamScope, viewerEmail: string, alias = 's'): SqlClause {
+  const me = normalizeEmail(viewerEmail);
+  return {
+    sql: `(
+      ${alias}.sender_email = ?
+      OR NOT EXISTS (
+        SELECT 1 FROM share_recipients sr WHERE sr.team_id = ? AND sr.share_id = ${alias}.id
+      )
+      OR EXISTS (
+        SELECT 1 FROM share_recipients sr
+         WHERE sr.team_id = ? AND sr.share_id = ${alias}.id AND sr.email = ?
+      )
+    )`,
+    args: [me, scope.teamId, scope.teamId, me],
+  };
+}
+
 function rowToShare(row: Record<string, unknown>, recipients: string[]): ShareRow {
   return {
     id: row.id as string,
@@ -349,39 +399,61 @@ export function createShare(
   return { id, notified };
 }
 
-export function getShare(scope: TeamScope, id: string): ShareRow | undefined {
+/**
+ * `viewerEmail` is REQUIRED, and has no default. A default here would mean
+ * "no filtering", and an accessor that silently returns everything when a
+ * caller forgets an argument is precisely how an addressed share ended up
+ * readable by the whole team. A caller that genuinely has no viewer has no
+ * business reading a share.
+ *
+ * Returns undefined both for a share that does not exist (or belongs to
+ * another team) and for one addressed to other people — same answer, no
+ * existence oracle. See visibleToClause.
+ */
+export function getShare(scope: TeamScope, id: string, viewerEmail: string): ShareRow | undefined {
+  const visible = visibleToClause(scope, viewerEmail);
   const row = scope.db
-    .prepare('SELECT * FROM shares WHERE team_id = ? AND id = ?')
-    .get(scope.teamId, id) as Record<string, unknown> | undefined;
+    .prepare(`SELECT s.* FROM shares s WHERE s.team_id = ? AND s.id = ? AND ${visible.sql}`)
+    .get(scope.teamId, id, ...visible.args) as Record<string, unknown> | undefined;
   return row ? rowToShare(row, getRecipientEmails(scope, id)) : undefined;
 }
 
+/** `viewerEmail` is required and undefaulted, for the reason getShare's is. */
 export function listShares(
   scope: TeamScope,
+  viewerEmail: string,
   opts: { tag?: string; sender?: string; limit?: number; includeIrrelevant?: boolean },
 ): ShareRow[] {
   // team_id is seeded into the WHERE clause itself, never appended to the
   // optional predicate list — so a caller passing no filters at all still
   // gets `WHERE team_id = ?`, never a clause-free scan of every team's shares.
-  const clauses: string[] = ['team_id = ?'];
+  const clauses: string[] = ['s.team_id = ?'];
   const params: unknown[] = [scope.teamId];
+
+  // Seeded with team_id, and now with visibility too — both before any
+  // optional predicate, so no combination of caller-supplied filters can
+  // produce a query missing either one. A share addressed to other people is
+  // not "hidden from the listing": it is not this reader's share to browse.
+  const visible = visibleToClause(scope, viewerEmail);
+  clauses.push(visible.sql);
+  params.push(...visible.args);
 
   // A share its author marked irrelevant leaves the history too, not just the
   // digest. "No longer relevant" that still turns up in every browse is not a
   // useful state — it just moves the noise. The author can still find their
   // own with includeIrrelevant, which is what makes the mark reversible in
   // practice rather than a one-way door.
-  if (!opts.includeIrrelevant) clauses.push('stale_at IS NULL');
+  if (!opts.includeIrrelevant) clauses.push('s.stale_at IS NULL');
 
   if (opts.sender) {
-    clauses.push('sender_email = ?');
+    clauses.push('s.sender_email = ?');
     params.push(normalizeEmail(opts.sender));
   }
   const where = `WHERE ${clauses.join(' AND ')}`;
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
 
   const rows = scope.db
-    .prepare(`SELECT * FROM shares ${where} ORDER BY created_at DESC, id DESC LIMIT ?`)
+    .prepare(`SELECT s.* FROM shares s ${where} ORDER BY s.created_at DESC, s.id DESC LIMIT ?`)
     .all(...params, limit) as Record<string, unknown>[];
 
   // One extra query per row for its recipients. Lists here are capped at 200
@@ -399,11 +471,17 @@ export function listShares(
 // the case where a share leaked something sensitive or was simply wrong,
 // where "hide it" is not good enough.
 export function retractShare(scope: TeamScope, id: string, callerEmail: string): ShareActionResult {
-  const share = getShare(scope, id);
-  // getShare is scoped in SQL, so a foreign team's share id and a genuinely
-  // nonexistent one both land here as `undefined` — same message either way.
-  // The author-mismatch message below is therefore unreachable for another
-  // team's share (it would otherwise confirm the id exists somewhere).
+  // The caller is the viewer: an author can always see their own share, so
+  // passing the caller here costs a legitimate retract nothing, and a share
+  // addressed to other people is `undefined` to everyone else — which is the
+  // answer they were going to get from the author check anyway, one step
+  // earlier and without confirming the id exists.
+  const share = getShare(scope, id, callerEmail);
+  // getShare is scoped in SQL, so a foreign team's share id, a genuinely
+  // nonexistent one, and one addressed to other people all land here as
+  // `undefined` — same message every time. The author-mismatch message below
+  // is therefore unreachable for any of them (it would otherwise confirm the
+  // id exists somewhere).
   if (!share) return { ok: false, error: `no share with id ${id}` };
   if (share.sender_email !== normalizeEmail(callerEmail)) {
     return { ok: false, error: 'only the author can retract a share' };
@@ -426,7 +504,7 @@ export function markStale(
   callerEmail: string,
   nowIso: string,
 ): ShareActionResult {
-  const share = getShare(scope, id);
+  const share = getShare(scope, id, callerEmail);
   if (!share) return { ok: false, error: `no share with id ${id}` };
   if (share.sender_email !== normalizeEmail(callerEmail)) {
     return { ok: false, error: 'only the author can mark a share stale' };

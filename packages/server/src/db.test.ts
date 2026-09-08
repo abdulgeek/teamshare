@@ -841,7 +841,7 @@ describe('schema migration', () => {
     const freshDb = openDb(':memory:');
     const freshScope = makeTeamScope(freshDb, getOrCreateDefaultTeamId(freshDb));
     const { id } = createShare(freshScope, 'a@t.com', { what: 'x', priority: 'fyi' }, T0);
-    expect(getShare(freshScope, id)?.project).toBeNull();
+    expect(getShare(freshScope, id, 'a@t.com')?.project).toBeNull();
     expect(readConfig(freshDb, 'schema_version')).toBe('6');
     freshDb.close();
   });
@@ -913,7 +913,7 @@ describe('schema migration', () => {
     const freshDb = openDb(':memory:');
     const freshScope = makeTeamScope(freshDb, getOrCreateDefaultTeamId(freshDb));
     const { id } = createShare(freshScope, 'a@t.com', { what: 'x', priority: 'fyi' }, T0);
-    expect(getShare(freshScope, id)?.recipients).toEqual([]);
+    expect(getShare(freshScope, id, 'a@t.com')?.recipients).toEqual([]);
     const count = freshDb.prepare('SELECT COUNT(*) AS n FROM share_recipients').get() as { n: number };
     expect(count.n).toBe(0);
     expect(readConfig(freshDb, 'schema_version')).toBe('6');
@@ -1196,21 +1196,21 @@ describe('schema migration', () => {
       const secondScope = makeTeamScope(opened, secondTeamId);
       upsertMember(secondScope, 'intruder@other.com', 'Intruder', T0);
 
-      const migratedShare = getShare(migratedScope, 'shr_fat_a');
+      const migratedShare = getShare(migratedScope, 'shr_fat_a', 'member0@team.com');
       expect(migratedShare).toBeDefined();
 
-      expect(getShare(secondScope, 'shr_fat_a')).toBeUndefined();
-      expect(listShares(secondScope, {}).map((s) => s.id)).not.toContain('shr_fat_a');
+      expect(getShare(secondScope, 'shr_fat_a', 'intruder@other.com')).toBeUndefined();
+      expect(listShares(secondScope, 'intruder@other.com', {}).map((s) => s.id)).not.toContain('shr_fat_a');
 
       const retractAttempt = retractShare(secondScope, 'shr_fat_a', 'intruder@other.com');
       expect(retractAttempt).toEqual({ ok: false, error: 'no share with id shr_fat_a' });
 
       const receiptWritten = recordReceipt(secondScope, 'shr_fat_a', 'intruder@other.com', 'viewed', T0);
       expect(receiptWritten).toBe(false);
-      expect(getReceipts(secondScope, 'shr_fat_a', T0, 14)).toBeUndefined();
+      expect(getReceipts(secondScope, 'shr_fat_a', 'intruder@other.com', T0, 14)).toBeUndefined();
 
       // The migrated team's share must be untouched by all of the above.
-      expect(getShare(migratedScope, 'shr_fat_a')).toBeDefined();
+      expect(getShare(migratedScope, 'shr_fat_a', 'member0@team.com')).toBeDefined();
 
       const fkCheck = opened.prepare('PRAGMA foreign_key_check').all();
       expect(fkCheck).toEqual([]);

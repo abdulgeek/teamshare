@@ -181,7 +181,7 @@ describe('createShare', () => {
       NOW,
     );
     expect(notified).toBe(2); // priya + sam, not adnan
-    const row = getShare(scope, id);
+    const row = getShare(scope, id, 'adnan@team.com');
     expect(row?.sender_email).toBe('adnan@team.com');
     expect(row?.tags).toEqual(['auth']);
     expect(row?.priority).toBe('blocking');
@@ -196,7 +196,7 @@ describe('createShare', () => {
 describe('createShare: recipients (Task 7)', () => {
   it('defaults to an empty recipients list, meaning the whole team', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
-    expect(getShare(scope, id)?.recipients).toEqual([]);
+    expect(getShare(scope, id, 'adnan@team.com')?.recipients).toEqual([]);
   });
 
   it('stores normalized, deduplicated recipient addresses and reports them back sorted', () => {
@@ -205,7 +205,7 @@ describe('createShare: recipients (Task 7)', () => {
       { what: 'x', priority: 'fyi', recipients: ['SAM@Team.com ', 'priya@team.com', 'priya@team.com'] },
       NOW,
     );
-    expect(getShare(scope, id)?.recipients).toEqual(['priya@team.com', 'sam@team.com']);
+    expect(getShare(scope, id, 'adnan@team.com')?.recipients).toEqual(['priya@team.com', 'sam@team.com']);
   });
 
   it('never counts the sender as notified, even if they name themselves as a recipient', () => {
@@ -439,15 +439,15 @@ describe('listShares', () => {
   it('returns newest first and filters by tag and sender', () => {
     createShare(scope, 'adnan@team.com', { what: 'first', priority: 'fyi', tags: ['auth'] }, '2026-08-01T00:00:00.000Z');
     createShare(scope, 'priya@team.com', { what: 'second', priority: 'fyi', tags: ['ui'] }, '2026-08-02T00:00:00.000Z');
-    expect(listShares(scope, {}).map(s => s.what)).toEqual(['second', 'first']);
-    expect(listShares(scope, { tag: 'auth' }).map(s => s.what)).toEqual(['first']);
-    expect(listShares(scope, { sender: 'Priya@Team.com' }).map(s => s.what)).toEqual(['second']);
-    expect(listShares(scope, { limit: 1 }).map(s => s.what)).toEqual(['second']);
+    expect(listShares(scope, 'adnan@team.com', {}).map(s => s.what)).toEqual(['second', 'first']);
+    expect(listShares(scope, 'adnan@team.com', { tag: 'auth' }).map(s => s.what)).toEqual(['first']);
+    expect(listShares(scope, 'adnan@team.com', { sender: 'Priya@Team.com' }).map(s => s.what)).toEqual(['second']);
+    expect(listShares(scope, 'adnan@team.com', { limit: 1 }).map(s => s.what)).toEqual(['second']);
   });
 
   it('a fresh share has a null stale_at', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
-    expect(getShare(scope, id)?.stale_at).toBeNull();
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBeNull();
   });
 });
 
@@ -461,8 +461,8 @@ describe('retractShare', () => {
     const result = retractShare(scope, id, 'adnan@team.com');
     expect(result.ok).toBe(true);
 
-    expect(getShare(scope, id)).toBeUndefined();
-    expect(listShares(scope, {}).map((s) => s.id)).not.toContain(id);
+    expect(getShare(scope, id, 'adnan@team.com')).toBeUndefined();
+    expect(listShares(scope, 'adnan@team.com', {}).map((s) => s.id)).not.toContain(id);
     const receipts = db.prepare('SELECT * FROM receipts WHERE team_id = ? AND share_id = ?').all(scope.teamId, id);
     expect(receipts).toHaveLength(0);
   });
@@ -472,14 +472,14 @@ describe('retractShare', () => {
     const result = retractShare(scope, id, 'priya@team.com');
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toBe('only the author can retract a share');
-    expect(getShare(scope, id)).toBeDefined();
+    expect(getShare(scope, id, 'adnan@team.com')).toBeDefined();
   });
 
   it('is case-insensitive when comparing the caller to the author', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     const result = retractShare(scope, id, 'Adnan@Team.com');
     expect(result.ok).toBe(true);
-    expect(getShare(scope, id)).toBeUndefined();
+    expect(getShare(scope, id, 'adnan@team.com')).toBeUndefined();
   });
 
   it('reports an unknown id as an error rather than throwing', () => {
@@ -494,14 +494,14 @@ describe('markStale', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     const result = markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
     expect(result.ok).toBe(true);
-    expect(getShare(scope, id)?.stale_at).toBe('2026-08-30T00:00:00.000Z');
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBe('2026-08-30T00:00:00.000Z');
   });
 
   it('rejects mark_stale by anyone other than the author', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     const result = markStale(scope, id, 'priya@team.com', '2026-08-30T00:00:00.000Z');
     expect(result.ok).toBe(false);
-    expect(getShare(scope, id)?.stale_at).toBeNull();
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBeNull();
   });
 
   it('is idempotent: marking an already-stale share does not change stale_at', () => {
@@ -509,7 +509,7 @@ describe('markStale', () => {
     markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
     const second = markStale(scope, id, 'adnan@team.com', '2026-09-15T00:00:00.000Z');
     expect(second.ok).toBe(true);
-    expect(getShare(scope, id)?.stale_at).toBe('2026-08-30T00:00:00.000Z');
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBe('2026-08-30T00:00:00.000Z');
   });
 
   it('reports an unknown id as an error rather than throwing', () => {
@@ -524,15 +524,15 @@ describe('markStale', () => {
     // the receipts stay auditable; that is the difference from retract.
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
-    expect(listShares(scope, {}).map((s) => s.id)).not.toContain(id);
+    expect(listShares(scope, 'adnan@team.com', {}).map((s) => s.id)).not.toContain(id);
   });
 
   it('is still findable by an explicit ask, so the mark is not a one-way door', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
-    expect(listShares(scope, { includeIrrelevant: true }).map((s) => s.id)).toContain(id);
+    expect(listShares(scope, 'adnan@team.com', { includeIrrelevant: true }).map((s) => s.id)).toContain(id);
     // The row itself is untouched — only its visibility changed.
-    expect(getShare(scope, id)?.what).toBe('x');
+    expect(getShare(scope, id, 'adnan@team.com')?.what).toBe('x');
   });
 });
 
@@ -551,14 +551,14 @@ describe('cross-team isolation', () => {
     createShare(scope, 'adnan@team.com', { what: 'team A only', priority: 'fyi' }, NOW);
     createShare(otherScope, 'intruder@other.com', { what: 'team B only', priority: 'fyi' }, NOW);
 
-    expect(listShares(scope, {}).map((s) => s.what)).toEqual(['team A only']);
-    expect(listShares(otherScope, {}).map((s) => s.what)).toEqual(['team B only']);
+    expect(listShares(scope, 'adnan@team.com', {}).map((s) => s.what)).toEqual(['team A only']);
+    expect(listShares(otherScope, 'intruder@other.com', {}).map((s) => s.what)).toEqual(['team B only']);
   });
 
   it('getShare is scoped in SQL: another team cannot fetch a share by id', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'private to team A', priority: 'fyi' }, NOW);
-    expect(getShare(otherScope, id)).toBeUndefined();
-    expect(getShare(scope, id)).toBeDefined();
+    expect(getShare(otherScope, id, 'intruder@other.com')).toBeUndefined();
+    expect(getShare(scope, id, 'adnan@team.com')).toBeDefined();
   });
 
   it('no existence oracle: a foreign-team id and a truly nonexistent id produce the identical "no share" message, never the author-mismatch message', () => {
@@ -576,19 +576,83 @@ describe('cross-team isolation', () => {
     expect((foreignAttempt as { ok: false; error: string }).error).not.toContain('only the author');
 
     // And the original share must be untouched by the foreign attempt.
-    expect(getShare(scope, id)).toBeDefined();
+    expect(getShare(scope, id, 'adnan@team.com')).toBeDefined();
   });
 
   it('markStale is likewise unreachable for another team\'s share', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'team A plan', priority: 'fyi' }, NOW);
     const result = markStale(otherScope, id, 'intruder@other.com', NOW);
     expect(result).toEqual({ ok: false, error: `no share with id ${id}` });
-    expect(getShare(scope, id)?.stale_at).toBeNull();
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBeNull();
   });
 
   it('createShare\'s notified count only counts the calling team\'s members', () => {
     upsertMember(otherScope, 'second@other.com', 'Second', NOW);
     const { notified } = createShare(otherScope, 'intruder@other.com', { what: 'x', priority: 'fyi' }, NOW);
     expect(notified).toBe(1); // second@other.com only — never team A's 3 members
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: visibility is a property of the ACCESSOR, not of one tool.
+// Task 7 put AND_RECIPIENT in unread.ts only — a delivery filter — so every
+// other read path handed an addressed share to the whole team. These pin the
+// gate where it now lives, so a future caller of getShare/listShares cannot
+// reintroduce the leak by forgetting to filter.
+// ---------------------------------------------------------------------------
+describe('addressed shares are invisible to a bystander', () => {
+  function addressedToSam(): string {
+    return createShare(
+      scope, 'adnan@team.com',
+      { what: 'for sam only', priority: 'fyi', recipients: ['sam@team.com'] },
+      NOW,
+    ).id;
+  }
+
+  it('getShare: a non-recipient gets undefined — the same answer a foreign team gets', () => {
+    const id = addressedToSam();
+    expect(getShare(scope, id, 'priya@team.com')).toBeUndefined();
+  });
+
+  it('getShare: the author and the recipient still get the row', () => {
+    const id = addressedToSam();
+    expect(getShare(scope, id, 'adnan@team.com')?.what).toBe('for sam only');
+    expect(getShare(scope, id, 'sam@team.com')?.what).toBe('for sam only');
+    // Case-folded like every other address comparison in this codebase.
+    expect(getShare(scope, id, 'Sam@Team.com')?.what).toBe('for sam only');
+  });
+
+  it('listShares: excludes a share addressed to someone else', () => {
+    const id = addressedToSam();
+    expect(listShares(scope, 'priya@team.com', {}).map((s) => s.id)).not.toContain(id);
+    expect(listShares(scope, 'sam@team.com', {}).map((s) => s.id)).toContain(id);
+    expect(listShares(scope, 'adnan@team.com', {}).map((s) => s.id)).toContain(id);
+  });
+
+  it('listShares: no filter combination reveals it — not includeIrrelevant, not a sender filter', () => {
+    const id = addressedToSam();
+    expect(
+      listShares(scope, 'priya@team.com', {
+        includeIrrelevant: true,
+        sender: 'adnan@team.com',
+        limit: 200,
+      }).map((s) => s.id),
+    ).not.toContain(id);
+  });
+
+  it('a team-wide share is still visible to the whole team — no recipient rows means everyone', () => {
+    const { id } = createShare(scope, 'adnan@team.com', { what: 'for everyone', priority: 'fyi' }, NOW);
+    expect(getShare(scope, id, 'priya@team.com')).toBeDefined();
+    expect(listShares(scope, 'priya@team.com', {}).map((s) => s.id)).toContain(id);
+  });
+
+  it('cross-team isolation is unaffected: a recipient address does not cross a team boundary', () => {
+    const otherTeamId = createTeam(db, 'isolation team', hashToken('ts_iso'), NOW);
+    const otherScope = makeTeamScope(db, otherTeamId);
+    upsertMember(otherScope, 'sam@team.com', 'Sam Elsewhere', NOW);
+    const id = addressedToSam();
+    // Same address, different team — the share still does not exist for them.
+    expect(getShare(otherScope, id, 'sam@team.com')).toBeUndefined();
+    expect(listShares(otherScope, 'sam@team.com', {}).map((s) => s.id)).not.toContain(id);
   });
 });

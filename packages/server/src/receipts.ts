@@ -1,5 +1,5 @@
 import { listMembers, normalizeEmail, type TeamScope } from './db.js';
-import { getShare } from './shares.js';
+import { getShare, visibleToClause } from './shares.js';
 import { expiryCutoff } from './unread.js';
 
 export type ReceiptStatus = 'viewed' | 'dismissed';
@@ -23,13 +23,22 @@ export interface ReceiptSummary {
   unseen: UnseenMember[];
 }
 
-// Ownership is checked in the same statement as the write — the INSERT's
-// source rows are gated by `WHERE EXISTS (... shares WHERE team_id = ? AND
-// id = ?)` — rather than trusting a separate, earlier existence check. If
-// the share belongs to another team (or doesn't exist at all), the SELECT
-// contributes zero rows, nothing is written, and this reports false; a
-// caller that forgot to check `getShare` first still cannot record a
-// cross-team receipt.
+// Ownership AND visibility are checked in the same statement as the write —
+// the INSERT's source rows are gated by `WHERE EXISTS (... shares WHERE
+// team_id = ? AND id = ? AND <visible to this member>)` — rather than
+// trusting a separate, earlier check by the caller. If the share belongs to
+// another team, doesn't exist at all, or is addressed to people this member
+// is not among, the SELECT contributes zero rows, nothing is written, and
+// this reports false; a caller that forgot to check `getShare` first still
+// cannot record a cross-team OR a can't-see-it receipt.
+//
+// The visibility half is not decoration. `read_share` used to record a
+// `viewed` receipt for anyone who asked, so a non-recipient reading an
+// addressed share both learned its contents and wrote a row into the
+// author's receipt data for a share that person was never sent. No receipt
+// may exist for someone who cannot see the share, and the cheapest place to
+// make that true for every present and future caller is inside the write
+// itself.
 export function recordReceipt(
   scope: TeamScope,
   shareId: string,
@@ -38,28 +47,40 @@ export function recordReceipt(
   nowIso: string,
 ): boolean {
   const email = normalizeEmail(memberEmail);
+  const visible = visibleToClause(scope, email);
   // 'viewed' outranks 'dismissed': a later dismissal must not erase that the
   // member actually read the share.
   const info = scope.db
     .prepare(
       `INSERT INTO receipts (team_id, share_id, member_email, status, at)
        SELECT ?, ?, ?, ?, ?
-       WHERE EXISTS (SELECT 1 FROM shares WHERE team_id = ? AND id = ?)
+       WHERE EXISTS (
+         SELECT 1 FROM shares s WHERE s.team_id = ? AND s.id = ? AND ${visible.sql}
+       )
        ON CONFLICT(team_id, share_id, member_email) DO UPDATE SET
          status = CASE WHEN receipts.status = 'viewed' THEN 'viewed' ELSE excluded.status END,
          at     = excluded.at`,
     )
-    .run(scope.teamId, shareId, email, status, nowIso, scope.teamId, shareId);
+    .run(scope.teamId, shareId, email, status, nowIso, scope.teamId, shareId, ...visible.args);
   return info.changes > 0;
 }
 
+// `viewerEmail` is required and has no default, exactly like getShare's: the
+// caller must be the author or one of the recipients. For an unaddressed
+// (team-wide) share every member qualifies, so this is unchanged for the
+// common case. For an addressed one, a bystander gets `undefined` — the same
+// answer a nonexistent id gets — rather than the recipient list, which
+// `receipts` used to print to anyone who asked ("Not yet seen by:
+// sam@team.com" told the whole team who a confidential share went to, and
+// list_shares handed them the id to ask about).
 export function getReceipts(
   scope: TeamScope,
   shareId: string,
+  viewerEmail: string,
   nowIso: string,
   expiryDays: number,
 ): ReceiptSummary | undefined {
-  const share = getShare(scope, shareId);
+  const share = getShare(scope, shareId, viewerEmail);
   if (!share) return undefined;
 
   const rows = scope.db
