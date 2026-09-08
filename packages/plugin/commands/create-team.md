@@ -8,9 +8,11 @@ argument-hint: "<org-name>"
 Creates a team on the teamshare server and saves its admin token here, so every
 later admin command works without anyone pasting a credential again.
 
-Run this once per team. To use teamshare yourself afterwards you still need a
-personal token — `/teamshare:invite` your own email, which the last step below
-tells you to do.
+Run this once per team name on this machine. A second run with the same name
+used to mint a duplicate team; it now stops, names the existing id, and tells
+you to invite. To use teamshare yourself afterwards you still need a personal
+token — `/teamshare:invite` your own email, which the last step below tells
+you to do.
 
 ## Steps
 
@@ -29,6 +31,10 @@ tells you to do.
    ```bash
    teamshare-team create-team "<org-name>"
    ```
+
+   If the output says **already on this machine**, that is success — a team
+   with that name is already saved here. Do not run create-team again. Relay
+   the existing `tm_…` id and go to invite. The admin token is not reprinted.
 
    If create-team fails for want of a secret this machine cannot recover,
    they need the org-wide value from whoever deployed the server. Write it

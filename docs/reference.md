@@ -82,6 +82,11 @@ node teamshare-team.mjs create-team "<org-name>"
 Already have a checkout? Same file, shorter path:
 `node packages/server/src/teamshare-team.mjs create-team "<org-name>"`.
 
+A second `create-team` with the same name on the same machine does not mint
+another team. It prints the existing `tm_…` id and tells you to invite. That
+used to create a duplicate, after which `invite`/`roster` could not tell
+which admin token to use.
+
 The signup secret is never a command-line argument — that would land it in
 shell history and `ps` output. It's read from `TEAMSHARE_SIGNUP_SECRET` in
 the environment, or, on a real terminal, prompted for with the input
@@ -334,10 +339,13 @@ bundled CLI's local-database equivalent (`node packages/server/dist/cli.js
 filesystem access to the database already implies that authority):
 
 ```bash
-node teamshare-team.mjs invite <server-url> <email> ["<name>"]
-node teamshare-team.mjs revoke <server-url> <email>
-node teamshare-team.mjs roster <server-url>
+node teamshare-team.mjs invite <server-url> <email> ["<name>"] [--team "<name-or-id>"]
+node teamshare-team.mjs revoke <server-url> <email> [--team "<name-or-id>"]
+node teamshare-team.mjs roster <server-url> [--team "<name-or-id>"]
 ```
+
+`--team` is the display name when it is unique on this machine, or the `tm_…`
+id from `whoami` when two saved teams share a name.
 
 `invite` mints a brand-new personal token for one named email — there is no
 redemption step, the printed value _is_ that person's credential. `revoke`

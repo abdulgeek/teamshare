@@ -386,6 +386,35 @@ export function adminEntriesFor(store, url) {
 }
 
 /**
+ * How a saved team is named in an error so `--team` can be a unique name
+ * *or* a `tm_…` id. Duplicate display names (create-team run twice) made
+ * `--team "AI-Platform"` silently pick the first, and `--team tm_…` miss
+ * entirely — invite then 401'd on the wrong token, or refused both ways.
+ * @param {Array<{name: string, team_id: string}>} entries
+ */
+export function formatTeamChoice(entries) {
+  return entries.map((t) => `"${t.name}" (${t.team_id})`).join(', ');
+}
+
+function looksLikeTeamId(value) {
+  return /^tm_[0-9a-f]+$/i.test(String(value ?? '').trim());
+}
+
+/**
+ * Saved admin rows for this display name on this server, newest first.
+ * create-team uses this so a second run with the same name does not mint
+ * another team (that is how invite then saw two tokens and 401'd both).
+ * @param {{ url: string, name: string, homeDir?: string, fs?: typeof import('node:fs') }} opts
+ */
+export function localTeamsNamed(opts) {
+  const wanted = String(opts.name ?? '').trim().toLowerCase();
+  if (!wanted) return [];
+  return adminEntriesFor(readAdminStore({ homeDir: opts.homeDir, fs: opts.fs }), opts.url).filter(
+    (t) => String(t.name).trim().toLowerCase() === wanted,
+  );
+}
+
+/**
  * Persist a freshly minted admin token. Replaces any previous entry for the
  * same (server, team_id) pair so rotate-team overwrites rather than
  * accumulating a dead credential the lookup could later pick.
@@ -447,12 +476,23 @@ export function resolveAdminTokenFromStore(opts) {
   if (entries.length === 0) return { ok: false, reason: 'none-saved' };
 
   if (opts.teamName) {
-    const wanted = String(opts.teamName).trim().toLowerCase();
-    const match = entries.find((t) => String(t.name).trim().toLowerCase() === wanted);
-    if (!match) {
-      return { ok: false, reason: 'no-such-team', names: entries.map((t) => t.name) };
+    const wanted = String(opts.teamName).trim();
+    if (looksLikeTeamId(wanted)) {
+      const match = entries.find((t) => String(t.team_id).toLowerCase() === wanted.toLowerCase());
+      if (!match) {
+        return { ok: false, reason: 'no-such-team', names: entries.map((t) => t.name) };
+      }
+      return { ok: true, token: match.token, source: 'store', team: match };
     }
-    return { ok: true, token: match.token, source: 'store', team: match };
+    const wantedName = wanted.toLowerCase();
+    const matches = entries.filter((t) => String(t.name).trim().toLowerCase() === wantedName);
+    if (matches.length === 1) {
+      return { ok: true, token: matches[0].token, source: 'store', team: matches[0] };
+    }
+    if (matches.length > 1) {
+      return { ok: false, reason: 'ambiguous', names: matches.map((t) => t.name) };
+    }
+    return { ok: false, reason: 'no-such-team', names: entries.map((t) => t.name) };
   }
 
   if (entries.length > 1) {
@@ -1453,11 +1493,44 @@ export function formatWhoamiOutput(opts) {
     }
     if (adminTeams.length > 1) {
       lines.push('');
-      lines.push(`  More than one team here, so admin commands need --team "<name>".`);
+      lines.push(
+        `  More than one team here, so admin commands need --team "<name>" or the tm_… id.`,
+      );
     }
   }
   lines.push('');
   lines.push(`Stored at ${adminStorePath()} — owner-only, never committed, never sent anywhere.`);
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * Second create-team with the same name on this machine: do not mint, and
+ * do not reprint the admin token (it was shown on the first success).
+ * @param {{ url: string, name: string, teams: Array<{name: string, team_id: string}>, cmdName?: string }} opts
+ */
+export function formatCreateAlreadyExistsOutput(opts) {
+  const { url, name, teams, cmdName = 'teamshare-team' } = opts;
+  const lines = [
+    'teamshare create-team — already on this machine',
+    '',
+    teams.length === 1
+      ? `This machine already has a team named "${name}" on ${url}:`
+      : `This machine already has ${teams.length} teams named "${name}" on ${url}:`,
+    ...teams.map((t) => `  ${t.name} (${t.team_id})`),
+    '',
+    'create-team does not mint another. A second run used to create a duplicate',
+    'on the server, then invite/roster could not tell which admin token to use.',
+    '',
+    'Next: invite people onto this team (starting with yourself).',
+    '',
+  ];
+  if (teams.length === 1) {
+    lines.push(`  ${cmdName} invite <your-own-email>`);
+  } else {
+    lines.push(`  ${cmdName} invite <your-own-email> --team ${teams[0].team_id}`);
+    lines.push('');
+    lines.push('Use the tm_… id, not the name — the name is not unique on this machine.');
+  }
   return lines.join('\n') + '\n';
 }
 
@@ -1653,8 +1726,10 @@ Options:
   --server <url>   A teamshare server other than the built-in default
                    (${DEFAULT_SERVER_URL}). Also read from ${SERVER_URL_ENV}
                    or ~/.teamshare.json. You only need this if you run your own.
-  --team "<name>"  Which of your teams to act on, when this machine holds admin
-                   tokens for more than one team on the same server.
+  --team "<name-or-id>"  Which of your teams to act on, when this machine holds
+                   admin tokens for more than one team on the same server. A
+                   unique display name works; if two teams share a name, use
+                   the tm_… id from whoami.
 
 Credentials are never accepted as arguments — they would land in shell history and \`ps\` output.
 
@@ -1812,19 +1887,27 @@ export async function runTeamCli(argv, opts = {}) {
     if (stored.ok) return { ok: true, value: stored.token, team: stored.team, source: stored.source };
 
     if (stored.reason === 'ambiguous') {
+      const listed = adminEntriesFor(readAdminStore({ homeDir, fs: fsImpl }), url);
+      const collide =
+        listed.length > 1 &&
+        listed.every(
+          (t) => t.name.trim().toLowerCase() === listed[0].name.trim().toLowerCase(),
+        );
       return {
         ok: false,
         message:
-          `this machine has admin tokens for ${stored.names.length} teams on ${url} ` +
-          `(${stored.names.map((n) => `"${n}"`).join(', ')}). Say which one with --team "<name>".\n`,
+          `this machine has admin tokens for ${listed.length} teams on ${url} ` +
+          `(${formatTeamChoice(listed)}). Say which one with --team ` +
+          `${collide ? '<tm_… id>' : '"<name>" (or the tm_… id)'}.\n`,
       };
     }
     if (stored.reason === 'no-such-team') {
+      const listed = adminEntriesFor(readAdminStore({ homeDir, fs: fsImpl }), url);
       return {
         ok: false,
         message:
-          `no saved admin token for a team called "${parsed.teamName}" on ${url}. ` +
-          `Saved here: ${stored.names.map((n) => `"${n}"`).join(', ')}.\n`,
+          `no saved admin token for "${parsed.teamName}" on ${url}. ` +
+          `Saved here: ${formatTeamChoice(listed)}. Use --team with the name or the tm_… id.\n`,
       };
     }
 
@@ -1948,6 +2031,20 @@ export async function runTeamCli(argv, opts = {}) {
   if (parsed.cmd === 'create-team') {
     if (!parsed.name) {
       return { exitCode: 1, stdout: '', stderr: `usage: ${cmdName} create-team "<team name>"\n` };
+    }
+
+    const alreadyHere = localTeamsNamed({ url, name: parsed.name, homeDir, fs: fsImpl });
+    if (alreadyHere.length > 0) {
+      return {
+        exitCode: 0,
+        stdout: formatCreateAlreadyExistsOutput({
+          url,
+          name: parsed.name,
+          teams: alreadyHere,
+          cmdName,
+        }),
+        stderr: '',
+      };
     }
 
     // Environment first (an explicit export always wins), then a file the

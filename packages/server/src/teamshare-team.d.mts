@@ -61,6 +61,13 @@ export interface AdminStore {
 export function adminStorePath(homeDir?: string): string;
 export function readAdminStore(opts?: { homeDir?: string; fs?: typeof import('node:fs') }): AdminStore;
 export function adminEntriesFor(store: AdminStore, url: string): AdminStoreEntry[];
+export function formatTeamChoice(entries: Array<{ name: string; team_id: string }>): string;
+export function localTeamsNamed(opts: {
+  url: string;
+  name: string;
+  homeDir?: string;
+  fs?: typeof import('node:fs');
+}): AdminStoreEntry[];
 
 export function saveAdminEntry(opts: {
   url: string;
@@ -357,6 +364,12 @@ export interface FormatTeamOutputOptions {
 }
 
 export function formatCreateOutput(opts: FormatTeamOutputOptions): string;
+export function formatCreateAlreadyExistsOutput(opts: {
+  url: string;
+  name: string;
+  teams: Array<{ name: string; team_id: string }>;
+  cmdName?: string;
+}): string;
 export function formatRotateOutput(opts: FormatTeamOutputOptions): string;
 
 export function formatMemberTokenOnceWarning(email: string, token: string): string;

@@ -25,7 +25,11 @@ guess.
    ```
 
    If this machine holds admin tokens for more than one team on the server,
-   the command says so and lists them. Ask which, then add `--team "<name>"`.
+   the command says so and lists each as `Name (tm_…)`. Ask which, then add
+   `--team "<name>"` when the name is unique, or `--team tm_…` when two teams
+   share a name (that happens if create-team ran twice before 0.7.1). Never
+   guess. `--team` does not accept a name that matches more than one saved
+   team.
 
 3. **Relay the output as-is**, including the personal token and the
    ready-to-send joining message. The lead has to transmit that token to reach

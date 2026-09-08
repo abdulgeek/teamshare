@@ -18,6 +18,7 @@ import {
   createTeam,
   hashToken,
   findTeamByName,
+  listTeams,
   makeTeamScope,
   createMemberToken,
   type Db,
@@ -39,6 +40,7 @@ import {
   formatTokenOnceWarning,
   formatAdminTokenGuidance,
   formatCreateOutput,
+  formatCreateAlreadyExistsOutput,
   formatRotateOutput,
   formatMemberTokenOnceWarning,
   formatInviteOutput,
@@ -939,6 +941,18 @@ describe("formatCreateOutput / formatRotateOutput", () => {
     expect(out).toContain("teamshare-team invite <your-own-email>");
   });
 
+  it("formatCreateAlreadyExistsOutput names the saved team and never reprints the admin token", () => {
+    const out = formatCreateAlreadyExistsOutput({
+      url: "https://ts.example.com",
+      name: "AI-Platform",
+      teams: [{ name: "AI-Platform", team_id: "tm_df89ca963847" }],
+    });
+    expect(out).toContain("already on this machine");
+    expect(out).toContain("tm_df89ca963847");
+    expect(out).toContain("teamshare-team invite");
+    expect(out).not.toMatch(/\bts_/);
+  });
+
   it("formatRotateOutput says the admin token was rotated, the old one stopped working immediately, and every teammate keeps working unaffected", () => {
     const out = formatRotateOutput({
       url: "https://ts.example.com",
@@ -1086,6 +1100,30 @@ describe("runTeamCli: the full pipeline, in-process against a real local server"
     expect(result.stdout).not.toContain("/plugin marketplace add");
     expect(result.stdout).not.toContain("/plugin install teamshare");
     expect(findTeamByName(db, "CLI Squad")).toBeTruthy();
+  });
+
+  it("create-team with the same name a second time does not mint another team", async () => {
+    const first = await run(["create-team", base, "CLI Squad"], {
+      env: { [SIGNUP_SECRET_ENV]: SIGNUP_SECRET },
+      isTTY: false,
+      identity,
+    });
+    expect(first.exitCode).toBe(0);
+    expect(listTeams(db)).toHaveLength(1);
+
+    const again = await run(["create-team", base, "CLI Squad"], {
+      env: {},
+      isTTY: false,
+      identity,
+    });
+    expect(again.exitCode).toBe(0);
+    expect(again.stdout).toContain("already on this machine");
+    expect(again.stdout).toContain("CLI Squad");
+    expect(again.stdout).not.toMatch(/\bts_[0-9a-f]/i);
+    expect(listTeams(db)).toHaveLength(1);
+    expect(
+      adminEntriesFor(readAdminStore({ homeDir: home }), base),
+    ).toHaveLength(1);
   });
 
   it("create-team fails loudly, without creating a team, when the signup secret is wrong", async () => {
@@ -1821,6 +1859,46 @@ describe("resolveAdminTokenFromStore", () => {
       expect(r.names).toEqual(["Platform"]);
   });
 
+  it("accepts --team with the tm_… id, including when two teams share a display name", () => {
+    save(
+      "AI-Platform",
+      "ts_first",
+      "https://ts.example.com",
+      "tm_aaaaaaaaaaaa",
+    );
+    save(
+      "AI-Platform",
+      "ts_second",
+      "https://ts.example.com",
+      "tm_bbbbbbbbbbbb",
+    );
+    const byName = resolveAdminTokenFromStore({
+      url: "https://ts.example.com",
+      env: {},
+      teamName: "AI-Platform",
+      homeDir: home,
+    });
+    expect(byName.ok).toBe(false);
+    if (!byName.ok) expect(byName.reason).toBe("ambiguous");
+
+    expect(
+      resolveAdminTokenFromStore({
+        url: "https://ts.example.com",
+        env: {},
+        teamName: "tm_aaaaaaaaaaaa",
+        homeDir: home,
+      }),
+    ).toMatchObject({ ok: true, token: "ts_first" });
+    expect(
+      resolveAdminTokenFromStore({
+        url: "https://ts.example.com",
+        env: {},
+        teamName: "TM_BBBBBBBBBBBB",
+        homeDir: home,
+      }),
+    ).toMatchObject({ ok: true, token: "ts_second" });
+  });
+
   it("reports nothing saved for a server it has never seen", () => {
     save("Platform", "ts_a", "https://other.example");
     expect(
@@ -2012,6 +2090,40 @@ describe("runTeamCli: admin commands with nothing pasted and no terminal", () =>
     const named = await run(["roster", base, "--team", "Infra"]);
     expect(named.exitCode).toBe(0);
     expect(named.stdout).toContain("Infra");
+
+    const entries = adminEntriesFor(readAdminStore({ homeDir: home }), base);
+    const infra = entries.find((t) => t.name === "Infra");
+    expect(infra).toBeTruthy();
+    const byId = await run(["roster", base, "--team", infra!.team_id]);
+    expect(byId.exitCode).toBe(0);
+    expect(byId.stdout).toContain("Infra");
+  });
+
+  it("refuses --team by name when two saved teams share it, and accepts the tm_… id", async () => {
+    await createTeamHere();
+    const extra = await run(["create-team", base, "Other"], {
+      env: { [SIGNUP_SECRET_ENV]: SIGNUP_SECRET },
+    });
+    expect(extra.exitCode).toBe(0);
+    const entries = adminEntriesFor(readAdminStore({ homeDir: home }), base);
+    const other = entries.find((t) => t.name === "Other");
+    expect(other).toBeTruthy();
+    saveAdminEntry({
+      url: base,
+      teamId: other!.team_id,
+      name: "Platform",
+      token: other!.token,
+      homeDir: home,
+    });
+
+    const byName = await run(["roster", base, "--team", "Platform"]);
+    expect(byName.exitCode).toBe(1);
+    expect(byName.stderr).toContain("tm_");
+    expect(byName.stderr.toLowerCase()).toContain("id");
+
+    const byId = await run(["roster", base, "--team", other!.team_id]);
+    expect(byId.exitCode).toBe(0);
+    expect(byId.stdout).toContain("Other");
   });
 
   it('whoami distinguishes "not connected" from "nothing to read", which is otherwise invisible', async () => {
@@ -2563,7 +2675,8 @@ describe("resolveInstanceTarget", () => {
       scriptPath: join(home, "bin", "teamshare-team"),
     });
     expect(pinned.ok).toBe(false);
-    if (!pinned.ok) expect(pinned.reason).toContain("does not ship a production instance id");
+    if (!pinned.ok)
+      expect(pinned.reason).toContain("does not ship a production instance id");
   });
 
   it(`reads ${"TEAMSHARE_INSTANCE_ID"} from the environment`, () => {
@@ -2819,14 +2932,19 @@ describe("runTeamCli: generate-secret and create-team recovering via AWS", () =>
     expect(result.stdout).toBe("");
     expect(result.stderr.toLowerCase()).toContain("401");
     expect(result.stderr).toContain("create-team");
-    expect(result.stdout).not.toContain("tss_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    expect(result.stdout).not.toContain(
+      "tss_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
   });
 
   it("generate-secret against a custom server with no instance id still mints", async () => {
-    const result = await run(["generate-secret", "--server", "https://ts.example.com"], {
-      generateSecret: () =>
-        "tss_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    });
+    const result = await run(
+      ["generate-secret", "--server", "https://ts.example.com"],
+      {
+        generateSecret: () =>
+          "tss_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      },
+    );
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain(
       "tss_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

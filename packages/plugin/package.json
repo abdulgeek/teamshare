@@ -1,8 +1,13 @@
 {
   "name": "teamshare-plugin",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
-  "scripts": { "test": "vitest run", "build": "echo 'no build step'" },
-  "devDependencies": { "vitest": "^4.1.11" }
+  "scripts": {
+    "test": "vitest run",
+    "build": "echo 'no build step'"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.11"
+  }
 }
