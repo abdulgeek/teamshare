@@ -1384,6 +1384,13 @@ describe('connect installs the Cursor hooks alongside the MCP entry', () => {
     expect(formatConnectOutput(run)).toContain('session digest and mid-session nudge');
   });
 
+  it('does not print the Codex trust-prompt notice — Cursor has no such gate', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['cursor'], now: FIXED_NOW });
+    expect(formatConnectOutput(run)).not.toContain('trust');
+  });
+
   it('writes nothing hook-shaped on a machine without Cursor', () => {
     // Including ~/.teamshare.json: a credential file is not something to leave
     // on a machine that has nothing to read it.
@@ -1412,6 +1419,19 @@ describe('connect installs the Codex hooks alongside the MCP entry', () => {
     expect(run.results[0].hooks?.status).toBe('written');
     expect(existsSync(join(home, '.teamshare', 'hooks', 'teamshare-hook.mjs'))).toBe(true);
     expect(formatConnectOutput(run)).toContain('session digest and mid-session nudge');
+  });
+
+  it('warns that Codex will not run the hook until its own trust prompt is accepted', () => {
+    // Codex normally requires a persisted trust decision before it runs an
+    // enabled hook (the live test in the "Codex" section of
+    // docs/superpowers/specs/2026-09-09-cursor-hook-contract.md needed
+    // --dangerously-bypass-hook-trust to get past it). Without this notice,
+    // "written" here reads as "working" — the hook stays inert until the user
+    // clears a prompt nothing told them to expect.
+    const home = tmp();
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['codex'], now: FIXED_NOW });
+    expect(formatConnectOutput(run)).toContain('trust');
   });
 
   it('writes nothing hook-shaped on a machine without Codex', () => {

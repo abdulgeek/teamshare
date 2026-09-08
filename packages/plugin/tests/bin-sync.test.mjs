@@ -294,6 +294,25 @@ describe('the standalone hook, actually run', () => {
     expect(parsed.additional_context).not.toContain('Grace Hopper');
   });
 
+  it("answers Codex's SessionStart with the digest in Codex's own nested shape, not Cursor's flat one", async () => {
+    // Cursor and Claude Code are both exercised end to end above; Codex's
+    // nested response shape (confirmed live against a real `codex exec` —
+    // see the "Codex" section of
+    // docs/superpowers/specs/2026-09-09-cursor-hook-contract.md) was, until
+    // now, only unit-tested through hosts.test.mjs, never observed coming out
+    // of the actual generated bundle this repo ships to a Codex machine.
+    const out = await run(
+      { hook_event_name: 'SessionStart', session_id: 'x1', source: 'startup', cwd: '/tmp' },
+      { TEAMSHARE_HOST: 'codex', TEAMSHARE_HOOK_EVENT: 'SessionStart' },
+    );
+    const parsed = JSON.parse(out);
+    // Nested hookSpecificOutput, NOT Cursor's flat additional_context.
+    expect(Object.keys(parsed)).toEqual(['hookSpecificOutput']);
+    expect(parsed.hookSpecificOutput.hookEventName).toBe('SessionStart');
+    expect(parsed.hookSpecificOutput.additionalContext).toContain('Grace Hopper');
+    expect(parsed.additional_context).toBeUndefined();
+  });
+
   it('exits 0 and says nothing when this machine has no credentials at all', async () => {
     const bare = mkdtempSync(join(tmpdir(), 'teamshare-standalone-bare-'));
     try {

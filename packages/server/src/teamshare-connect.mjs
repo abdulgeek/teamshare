@@ -1738,6 +1738,16 @@ export function formatConnectOutput(run) {
           `                  + session digest and mid-session nudge -> ${r.hooks.path}` +
             (r.hooks.backup ? ` (backup: ${r.hooks.backup})` : ''),
         );
+        // Codex normally requires a persisted trust decision before it will
+        // actually run an enabled hook (confirmed live — see the "Codex"
+        // section of docs/superpowers/specs/2026-09-09-cursor-hook-contract.md,
+        // §4). Without this line, "written" reads as "working": the hook sits
+        // inert until the user clears a prompt they were never told to expect.
+        if (r.id === 'codex') {
+          lines.push(
+            '                  Codex will ask you to trust this hook the first time it runs — accept that prompt, or the hook above stays inert.',
+          );
+        }
       } else if (r.hooks.status === 'error') {
         lines.push(
           `                  ! could not install the digest hooks — ${r.hooks.reason}` +
