@@ -87,11 +87,14 @@ async function main() {
   const host = detectHost(payload, process.env);
   normalizePayload(payload, host); // for parity with prompt-submit.mjs; this hook needs only `host`
 
-  // The source gate is Claude-Code-only: Cursor's sessionStart has no
-  // `source`, and gating on a field it never sends would silence it entirely.
-  // The hooks.json matcher already filters sources on Claude Code; re-check
-  // defensively.
-  if (host === 'claude-code' && payload.source && !ALLOWED_SOURCES.has(payload.source)) return;
+  // The source gate applies to Claude Code and Codex, not Cursor: Cursor's
+  // sessionStart sends no `source` at all, and gating on a field it never
+  // sends would silence it entirely. Codex's SessionStart payload was
+  // confirmed live to carry the same `source` field Claude Code uses (a fresh
+  // `codex exec` sent `"source":"startup"`, one of the allowed values) — see
+  // this file's sibling doc reference in hosts.mjs. The hooks.json matcher
+  // already filters sources on Claude Code; re-check defensively for both.
+  if ((host === 'claude-code' || host === 'codex') && payload.source && !ALLOWED_SOURCES.has(payload.source)) return;
 
   const cfg = loadConfig(process.env);
   if (!cfg) return;

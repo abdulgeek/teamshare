@@ -33,6 +33,8 @@ import {
   looksLikeServerUrl,
   installCursorHooks,
   CURSOR_HOOK_EVENTS,
+  installCodexHooks,
+  CODEX_HOOK_EVENTS,
   TEAMSHARE_HOOK_SOURCE,
   DEFAULT_SERVER_URL as CONNECT_DEFAULT_SERVER_URL,
   type GitIdentity,
@@ -1271,6 +1273,107 @@ describe('Cursor hooks', () => {
   });
 });
 
+describe('Codex hooks', () => {
+  // Codex's hook contract was verified live, not assumed from Cursor's or
+  // from claude-mem's codex-hooks.json — see the "Codex" section of
+  // docs/superpowers/specs/2026-09-09-cursor-hook-contract.md. A real
+  // `codex exec` run against an isolated CODEX_HOME confirmed: the config file
+  // is $CODEX_HOME/hooks.json, the event names are Claude Code's own
+  // (SessionStart, UserPromptSubmit), and each entry is a Claude-Code-shaped
+  // matcher group rather than Cursor's flat `{ command }`.
+
+  it('installs Codex hooks without disturbing an existing config', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    writeFileSync(join(home, '.codex', 'hooks.json'), JSON.stringify({
+      hooks: { Stop: [{ type: 'command', command: 'someone-elses-tool' }] },
+    }));
+
+    const result = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    expect(result.status).toBe('written');
+
+    const cfg = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
+    expect(Object.keys(cfg.hooks)).toEqual(expect.arrayContaining(['SessionStart', 'UserPromptSubmit']));
+    expect(cfg.hooks.Stop).toEqual([{ type: 'command', command: 'someone-elses-tool' }]);
+
+    // The host override is what makes the shared hook render Codex's response
+    // shape instead of inferring Claude Code from a familiar event name.
+    expect(JSON.stringify(cfg.hooks.SessionStart)).toContain('TEAMSHARE_HOST=codex');
+
+    expect(statSync(join(home, '.teamshare.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('writes nothing on a dry run', () => {
+    const home = tmp();
+    const result = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc', dryRun: true });
+    expect(result.status).toBe('skipped');
+    expect(existsSync(join(home, '.codex', 'hooks.json'))).toBe(false);
+    expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
+  });
+
+  it('a second install replaces its own entry instead of stacking a duplicate', () => {
+    const home = tmp();
+    installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_rotated' });
+    const cfg = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
+    for (const event of CODEX_HOOK_EVENTS) {
+      expect(cfg.hooks[event]).toHaveLength(1);
+    }
+    expect(JSON.parse(readFileSync(join(home, '.teamshare.json'), 'utf8')).token).toBe('tsm_rotated');
+  });
+
+  it('points every registered event at the one shared hook file, telling it which host and event it is', () => {
+    const home = tmp();
+    const result = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    const cfg = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
+    for (const event of CODEX_HOOK_EVENTS) {
+      const entry = cfg.hooks[event][0];
+      // A Claude-Code-shaped matcher group, not Cursor's flat `{ command }` —
+      // confirmed live rather than assumed to match Cursor's shape.
+      const command: string = entry.hooks[0].command;
+      expect(entry.hooks[0].type).toBe('command');
+      expect(command).toContain('TEAMSHARE_HOST=codex');
+      expect(command).toContain(`TEAMSHARE_HOOK_EVENT=${event}`);
+      expect(command).toContain(`node "${result.hookPath}"`);
+    }
+  });
+
+  it('does not invent a version field Codex was never observed to use', () => {
+    // Cursor's hooks.json carries `version: 1`; Codex's was never observed to
+    // have or need one. Writing one anyway would be a guess this task's own
+    // brief warns against.
+    const home = tmp();
+    const result = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    const cfg = JSON.parse(readFileSync(result.path, 'utf8'));
+    expect(cfg.version).toBeUndefined();
+  });
+
+  it('reports an error instead of throwing when the write fails', () => {
+    const home = tmp();
+    const result = installCodexHooks({
+      home,
+      url: 'https://ts.example.com',
+      token: 'tsm_abc',
+      fs: {
+        mkdirSync: () => { throw new Error('read-only file system'); },
+      },
+    });
+    expect(result.status).toBe('error');
+    expect(result.reason).toContain('read-only file system');
+  });
+
+  it('shares the same standalone hook file Cursor writes', () => {
+    // One file on disk, host-agnostic; TEAMSHARE_HOST at invocation time is
+    // what tells it apart. Two copies of the same content would be a second
+    // thing to keep in sync for no benefit.
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    const codexResult = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    expect(codexResult.hookPath).toBe(join(home, '.teamshare', 'hooks', 'teamshare-hook.mjs'));
+  });
+});
+
 describe('connect installs the Cursor hooks alongside the MCP entry', () => {
   it('writes them when Cursor is present', () => {
     const home = tmp();
@@ -1295,6 +1398,34 @@ describe('connect installs the Cursor hooks alongside the MCP entry', () => {
     const home = tmp();
     mkdirSync(join(home, '.cursor'), { recursive: true });
     const run = runConnect(url, token, { home, identity, only: ['cursor'], dryRun: true, now: FIXED_NOW });
+    expect(run.results[0].hooks?.status).toBe('skipped');
+    expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
+    expect(existsSync(join(home, '.teamshare'))).toBe(false);
+  });
+});
+
+describe('connect installs the Codex hooks alongside the MCP entry', () => {
+  it('writes them when Codex is present', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['codex'], now: FIXED_NOW });
+    expect(run.results[0].hooks?.status).toBe('written');
+    expect(existsSync(join(home, '.teamshare', 'hooks', 'teamshare-hook.mjs'))).toBe(true);
+    expect(formatConnectOutput(run)).toContain('session digest and mid-session nudge');
+  });
+
+  it('writes nothing hook-shaped on a machine without Codex', () => {
+    const home = tmp();
+    const run = runConnect(url, token, { home, identity, only: ['codex'], now: FIXED_NOW });
+    expect(run.results[0].status).toBe('not-installed');
+    expect(run.results[0].hooks).toBeUndefined();
+    expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
+  });
+
+  it('honours --dry-run', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['codex'], dryRun: true, now: FIXED_NOW });
     expect(run.results[0].hooks?.status).toBe('skipped');
     expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
     expect(existsSync(join(home, '.teamshare'))).toBe(false);

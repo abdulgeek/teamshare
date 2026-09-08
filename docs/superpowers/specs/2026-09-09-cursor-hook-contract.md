@@ -400,3 +400,211 @@ chat session server-side (referenced only by a UUID, never sent a message) as
 a side effect of probing the CLI's auth behavior; it holds no content and we
 did not find a non-interactive way to delete it (`cursor-agent ls` requires a
 TTY).
+
+## Codex
+
+**Date:** 2026-09-09
+**Binary:** `codex-cli 0.148.0-alpha.9`, found at
+`~/.codex/plugins/.plugin-appserver/codex` (installed as the engine behind a
+"ChatGPT" desktop app's Codex plugin runtime on this machine) and again,
+identically versioned, bundled as a Cursor extension
+(`~/.cursor/extensions/openai.chatgpt-*/bin/macos-aarch64/codex`, running live
+as `codex app-server` under Cursor's own process tree). No standalone `codex`
+on PATH; `~/.codex/config.toml` has no `hooks` section, confirming the
+brief's own `grep -i hook` finding — but that finding was about config.toml,
+not about whether Codex has a hook system.
+**Verification method:** binary inspection (`codex features list`, `codex
+plugin --help`, `strings` over the executable for its embedded serde
+struct/field names) followed by a **live, model-call-free run**: a real
+`codex exec` invocation, in an isolated `CODEX_HOME`, with a hand-written
+`hooks.json` and an intentionally-invalid `OPENAI_API_KEY` so the run reaches
+the hook-execution stage and fails at authentication afterward, at zero API
+cost. This follows the same "verify hands-on, don't trust the claim" standard
+Task 1 used on Cursor.
+
+### 1. Bottom line
+
+**Codex has a first-class, actively-maintained native hook system —
+`features list` reports `hooks  stable  true` — and it is not "Cursor with
+different event names." It is a near-verbatim reimplementation of Claude
+Code's own hook contract**: the same event names, the same input payload
+shape, and the same nested `hookSpecificOutput.additionalContext` response
+envelope for injecting context. Cursor's flat `additional_context` field —
+which claude-mem's `codex-hooks.json` and this task's own brief both assumed
+Codex would share — is specifically a Cursor accommodation; nothing in
+Codex's schema resembles it.
+
+This reverses the working assumption already baked into
+`packages/plugin/hooks/hosts.mjs` before this task (a comment there read
+"Cursor and Codex both take additional_context"). That comment was never
+verified against Codex; it was inherited from Cursor's shape on the
+assumption that "similar event names" implied "similar response shape." It
+did not. This spec and the `hosts.mjs` code have both been corrected.
+
+### 2. Evidence Codex's plugin system is Claude Code's, not merely similar to it
+
+Before finding Codex's *own* hooks, this machine's `~/.codex/plugins/cache/`
+turned up cached copies of real Claude Code plugins —
+`claude-plugins-official/superpowers`, `claude-plugins-official/
+security-guidance`, `understand-anything` — each with the standard
+`.claude-plugin/plugin.json` manifest and a `hooks/hooks.json` in Claude
+Code's own PascalCase format (`{"hooks": {"SessionStart": [{"matcher": ...,
+"hooks": [{"type": "command", "command": "...${CLAUDE_PLUGIN_ROOT}..."}]}]}}`).
+Codex's plugin runtime sets `CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA`
+alongside its own `PLUGIN_ROOT` / `PLUGIN_DATA` (both strings sit adjacent in
+the binary's embedded config-source labels) specifically so plugins authored
+for Claude Code run unmodified inside Codex's marketplace. This was the first
+signal that "Codex's hook contract" and "Claude Code's hook contract" might
+not be two things — they might be one thing wearing two names. The live test
+in §4 confirms it for Codex's *own*, non-plugin-scoped hooks.json too.
+
+### 3. Config location and event names
+
+`codex features list` (a subcommand of the real binary, not documentation)
+reports:
+
+```
+hooks   stable   true
+```
+
+`strings` over the binary surfaces its embedded serde schema directly —
+struct names `SessionStartHookSpecificOutputWire`,
+`UserPromptSubmitHookSpecificOutputWire`, `PreToolUseHookSpecificOutputWire`,
+`PostToolUseHookSpecificOutputWire`, `PermissionRequestHookSpecificOutputWire`,
+`SubagentStartHookSpecificOutputWire`, and a `HookEventNameWire` enum whose
+variants are exactly `PreToolUse, PermissionRequest, PostToolUse, PreCompact,
+PostCompact, SessionStart, UserPromptSubmit, SubagentStart, SubagentStop,
+Stop, SessionEnd` — a superset of Claude Code's five hook events, using
+Claude Code's own PascalCase names verbatim, not Cursor's camelCase
+(`sessionStart`, `beforeSubmitPrompt`).
+
+The binary's config-source labels (from `codex_config::loader::layer_io`, its
+config-layering module) list `hooks.json` as a named layer alongside
+`config.toml` and `managed_config.toml`, and a `source` enum for where a
+given hook came from includes `user`, `project`, `plugin`, `mdm`, and
+others — i.e. hooks.json is a real, user-scoped config layer, not only a
+plugin-manifest convention.
+
+**Confirmed live:** the correct path is `$CODEX_HOME/hooks.json`
+(`~/.codex/hooks.json` by default), sibling to `config.toml`. A hooks.json
+written there in exactly this shape was picked up and executed by a real
+`codex exec` with no other configuration:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [ { "hooks": [ { "type": "command", "command": "..." } ] } ],
+    "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "..." } ] } ]
+  }
+}
+```
+
+This is the same "matcher group containing a `hooks` array of `{type,
+command}` entries" shape real Claude Code plugins already ship — not a
+simpler flat shape invented for this task. No `matcher` key was supplied and
+both hooks still ran on every occurrence of their event, so omitting it means
+"run unconditionally," same as its absence would mean in Claude Code.
+
+### 4. The live test
+
+Setup: an isolated `CODEX_HOME` (so nothing on this machine's real Codex
+config was touched), a `config.toml` with `model_provider = "openai"` and
+`approval_policy = "never"`, the `hooks.json` above pointing both events at a
+small Node script that appends its stdin to a probe file and replies with
+`{"hookSpecificOutput": {"hookEventName": "<event>", "additionalContext":
+"TEAMSHARE_PROBE_MARKER_CODEX_9K3"}}`, and `OPENAI_API_KEY` set to an
+obviously invalid string. Run:
+
+```
+codex exec --skip-git-repo-check --dangerously-bypass-hook-trust --ephemeral \
+  -C <isolated workspace> "hi"
+```
+
+(`--dangerously-bypass-hook-trust` is itself evidence hooks are a real,
+actively-enforced feature: Codex normally requires a persisted trust decision
+before running an enabled hook, exactly like Claude Code's own hook-approval
+prompt.)
+
+Result — the run's own stderr, unprompted:
+
+```
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+```
+
+...followed by the *expected* failure: repeated `401 Unauthorized` against
+`api.openai.com`, from the deliberately-invalid key — proving no real model
+call, and no cost, was needed to get this result. The probe file received
+the real stdin payloads:
+
+```json
+{"session_id":"...","transcript_path":null,"cwd":"...","hook_event_name":"SessionStart","model":"gpt-5.6-sol","permission_mode":"bypassPermissions","source":"startup"}
+```
+```json
+{"session_id":"...","turn_id":"...","transcript_path":null,"cwd":"...","hook_event_name":"UserPromptSubmit","model":"gpt-5.6-sol","permission_mode":"bypassPermissions","prompt":"hi"}
+```
+
+Both fields and values are immediately recognizable from Claude Code's own
+hook payload: `session_id`, `transcript_path`, `cwd`, `hook_event_name`
+(carrying the PascalCase event name as its *string value*, exactly as Claude
+Code does), and — for `SessionStart` — a `source` field whose observed value,
+`"startup"`, is one of the values `packages/plugin/hooks/session-start.mjs`
+already gates on for Claude Code. No error or warning followed the hooks'
+nested `hookSpecificOutput.additionalContext` responses ("Completed" both
+times), which is the closest zero-cost confirmation available that Codex's
+deserializer accepted the shape rather than silently discarding it. A
+bare-stdout SessionStart response (Claude Code's other accepted shape) was
+never tried, so this task does not claim it also works — only that the
+tried, nested shape does.
+
+### 5. What this changes from the brief's assumption
+
+The brief framed this task's central question as "Codex's hook events are
+named like Claude Code's... Whether Codex accepts Claude Code's *response*
+shape is unverified, and that is the whole question," while separately
+assuming (for scoping purposes) that the answer would look like Cursor's —
+"differing only in config path, event names, and TEAMSHARE_HOST=codex." The
+live test answers the actual question directly: **yes, Codex accepts Claude
+Code's response shape** — because it *is* Claude Code's response-parsing
+code, not a lookalike. Three concrete consequences for the implementation:
+
+- `packages/plugin/hooks/hosts.mjs`'s `renderResponse` now branches on
+  `host === 'codex'` separately from Cursor, emitting
+  `{hookSpecificOutput: {hookEventName, additionalContext}}` for both events
+  (SessionStart included — unlike Claude Code, which takes bare stdout for
+  SessionStart but was never confirmed to accept that from Codex, so the one
+  shape actually watched working is used for both).
+- `packages/plugin/hooks/session-start.mjs`'s re-ask protection
+  (`ALLOWED_SOURCES`), previously gated on `host === 'claude-code'` only, now
+  also applies to `host === 'codex'` — its SessionStart payload carries the
+  same `source` field with at least the same `"startup"` value.
+- `installHooksFor` in `teamshare-connect.mjs` (the middle Cursor's installer
+  was factored into) parameterizes the hooks.json *entry* shape, not only the
+  config path and event names — Cursor's entries are flat `{command}`;
+  Codex's are Claude-Code-shaped matcher groups. The brief's "differing only
+  in config path, event names, and TEAMSHARE_HOST" undersold this by one
+  axis.
+
+### 6. Gate decision for Task 4
+
+Codex has a real, stable, actively-enforced hook system whose response
+contract for context injection is confirmed working end to end on this
+machine. **Task 4 proceeds**: `installCodexHooks` is implemented, wired into
+`runConnect` alongside `installCursorHooks`, and both now share the
+`installHooksFor` middle the brief asked for. This is not the "no hook
+system, drop the task" branch the brief allowed for — that branch was ruled
+out by direct evidence, not assumed absent from `config.toml`'s silence
+alone.
+
+### 7. Machine state
+
+The isolated `CODEX_HOME` and workspace used for the live test lived entirely
+under this session's scratch directory and were never pointed at this
+machine's real `~/.codex`; nothing under the real `~/.codex` was read,
+written, or backed up during verification. The one `codex exec` process that
+hung during setup (a stdin-handling artifact of running under a piped
+harness, unrelated to hooks — fixed by redirecting stdin from `/dev/null`)
+was killed manually; it made no network request beyond the deliberately
+invalid, immediately-rejected auth attempts described in §4.

@@ -149,7 +149,11 @@ async function fetchUnread(cfg, timeoutMs) {
 // docs/superpowers/specs/2026-09-09-cursor-hook-contract.md. Cursor's own
 // published docs say beforeSubmitPrompt cannot inject context; the validator
 // shipped in Cursor 3.19.10 says otherwise, and the probe in Task 1 settles
-// which is true.
+// which is true. Codex's own contract is verified the same way — see that
+// document's "Codex" section: a live `codex exec` run, with a real hooks.json
+// under an isolated CODEX_HOME, confirmed the wire shape below by watching
+// Codex accept it (no "invalid ... JSON output" warning, hook reported
+// Completed) rather than by reading a claim about it.
 
 const CURSOR_EVENTS = new Set([
   'sessionStart', 'beforeSubmitPrompt', 'stop', 'postToolUse', 'afterFileEdit',
@@ -188,8 +192,23 @@ function renderResponse({ host, event, context, userMessage }) {
       ...(userMessage ? { systemMessage: userMessage } : {}),
     });
   }
-  // Cursor and Codex both take additional_context. Neither has a channel for
-  // a user-visible line, so userMessage is dropped rather than smuggled into
+  if (host === 'codex') {
+    // Codex is not Cursor with different event names — its hook runtime is a
+    // near-verbatim port of Claude Code's, deserializing the same
+    // hookSpecificOutput envelope with the same hookEventName/additionalContext
+    // fields (confirmed live, not inferred from Cursor's shape or from
+    // claude-mem's guess — see the "Codex" section of the doc cited above).
+    // Unlike Claude Code, a bare-stdout SessionStart was never exercised, so
+    // both events use the one shape that was actually watched work.
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: event === 'session-start' ? 'SessionStart' : 'UserPromptSubmit',
+        additionalContext: context,
+      },
+    });
+  }
+  // Cursor takes a flat additional_context. It has no channel for a
+  // user-visible line, so userMessage is dropped rather than smuggled into
   // the model's context where it would read as an instruction.
   return JSON.stringify({ additional_context: context });
 }
@@ -285,11 +304,14 @@ async function main() {
   const host = detectHost(payload, process.env);
   normalizePayload(payload, host); // for parity with prompt-submit.mjs; this hook needs only `host`
 
-  // The source gate is Claude-Code-only: Cursor's sessionStart has no
-  // `source`, and gating on a field it never sends would silence it entirely.
-  // The hooks.json matcher already filters sources on Claude Code; re-check
-  // defensively.
-  if (host === 'claude-code' && payload.source && !ALLOWED_SOURCES.has(payload.source)) return;
+  // The source gate applies to Claude Code and Codex, not Cursor: Cursor's
+  // sessionStart sends no `source` at all, and gating on a field it never
+  // sends would silence it entirely. Codex's SessionStart payload was
+  // confirmed live to carry the same `source` field Claude Code uses (a fresh
+  // `codex exec` sent `"source":"startup"`, one of the allowed values) — see
+  // this file's sibling doc reference in hosts.mjs. The hooks.json matcher
+  // already filters sources on Claude Code; re-check defensively for both.
+  if ((host === 'claude-code' || host === 'codex') && payload.source && !ALLOWED_SOURCES.has(payload.source)) return;
 
   const cfg = loadConfig(process.env);
   if (!cfg) return;

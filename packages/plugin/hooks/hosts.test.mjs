@@ -59,6 +59,20 @@ describe('renderResponse', () => {
     }
   });
 
+  it('wraps Codex in hookSpecificOutput on both events, unlike Cursor', () => {
+    // Confirmed live against a real `codex exec` run (see the "Codex" section
+    // of docs/superpowers/specs/2026-09-09-cursor-hook-contract.md): Codex's
+    // hook deserializer is Claude Code's, not Cursor's, so it wants the nested
+    // envelope even though `detectHost` would otherwise group it with Cursor.
+    const start = JSON.parse(renderResponse({ host: 'codex', event: 'session-start', context: 'HELLO' }));
+    expect(start.hookSpecificOutput.hookEventName).toBe('SessionStart');
+    expect(start.hookSpecificOutput.additionalContext).toBe('HELLO');
+
+    const submit = JSON.parse(renderResponse({ host: 'codex', event: 'prompt-submit', context: 'HELLO' }));
+    expect(submit.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
+    expect(submit.hookSpecificOutput.additionalContext).toBe('HELLO');
+  });
+
   it('writes nothing at all when there is nothing to say', () => {
     expect(renderResponse({ host: 'cursor', event: 'session-start', context: '' })).toBe('');
     expect(renderResponse({ host: 'claude-code', event: 'session-start', context: '' })).toBe('');

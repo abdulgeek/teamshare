@@ -266,6 +266,30 @@ describe('session-start hook', () => {
     expect(out.trim()).toBe('');
   });
 
+  it('prints nothing on a compact session on Codex either, even if invoked', async () => {
+    // Codex's own SessionStart payload was confirmed live to carry the same
+    // `source` field Claude Code uses (see the "Codex" section of
+    // docs/superpowers/specs/2026-09-09-cursor-hook-contract.md), so the same
+    // re-ask protection has to hold there — TEAMSHARE_HOST is what the
+    // installed hook is actually invoked with on Codex.
+    writeConfig();
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        total: 1,
+        shares: [{
+          id: 'shr_x', sender_name: 'A', sender_email: 'a@t.com',
+          created_at: '2026-08-29T09:00:00.000Z', priority: 'fyi', what: 'x',
+        }],
+      }));
+    };
+    const out = await runHook(
+      { hook_event_name: 'SessionStart', source: 'compact' },
+      { TEAMSHARE_HOST: 'codex' },
+    );
+    expect(out.trim()).toBe('');
+  });
+
   describe('CLAUDE_PLUGIN_OPTION_* config resolution (installed-plugin path)', () => {
     it('resolves url/token from env with no config file present, and sends no identity headers', async () => {
       // No writeConfig() call: ~/.teamshare.json does not exist at all. Only

@@ -857,7 +857,11 @@ async function fetchUnread(cfg, timeoutMs) {
 // docs/superpowers/specs/2026-09-09-cursor-hook-contract.md. Cursor's own
 // published docs say beforeSubmitPrompt cannot inject context; the validator
 // shipped in Cursor 3.19.10 says otherwise, and the probe in Task 1 settles
-// which is true.
+// which is true. Codex's own contract is verified the same way — see that
+// document's "Codex" section: a live \`codex exec\` run, with a real hooks.json
+// under an isolated CODEX_HOME, confirmed the wire shape below by watching
+// Codex accept it (no "invalid ... JSON output" warning, hook reported
+// Completed) rather than by reading a claim about it.
 
 const CURSOR_EVENTS = new Set([
   'sessionStart', 'beforeSubmitPrompt', 'stop', 'postToolUse', 'afterFileEdit',
@@ -896,8 +900,23 @@ function renderResponse({ host, event, context, userMessage }) {
       ...(userMessage ? { systemMessage: userMessage } : {}),
     });
   }
-  // Cursor and Codex both take additional_context. Neither has a channel for
-  // a user-visible line, so userMessage is dropped rather than smuggled into
+  if (host === 'codex') {
+    // Codex is not Cursor with different event names — its hook runtime is a
+    // near-verbatim port of Claude Code's, deserializing the same
+    // hookSpecificOutput envelope with the same hookEventName/additionalContext
+    // fields (confirmed live, not inferred from Cursor's shape or from
+    // claude-mem's guess — see the "Codex" section of the doc cited above).
+    // Unlike Claude Code, a bare-stdout SessionStart was never exercised, so
+    // both events use the one shape that was actually watched work.
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: event === 'session-start' ? 'SessionStart' : 'UserPromptSubmit',
+        additionalContext: context,
+      },
+    });
+  }
+  // Cursor takes a flat additional_context. It has no channel for a
+  // user-visible line, so userMessage is dropped rather than smuggled into
   // the model's context where it would read as an instruction.
   return JSON.stringify({ additional_context: context });
 }
@@ -993,11 +1012,14 @@ async function main() {
   const host = detectHost(payload, process.env);
   normalizePayload(payload, host); // for parity with prompt-submit.mjs; this hook needs only \`host\`
 
-  // The source gate is Claude-Code-only: Cursor's sessionStart has no
-  // \`source\`, and gating on a field it never sends would silence it entirely.
-  // The hooks.json matcher already filters sources on Claude Code; re-check
-  // defensively.
-  if (host === 'claude-code' && payload.source && !ALLOWED_SOURCES.has(payload.source)) return;
+  // The source gate applies to Claude Code and Codex, not Cursor: Cursor's
+  // sessionStart sends no \`source\` at all, and gating on a field it never
+  // sends would silence it entirely. Codex's SessionStart payload was
+  // confirmed live to carry the same \`source\` field Claude Code uses (a fresh
+  // \`codex exec\` sent \`"source":"startup"\`, one of the allowed values) — see
+  // this file's sibling doc reference in hosts.mjs. The hooks.json matcher
+  // already filters sources on Claude Code; re-check defensively for both.
+  if ((host === 'claude-code' || host === 'codex') && payload.source && !ALLOWED_SOURCES.has(payload.source)) return;
 
   const cfg = loadConfig(process.env);
   if (!cfg) return;
@@ -1315,38 +1337,66 @@ dispatch().then(
 // — see docs/superpowers/specs/2026-09-09-cursor-hook-contract.md.
 export const CURSOR_HOOK_EVENTS = ['sessionStart', 'beforeSubmitPrompt'];
 
-// The name is the idempotency key: a rerun recognises its own entries by it,
-// so it can replace them instead of appending a duplicate.
-const CURSOR_HOOK_FILENAME = 'teamshare-hook.mjs';
+// Codex's own event names, PascalCase — confirmed live against a real
+// `codex exec` run rather than assumed from claude-mem's codex-hooks.json
+// (see the "Codex" section of the doc cited above). Unlike Cursor's, these
+// are literally Claude Code's own event names; only the response shape
+// (handled in packages/plugin/hooks/hosts.mjs) and the config file's entry
+// shape (handled below) needed anything host-specific at all.
+export const CODEX_HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit'];
 
-// The default `fs` for installCursorHooks. An object rather than a namespace
+// The name is the idempotency key: a rerun recognises its own entries by it,
+// so it can replace them instead of appending a duplicate. Shared by both
+// hosts — there is exactly one hook file on disk regardless of how many
+// non-Claude-Code assistants point at it; TEAMSHARE_HOST is what tells it
+// apart at runtime.
+const TEAMSHARE_HOOK_FILENAME = 'teamshare-hook.mjs';
+
+// The default `fs` for installHooksFor. An object rather than a namespace
 // import so the file's existing named imports stay the single list of what it
 // touches on disk.
 const nodeFs = { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, chmodSync };
 
 /**
- * Write the standalone hook, the credential it reads, and Cursor's hooks.json.
+ * The shared middle of installing teamshare's hooks into a host with no
+ * plugin system of its own: write the standalone hook file, write/merge the
+ * credential it reads, then back up and merge the host's own hooks.json.
  *
- * @param {{ home?: string, url: string, token: string, dryRun?: boolean, now?: () => number, fs?: object }} opts
+ * What differs per host — the config path, the event names in that host's own
+ * casing, and how one event's array of hook entries is shaped — is supplied
+ * by the caller rather than guessed here. Cursor and Codex turned out to
+ * disagree on more than event names: Cursor's entries are a flat
+ * `{ command }`, Codex's are Claude-Code-shaped matcher groups
+ * (`{ hooks: [{ type: 'command', command }] }`) — both confirmed against the
+ * actual host rather than assumed from the other's shape.
+ *
+ * @param {{
+ *   home: string, url: string, token: string, dryRun?: boolean,
+ *   now?: () => number, fs?: object, configPath: string, events: string[],
+ *   defaultConfig: () => object, buildEntry: (hookPath: string, event: string) => object,
+ * }} opts
  */
-export function installCursorHooks(opts) {
+function installHooksFor(opts) {
   const {
-    home = homedir(),
+    home,
     url,
     token,
     dryRun = false,
     now = Date.now,
     fs: fsImpl = nodeFs,
+    configPath,
+    events,
+    defaultConfig,
+    buildEntry,
   } = opts;
 
-  const cfgPath = join(home, '.cursor', 'hooks.json');
-  if (dryRun) return { status: 'skipped', path: cfgPath };
+  if (dryRun) return { status: 'skipped', path: configPath };
   if (!url || !token) {
-    return { status: 'error', path: cfgPath, reason: 'a server URL and a personal token are both required' };
+    return { status: 'error', path: configPath, reason: 'a server URL and a personal token are both required' };
   }
 
   try {
-    const hookPath = join(home, '.teamshare', 'hooks', CURSOR_HOOK_FILENAME);
+    const hookPath = join(home, '.teamshare', 'hooks', TEAMSHARE_HOOK_FILENAME);
     fsImpl.mkdirSync(dirname(hookPath), { recursive: true, mode: 0o700 });
     fsImpl.writeFileSync(hookPath, TEAMSHARE_HOOK_SOURCE, { mode: 0o755 });
 
@@ -1386,51 +1436,109 @@ export function installCursorHooks(opts) {
       // A filesystem without POSIX modes is not a reason to fail the install.
     }
 
-    let cfg = { version: 1, hooks: {} };
+    const template = defaultConfig();
+    let cfg = defaultConfig();
     let backup;
-    if (fsImpl.existsSync(cfgPath)) {
+    if (fsImpl.existsSync(configPath)) {
       // Back up before reading, let alone writing: whatever is in there is
       // someone's working configuration, and it may be something this code has
       // never seen.
-      backup = `${cfgPath}.teamshare-backup-${now()}`;
-      fsImpl.copyFileSync(cfgPath, backup);
+      backup = `${configPath}.teamshare-backup-${now()}`;
+      fsImpl.copyFileSync(configPath, backup);
       try {
-        const parsed = JSON.parse(fsImpl.readFileSync(cfgPath, 'utf8'));
+        const parsed = JSON.parse(fsImpl.readFileSync(configPath, 'utf8'));
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) cfg = parsed;
       } catch {
         // Unparseable. Keep the default — the backup taken a moment ago is the
         // copy of whatever was actually there.
       }
       if (!cfg.hooks || typeof cfg.hooks !== 'object' || Array.isArray(cfg.hooks)) cfg.hooks = {};
-      if (cfg.version === undefined) cfg.version = 1;
+      // Only add a `version` key where the host's own default shape has one
+      // (Cursor does; Codex's hooks.json was never observed to carry or need
+      // one) — inventing a field a host has no use for is not this
+      // installer's call to make on a self-hoster's behalf.
+      if (cfg.version === undefined && template.version !== undefined) cfg.version = template.version;
     }
 
-    for (const event of CURSOR_HOOK_EVENTS) {
+    for (const event of events) {
       const existing = Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : [];
       // Everything that is not ours is kept, in order. Ours is dropped and
       // re-added, so the command string stays current across upgrades and a
-      // reinstall never stacks duplicates.
-      const others = existing.filter(
-        (h) => !String((h && h.command) || '').includes(CURSOR_HOOK_FILENAME),
-      );
-      cfg.hooks[event] = [
-        ...others,
-        // TEAMSHARE_HOST tells the hook which response shape this host takes;
-        // TEAMSHARE_HOOK_EVENT tells it which of the two hooks to run, since
-        // both live in one file here. The hook can infer the event from the
-        // payload too, but being told beats inferring.
-        { command: `TEAMSHARE_HOST=cursor TEAMSHARE_HOOK_EVENT=${event} node "${hookPath}"` },
-      ];
+      // reinstall never stacks duplicates. Matched by searching the whole
+      // entry rather than a fixed `.command` path, since that path differs
+      // between Cursor's flat entries and Codex's nested ones.
+      const others = existing.filter((h) => !JSON.stringify(h).includes(TEAMSHARE_HOOK_FILENAME));
+      cfg.hooks[event] = [...others, buildEntry(hookPath, event)];
     }
 
-    fsImpl.mkdirSync(dirname(cfgPath), { recursive: true });
-    fsImpl.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n');
-    return { status: 'written', path: cfgPath, hookPath, credentialPath: credPath, backup };
+    fsImpl.mkdirSync(dirname(configPath), { recursive: true });
+    fsImpl.writeFileSync(configPath, JSON.stringify(cfg, null, 2) + '\n');
+    return { status: 'written', path: configPath, hookPath, credentialPath: credPath, backup };
   } catch (err) {
     // Never fail the whole connect run over this: the MCP entry is the part
     // that makes teamshare work at all, and it has already been written.
-    return { status: 'error', path: cfgPath, reason: err && err.message ? err.message : String(err) };
+    return { status: 'error', path: configPath, reason: err && err.message ? err.message : String(err) };
   }
+}
+
+/**
+ * Write the standalone hook, the credential it reads, and Cursor's hooks.json.
+ *
+ * @param {{ home?: string, url: string, token: string, dryRun?: boolean, now?: () => number, fs?: object }} opts
+ */
+export function installCursorHooks(opts) {
+  const { home = homedir(), ...rest } = opts;
+  return installHooksFor({
+    ...rest,
+    home,
+    configPath: join(home, '.cursor', 'hooks.json'),
+    events: CURSOR_HOOK_EVENTS,
+    defaultConfig: () => ({ version: 1, hooks: {} }),
+    // TEAMSHARE_HOST tells the hook which response shape this host takes;
+    // TEAMSHARE_HOOK_EVENT tells it which of the two hooks to run, since both
+    // live in one file here. The hook can infer the event from the payload
+    // too, but being told beats inferring.
+    buildEntry: (hookPath, event) => ({
+      command: `TEAMSHARE_HOST=cursor TEAMSHARE_HOOK_EVENT=${event} node "${hookPath}"`,
+    }),
+  });
+}
+
+/**
+ * Write the standalone hook, the credential it reads, and Codex's hooks.json.
+ *
+ * Codex's own hooks.json lives at `$CODEX_HOME/hooks.json` (`~/.codex/hooks.json`
+ * by default) — confirmed live: an isolated CODEX_HOME with a hand-written
+ * hooks.json in exactly the shape written below had both hooks actually run
+ * on a real `codex exec`, reported "Completed" in its own log output, with no
+ * complaint about the response — see the "Codex" section of
+ * docs/superpowers/specs/2026-09-09-cursor-hook-contract.md.
+ *
+ * Each entry is a Claude-Code-shaped matcher group with no `matcher` key
+ * (meaning: run on every occurrence of the event), because that is the exact
+ * shape real Claude Code plugins already ship inside Codex's own plugin
+ * marketplace format — not a guess at a simpler flat shape that was never
+ * exercised.
+ *
+ * @param {{ home?: string, url: string, token: string, dryRun?: boolean, now?: () => number, fs?: object }} opts
+ */
+export function installCodexHooks(opts) {
+  const { home = homedir(), ...rest } = opts;
+  return installHooksFor({
+    ...rest,
+    home,
+    configPath: join(home, '.codex', 'hooks.json'),
+    events: CODEX_HOOK_EVENTS,
+    defaultConfig: () => ({ hooks: {} }),
+    buildEntry: (hookPath, event) => ({
+      hooks: [
+        {
+          type: 'command',
+          command: `TEAMSHARE_HOST=codex TEAMSHARE_HOOK_EVENT=${event} node "${hookPath}"`,
+        },
+      ],
+    }),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1529,13 +1637,18 @@ export function runConnect(url, token, options = {}) {
     return { id: target.id, label: target.label, path: target.configPath, ...applied };
   });
 
-  // Cursor alone gets a second write: the hooks, which have no MCP equivalent
-  // (see the section above). Gated on Cursor actually being on this machine —
-  // this is also what creates ~/.teamshare.json, and a machine with no Cursor
-  // has no reason to grow a credential file it will never read.
+  // Cursor and Codex both get a second write: the hooks, which have no MCP
+  // equivalent (see the section above). Gated on each actually being present
+  // on this machine — this is also what creates ~/.teamshare.json, and a
+  // machine with neither has no reason to grow a credential file it will
+  // never read.
   const cursor = results.find((r) => r.id === 'cursor');
   if (cursor && cursor.status !== 'not-installed') {
     cursor.hooks = installCursorHooks({ home, url, token, dryRun, now });
+  }
+  const codex = results.find((r) => r.id === 'codex');
+  if (codex && codex.status !== 'not-installed') {
+    codex.hooks = installCodexHooks({ home, url, token, dryRun, now });
   }
 
   return { identity, results, showToken };

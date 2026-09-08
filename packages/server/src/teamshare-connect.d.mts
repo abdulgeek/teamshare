@@ -36,8 +36,8 @@ export interface TargetResult {
   backupPath?: string;
   reason?: string;
   snippet?: string;
-  /** Cursor only: the outcome of installing the two hook scripts alongside the MCP entry. */
-  hooks?: CursorHooksResult;
+  /** Cursor and Codex only: the outcome of installing the two hook scripts alongside the MCP entry. */
+  hooks?: CursorHooksResult | CodexHooksResult;
 }
 
 export interface CursorHooksResult {
@@ -64,6 +64,26 @@ export interface InstallCursorHooksOptions {
   /** Defaults to Date.now; tests pin this so the backup filename is deterministic. */
   now?: () => number;
   /** Injectable fs, for tests that need to prove the failure path. */
+  fs?: object;
+}
+
+/** Same shape as CursorHooksResult; `path` here is ~/.codex/hooks.json. */
+export interface CodexHooksResult {
+  status: 'written' | 'skipped' | 'error';
+  path: string;
+  hookPath?: string;
+  credentialPath?: string;
+  backup?: string;
+  reason?: string;
+}
+
+/** Same shape as InstallCursorHooksOptions. */
+export interface InstallCodexHooksOptions {
+  home?: string;
+  url: string;
+  token: string;
+  dryRun?: boolean;
+  now?: () => number;
   fs?: object;
 }
 
@@ -139,6 +159,9 @@ export const TEAMSHARE_HOOK_SOURCE: string;
 /** The Cursor hook events teamshare registers for. */
 export const CURSOR_HOOK_EVENTS: string[];
 export function installCursorHooks(opts: InstallCursorHooksOptions): CursorHooksResult;
+/** The Codex hook events teamshare registers for (Claude Code's own PascalCase names). */
+export const CODEX_HOOK_EVENTS: string[];
+export function installCodexHooks(opts: InstallCodexHooksOptions): CodexHooksResult;
 export function formatListOutput(detected: DetectedTarget[]): string;
 export function formatConnectOutput(run: ConnectRunResult): string;
 
