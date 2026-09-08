@@ -1,11 +1,20 @@
 import { randomBytes } from 'node:crypto';
 import { normalizeEmail, type TeamScope } from './db.js';
+import { validateEmailAddress } from './http.js';
 import { PROJECT_KEY_SHAPE } from './project.js';
 
 export type Priority = 'fyi' | 'heads-up' | 'blocking';
 export const PRIORITIES: readonly Priority[] = ['fyi', 'heads-up', 'blocking'];
 
-export const CAPS = { what: 200, why: 300, action: 200, tags: 5, tagLength: 20, project: 200 } as const;
+export const CAPS = {
+  what: 200,
+  why: 300,
+  action: 200,
+  tags: 5,
+  tagLength: 20,
+  project: 200,
+  recipients: 20,
+} as const;
 
 export interface ShareInput {
   what: string;
@@ -21,11 +30,18 @@ export interface ShareInput {
    */
   project?: string;
   /**
-   * The people this share is addressed to. Omitted or empty means the whole
+   * The people this share is addressed to. OMITTED or `[]` means the whole
    * team — see unread.ts's AND_RECIPIENT clause and ShareRow.recipients below
-   * for why an empty list must never be read as "nobody". Normalised the same
-   * way every other email in this codebase is (normalizeEmail), deduplicated,
-   * and never includes the sender: a share never notifies its own author.
+   * for why no recipient rows must be read as "everyone", not "nobody".
+   *
+   * A list the author actually wrote is different: it is validated like every
+   * other field (validateShare below — shape, cap, no blanks) and resolved
+   * against the team roster before anything is written. A non-empty list that
+   * would resolve to nobody — all blanks, only the sender, or an address
+   * nobody on the team holds — is an ERROR, never a silent broadcast to the
+   * whole team. Addresses are normalised the same way every other email in
+   * this codebase is (normalizeEmail) and deduplicated; the sender is always
+   * dropped, since a share never notifies its own author.
    */
   recipients?: string[];
 }
@@ -37,6 +53,13 @@ export interface CleanShare {
   tags: string[];
   priority: Priority;
   project: string | null;
+  /**
+   * Normalised, deduplicated, in the order the author wrote them. Empty means
+   * the author named nobody (omitted or `[]`) — the whole team. It never means
+   * "the author named people and none of them survived validation": that is an
+   * error, returned as one, never a value here.
+   */
+  recipients: string[];
 }
 
 export interface ShareRow {
@@ -120,7 +143,47 @@ export function validateShare(input: ShareInput): ValidationResult {
     project = projectRaw;
   }
 
-  return { ok: true, value: { what, why, action, tags, priority: input.priority, project } };
+  // Recipients are validated HERE, with every other field, rather than being
+  // waved through into createShare — an addressed share is a privacy control,
+  // and unvalidated input is exactly what let a list the author wrote collapse
+  // to nothing and broadcast to the whole team. Three rules:
+  //
+  //   1. a count cap, like tags;
+  //   2. every entry is a real address — the same check invites go through
+  //      (http.ts's validateEmailAddress), never a second hand-rolled regex;
+  //   3. a blank entry is rejected outright rather than filtered away, because
+  //      filtering is what silently turns ['   '] into "the whole team".
+  //
+  // An omitted list and `[]` both arrive here as an empty array and leave as
+  // one: that IS the team-wide case, and the only one.
+  const rawRecipients = input.recipients ?? [];
+  if (!Array.isArray(rawRecipients)) {
+    return { ok: false, error: 'recipients must be a list of email addresses' };
+  }
+  if (rawRecipients.length > CAPS.recipients) {
+    return { ok: false, error: `recipients has ${rawRecipients.length} entries; cap is ${CAPS.recipients}.` };
+  }
+  const recipients: string[] = [];
+  for (const raw of rawRecipients) {
+    if (typeof raw !== 'string' || raw.trim().length === 0) {
+      return {
+        ok: false,
+        error:
+          `recipients contains an empty entry (${JSON.stringify(raw) ?? String(raw)}). ` +
+          'Name a real address, or omit recipients entirely to reach the whole team.',
+      };
+    }
+    // The label carries the offending address into the message, so an error
+    // says which entry is wrong rather than that "one of them" is.
+    const check = validateEmailAddress(raw, `recipient "${raw.trim().slice(0, 60)}"`);
+    if (!check.ok) return { ok: false, error: check.error };
+    if (!recipients.includes(check.value)) recipients.push(check.value);
+  }
+
+  return {
+    ok: true,
+    value: { what, why, action, tags, priority: input.priority, project, recipients },
+  };
 }
 
 function rowToShare(row: Record<string, unknown>, recipients: string[]): ShareRow {
@@ -149,6 +212,57 @@ function getRecipientEmails(scope: TeamScope, shareId: string): string[] {
   return rows.map((r) => r.email);
 }
 
+// The recipients a share will actually be written with: the validated
+// addresses minus the sender, resolved against this team's roster. Every way
+// this can fail throws HERE — before createShare writes anything — because a
+// failure between the share row and its recipient rows leaves a share with no
+// recipients, and "no recipient rows" means the whole team (unread.ts's
+// AND_RECIPIENT). Failing open in that direction is a privacy bug, not a
+// glitch, so the only shape allowed is: resolve everything, then write.
+//
+// A recipient who is not a current member is an ERROR, not a silently dropped
+// entry. Two reasons. First, it keeps one invariant true in the database:
+// every share_recipients row names someone the roster knows, so `notified`
+// (counted here) and getReceipts' expected-reader set (counted from `members`)
+// can never disagree — the two cannot drift apart because neither has to
+// remember to intersect. Second, the alternative is silent: a typo'd address
+// would publish a share addressed to nobody, the author would be told it was
+// delivered, and no one would ever read it. An error naming the address is
+// recoverable; a share into the void is not.
+function resolveRecipients(scope: TeamScope, sender: string, addressed: string[]): string[] {
+  // Omitted or `[]` — the author named nobody, so this is a team-wide share.
+  // The ONLY path to zero recipient rows.
+  if (addressed.length === 0) return [];
+
+  const withoutSender = addressed.filter((email) => email !== sender);
+  if (withoutSender.length === 0) {
+    throw new Error(
+      'recipients names only you, and a share never notifies its own author — so this would ' +
+        'reach nobody. Name a teammate, or omit recipients entirely to reach the whole team.',
+    );
+  }
+
+  // Scoped on team_id like every other members read in this codebase: an
+  // address that is on some other team is not on this one.
+  const placeholders = withoutSender.map(() => '?').join(', ');
+  const known = new Set(
+    (
+      scope.db
+        .prepare(`SELECT email FROM members WHERE team_id = ? AND email IN (${placeholders})`)
+        .all(scope.teamId, ...withoutSender) as { email: string }[]
+    ).map((r) => r.email),
+  );
+
+  const unknown = withoutSender.filter((email) => !known.has(email));
+  if (unknown.length > 0) {
+    throw new Error(
+      `not on this team: ${unknown.join(', ')}. Check the address — a typo here would address ` +
+        'the share to nobody — or omit recipients entirely to reach the whole team.',
+    );
+  }
+  return withoutSender;
+}
+
 export function createShare(
   scope: TeamScope,
   senderEmail: string,
@@ -160,40 +274,36 @@ export function createShare(
 
   const sender = normalizeEmail(senderEmail);
   const id = `shr_${randomBytes(6).toString('hex')}`;
-  const { what, why, action, tags, priority, project } = result.value;
+  const { what, why, action, tags, priority, project, recipients: addressed } = result.value;
 
-  scope.db
-    .prepare(
-      `INSERT INTO shares (id, team_id, sender_email, what, why, action, tags, priority, created_at, project)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(id, scope.teamId, sender, what, why, action, JSON.stringify(tags), priority, nowIso, project);
+  // Resolved BEFORE the first write, so nothing this can throw about is able
+  // to leave a committed share behind. See resolveRecipients.
+  const recipients = resolveRecipients(scope, sender, addressed);
 
-  // Normalised the same way every other email is, deduplicated, and never
-  // includes the sender — a share never notifies its own author, and
-  // WHERE_UNREAD (unread.ts) already excludes them regardless, so a
-  // self-addressed entry here would only ever inflate `notified` for
-  // nothing. An empty (or entirely self-addressed) list writes no rows at
-  // all: unread.ts's AND_RECIPIENT reads "no rows" as "the whole team", not
-  // "nobody" — that is the deliberate empty-list behavior.
-  const recipients = Array.from(
-    new Set((input.recipients ?? []).map(normalizeEmail).filter((email) => email.length > 0 && email !== sender)),
+  const insertShare = scope.db.prepare(
+    `INSERT INTO shares (id, team_id, sender_email, what, why, action, tags, priority, created_at, project)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const insertRecipient = scope.db.prepare(
+    `INSERT INTO share_recipients (team_id, share_id, email) VALUES (?, ?, ?)`,
   );
 
-  if (recipients.length > 0) {
-    const insertRecipient = scope.db.prepare(
-      `INSERT INTO share_recipients (team_id, share_id, email) VALUES (?, ?, ?)`,
-    );
-    const insertAll = scope.db.transaction((emails: string[]) => {
-      for (const email of emails) insertRecipient.run(scope.teamId, id, email);
-    });
-    insertAll(recipients);
-  }
+  // ONE transaction over the share and its recipient rows. A share that
+  // committed while its recipient rows did not is a share addressed to one
+  // person that the whole team can read; there is no partial state of this
+  // write that is safe to leave behind, so there is none.
+  const write = scope.db.transaction(() => {
+    insertShare.run(id, scope.teamId, sender, what, why, action, JSON.stringify(tags), priority, nowIso, project);
+    for (const email of recipients) insertRecipient.run(scope.teamId, id, email);
+  });
+  write();
 
-  // "notified" means "the people this reaches" — for an addressed share
-  // that is the recipient list itself (already sender-excluded above), not
-  // the whole team minus the sender. See the controller ruling: a share
-  // addressed to two people must report notified: 2, not the team's size.
+  // "notified" means "the people this reaches". For an addressed share that
+  // is the recipient list, which resolveRecipients has already proved to be
+  // sender-free and entirely made of current members — so this is the same
+  // set getReceipts will report on, not a raw count of what the caller typed.
+  // For an unaddressed share it is the whole team minus the sender, exactly
+  // as before.
   const notified =
     recipients.length > 0
       ? recipients.length

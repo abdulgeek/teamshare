@@ -148,6 +148,28 @@ describe('getReceipts: addressed shares', () => {
     expect(r.unseen.map((u) => u.email)).toEqual(['priya@team.com']);
   });
 
+  // Finding 3 of the Task 7 review: createShare's `notified` and this
+  // function's expected-reader set were counted from different things — the
+  // raw list the caller typed, versus real `members` rows — so a typo'd
+  // address reported "notified: 1" for a share with zero expected readers.
+  // They now come from one resolved set, and the mismatch is unconstructible.
+  it('accounts for exactly as many people as createShare reported notified', () => {
+    const { id, notified } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'for sam and priya', priority: 'fyi', recipients: ['sam@team.com', 'priya@team.com'] }, T0,
+    );
+    recordReceipt(scope, id, 'sam@team.com', 'viewed', NOW);
+    const r = getReceipts(scope, id, NOW, 14)!;
+    expect(r.viewed.length + r.dismissed.length + r.unseen.length).toBe(notified);
+
+    // And the way the two used to disagree cannot happen at all any more: an
+    // address no member holds is refused at publish time rather than counted
+    // as notified and then reported to nobody.
+    expect(() =>
+      createShare(scope, 'adnan@team.com', { what: 'typo', priority: 'fyi', recipients: ['sma@team.com'] }, T0),
+    ).toThrow(/sma@team\.com/);
+  });
+
   it('keeps reporting the whole team when a share names no recipients', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'everyone', priority: 'fyi' }, T0);
     const r = getReceipts(scope, id, NOW, 14)!;

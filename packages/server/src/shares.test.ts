@@ -4,6 +4,7 @@ import {
   type Db, type TeamScope,
 } from './db.js';
 import { validateShare, createShare, getShare, listShares, retractShare, markStale } from './shares.js';
+import { getUnread } from './unread.js';
 
 let db: Db;
 let scope: TeamScope;
@@ -110,6 +111,67 @@ describe('validateShare', () => {
   });
 });
 
+// Finding 4: recipients used to bypass validateShare entirely — no shape
+// check, no cap, no length limit, '<script>' stored verbatim — while every
+// other field was gated here. Unvalidated input is also what made the
+// fail-open cases below reachable, so the gate comes first.
+describe('validateShare: recipients', () => {
+  it('treats an omitted or empty list as no recipients at all — the whole team', () => {
+    const omitted = validateShare({ what: 'ok', priority: 'fyi' });
+    expect(omitted.ok).toBe(true);
+    if (omitted.ok) expect(omitted.value.recipients).toEqual([]);
+
+    const empty = validateShare({ what: 'ok', priority: 'fyi', recipients: [] });
+    expect(empty.ok).toBe(true);
+    if (empty.ok) expect(empty.value.recipients).toEqual([]);
+  });
+
+  it('normalises and deduplicates the addresses it accepts, like every other email', () => {
+    const r = validateShare({
+      what: 'ok', priority: 'fyi',
+      recipients: ['SAM@Team.com ', 'sam@team.com', 'Priya@team.com'],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.recipients).toEqual(['sam@team.com', 'priya@team.com']);
+  });
+
+  it('rejects an address that is not one, and names the offending entry', () => {
+    for (const bad of ['<script>', 'not an address', 'sam@team', '${TEAMMATE}', 'sam@team.com, priya@team.com']) {
+      const r = validateShare({ what: 'ok', priority: 'fyi', recipients: ['sam@team.com', bad] });
+      expect(r.ok, bad).toBe(false);
+      // The message must say WHICH one is wrong, not that one of them is.
+      if (!r.ok) expect(r.error, bad).toContain(bad);
+    }
+  });
+
+  it('rejects a blank entry rather than filtering it away', () => {
+    // Filtering is exactly what turned ['   '] into a team-wide broadcast.
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: ['   '] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('recipients');
+  });
+
+  it('rejects a non-string entry instead of throwing a TypeError on it', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: [null as unknown as string] });
+    expect(r.ok).toBe(false);
+  });
+
+  it('caps how many people one share can be addressed to, naming the cap', () => {
+    const many = Array.from({ length: 21 }, (_, i) => `p${i}@team.com`);
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: many });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain('recipients');
+      expect(r.error).toContain('20');
+    }
+  });
+
+  it('caps the length of a single address', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: [`${'a'.repeat(300)}@team.com`] });
+    expect(r.ok).toBe(false);
+  });
+});
+
 describe('createShare', () => {
   it('stores the share and reports members notified, excluding the sender', () => {
     const { id, notified } = createShare(
@@ -165,6 +227,152 @@ describe('createShare: recipients (Task 7)', () => {
       email: string;
     }[];
     expect(rows).toEqual([{ team_id: scope.teamId, email: 'sam@team.com' }]);
+  });
+});
+
+// The fail-open cluster from the Task 7 review: three ways a share the author
+// addressed to one person could still reach the whole team. The shape of every
+// test here is the same, because the bug was: assert the write did not happen,
+// AND assert the bystander cannot see anything.
+describe('createShare: an addressed share never fails open (fix round 1)', () => {
+  const countShares = () =>
+    (db.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number }).n;
+  const countRecipientRows = () =>
+    (db.prepare('SELECT COUNT(*) AS n FROM share_recipients').get() as { n: number }).n;
+  /** The bystander's view: Priya was never addressed, so she must see nothing. */
+  const priyaSees = () => getUnread(scope, 'priya@team.com', NOW, 14).total;
+
+  // Finding 1: the share row used to commit BEFORE the recipient rows were
+  // written, so anything that threw in between left a committed share with
+  // zero recipient rows — which AND_RECIPIENT (unread.ts) reads as team-wide.
+  it('leaves no share behind when writing the recipient rows fails part-way', () => {
+    // A deterministic mid-write failure: the share INSERT succeeds, the first
+    // share_recipients INSERT aborts. Nothing about this is specific to how
+    // the recipient rows are built — it is the general "something failed
+    // between the two writes" case.
+    db.exec(`CREATE TRIGGER fail_recipient_write BEFORE INSERT ON share_recipients
+             BEGIN SELECT RAISE(ABORT, 'simulated failure'); END;`);
+
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'for sam only', priority: 'fyi', recipients: ['sam@team.com'] },
+        NOW,
+      ),
+    ).toThrow();
+
+    // Not "the share exists but is addressed to nobody" — the share does not
+    // exist at all.
+    expect(countShares()).toBe(0);
+    expect(countRecipientRows()).toBe(0);
+    expect(priyaSees()).toBe(0);
+  });
+
+  // Finding 1, the reviewer's own probe: recipients: [null] threw a TypeError
+  // out of normalisation, after the share had already committed.
+  it('leaves no share behind when a recipient entry cannot be normalised at all', () => {
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'for sam only', priority: 'fyi', recipients: [null as unknown as string] },
+        NOW,
+      ),
+    ).toThrow();
+
+    expect(countShares()).toBe(0);
+    expect(priyaSees()).toBe(0);
+  });
+
+  // Finding 2: a list the author actually wrote that normalises away to
+  // nothing must be an error. "Empty means the whole team" is about a list
+  // that was omitted or [], never about one that collapsed.
+  it('rejects a list of nothing but blanks rather than broadcasting it', () => {
+    expect(() =>
+      createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi', recipients: ['   '] }, NOW),
+    ).toThrow(/recipients/);
+
+    expect(countShares()).toBe(0);
+    expect(priyaSees()).toBe(0);
+  });
+
+  it('rejects a list that names only the sender rather than broadcasting it', () => {
+    // Mixed case on purpose: the sender is excluded after normalisation, so
+    // this is the same collapse as ['adnan@team.com'].
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['Adnan@Team.com '] },
+        NOW,
+      ),
+    ).toThrow(/only you/);
+
+    expect(countShares()).toBe(0);
+    expect(priyaSees()).toBe(0);
+  });
+
+  // The other half of Finding 2: the fix must not have made the genuine
+  // team-wide cases stricter. Omitted and [] still mean everyone.
+  it('still treats an omitted list and an empty list as the whole team', () => {
+    createShare(scope, 'adnan@team.com', { what: 'omitted', priority: 'fyi' }, NOW);
+    createShare(scope, 'adnan@team.com', { what: 'empty', priority: 'fyi', recipients: [] }, NOW);
+
+    expect(countRecipientRows()).toBe(0);
+    expect(priyaSees()).toBe(2);
+  });
+
+  // Finding 3: an address nobody on the team holds used to be counted as
+  // notified while reaching, and being expected to read, nobody. It is now an
+  // error that names the address — a typo is recoverable, a share published
+  // into the void is not.
+  it('rejects an address nobody on this team holds, and says which one', () => {
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['sma@team.com'] },
+        NOW,
+      ),
+    ).toThrow(/sma@team\.com/);
+
+    expect(countShares()).toBe(0);
+  });
+
+  it('rejects the whole list when one address is unknown, never publishing it half-addressed', () => {
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['sam@team.com', 'sma@team.com'] },
+        NOW,
+      ),
+    ).toThrow(/sma@team\.com/);
+
+    // Not "published, addressed to Sam only" — not published at all.
+    expect(countShares()).toBe(0);
+    expect(countRecipientRows()).toBe(0);
+  });
+
+  it('is scoped: a member of ANOTHER team is not an address this team can use', () => {
+    const otherScope = makeTeamScope(db, createTeam(db, 'Other', hashToken('ts_other'), NOW));
+    upsertMember(otherScope, 'outsider@other.com', 'Outsider', NOW);
+
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['outsider@other.com'] },
+        NOW,
+      ),
+    ).toThrow(/outsider@other\.com/);
+    expect(countShares()).toBe(0);
+  });
+
+  it('reports every addressed person, and only real ones, as notified', () => {
+    const { notified } = createShare(
+      scope, 'adnan@team.com',
+      // Duplicated and differently-cased on purpose: notified counts people,
+      // not entries.
+      { what: 'x', priority: 'fyi', recipients: ['sam@team.com', 'SAM@team.com', 'priya@team.com'] },
+      NOW,
+    );
+    expect(notified).toBe(2);
   });
 });
 

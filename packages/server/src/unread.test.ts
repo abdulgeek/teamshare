@@ -16,6 +16,12 @@ beforeEach(() => {
   scope = makeTeamScope(db, getOrCreateDefaultTeamId(db));
   upsertMember(scope, 'adnan@team.com', 'Adnan', T0);
   upsertMember(scope, 'priya@team.com', 'Priya', T0);
+  // Sam is a member here because the recipient tests below address him, and
+  // a share can only be addressed to someone the roster knows (see
+  // resolveRecipients in shares.ts: an unknown address is an error, never a
+  // share quietly delivered to nobody). Nothing else in this file depends on
+  // the team's size, and every assertion below is unchanged by his presence.
+  upsertMember(scope, 'sam@team.com', 'Sam', T0);
 });
 afterEach(() => { db.close(); });
 
@@ -108,6 +114,12 @@ describe('cross-team isolation', () => {
     upsertMember(teamA, 'shared@company.com', 'Alice (Team A)', T0);
     upsertMember(teamB, 'shared@company.com', 'Alice (Team B)', T0);
     upsertMember(teamB, 'reader@company.com', 'Reader B', T0);
+    // reader@company.com is on BOTH teams, with a different display name in
+    // each — which makes the addressing test below sharper than it was when
+    // this address existed only in team B: team A addresses a real, local
+    // member whose address team B also has, so nothing but team_id scoping on
+    // share_recipients keeps team A's share out of team B's digest.
+    upsertMember(teamA, 'reader@company.com', 'Reader A', T0);
   });
 
   it('shows only the calling team\'s shares, with that team\'s own display name for the shared email', () => {
@@ -141,11 +153,11 @@ describe('cross-team isolation', () => {
   });
 
   it('addressing a recipient in one team never leaks a share into another team\'s digest for a shared email', () => {
-    // shared@company.com is a member of BOTH teams (see the outer
-    // beforeEach); reader@company.com only of team B. Team A addresses a
-    // share to reader@company.com's exact address — if the recipient check
-    // ever forgot to scope share_recipients by team_id, this share_id/email
-    // pair could wrongly surface in team B's digest for that email.
+    // shared@company.com and reader@company.com are members of BOTH teams
+    // (see the outer beforeEach). Team A addresses a share to
+    // reader@company.com's exact address — if the recipient check ever forgot
+    // to scope share_recipients by team_id, this share_id/email pair could
+    // wrongly surface in team B's digest for that email.
     createShare(
       teamA, 'shared@company.com',
       { what: 'Team A note misaddressed to a Team B email', priority: 'fyi', recipients: ['reader@company.com'] },

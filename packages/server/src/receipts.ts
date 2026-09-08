@@ -76,6 +76,13 @@ export function getReceipts(
   // by" would be wrong for a share only Sam was ever meant to read. An
   // unaddressed (team-wide) share keeps the original denominator: every
   // current member, same as before Task 7.
+  //
+  // This set is also what createShare counts as `notified`, and the two
+  // cannot disagree: createShare refuses to address a share to anyone who is
+  // not a member (see resolveRecipients), so every share_recipients row names
+  // someone the roster knew at publish time. The one way this set can later
+  // be smaller is a member who has since been REMOVED from the team — which
+  // is the honest answer, not a drift: they are not going to read it.
   const recipientSet = share.recipients.length > 0 ? new Set(share.recipients) : null;
   const expectedReaders = recipientSet
     ? listMembers(scope).filter((m) => recipientSet.has(m.email))
