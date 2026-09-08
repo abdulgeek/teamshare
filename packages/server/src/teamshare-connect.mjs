@@ -849,6 +849,15 @@ async function fetchUnread(cfg, timeoutMs, project) {
   }
 }
 
+// A hand-maintained copy of PROJECT_KEY_SHAPE in
+// packages/server/src/project.ts, which carries the reasoning. In short: it is
+// the one definition of a project key's shape, and the server tests every
+// ?project= against it. A key this file mints that the server would reject is
+// a 400 on every session that machine ever starts — and a hook cannot show a
+// digest it never received. packages/plugin/tests/bin-sync.test.mjs asserts
+// the round trip: every key either copy produces is one this shape accepts.
+const PROJECT_KEY_SHAPE = /^[a-z0-9][a-z0-9.-]*\\/[^\\s\\p{Cc}\\p{Cf}]+$/u;
+
 // A hand-maintained copy of normalizeProject in packages/server/src/project.ts
 // — this file ships inside packages/plugin and is bundled into
 // standalone.mjs, so it cannot import from packages/server. Kept in sync by
@@ -878,7 +887,9 @@ function normalizeProjectKey(remoteUrl) {
     rest = host + (m[2] ?? '');
   }
   const key = rest.replace(/\\.git$/i, '').replace(/\\/+$/, '').toLowerCase();
-  return /^[a-z0-9.-]+\\/.+/.test(key) ? key : null;
+  // The shape above IS the guard, exactly as on the server: whatever comes
+  // back from here is a key /unread will accept.
+  return PROJECT_KEY_SHAPE.test(key) ? key : null;
 }
 
 // The reader's own repo, resolved once per hook run from the payload's
@@ -1102,17 +1113,34 @@ async function main() {
     // not an identity claim, and a git remote that resolves to nothing (no
     // git, no repo, no remote) simply means no narrowing at all.
     const project = resolveProject(cwd);
-    const { status, digest } = await fetchUnread(cfg, TIMEOUT_MS, project);
+    let { status, digest } = await fetchUnread(cfg, TIMEOUT_MS, project);
 
     // A rejected token is a misconfiguration the user must see; a network
     // failure is not worth interrupting them over.
-    if (status === 401 || status === 400) {
+    if (status === 401) {
       // BOTH writes go through the renderer. This one is easy to miss: on
       // Claude Code a bare line of stdout is valid context, but on Cursor the
       // same bytes are malformed JSON, so a rejected token would break the
       // hook itself rather than reporting the rejection.
       emit('teamshare: server rejected this machine — reconfigure via /plugin');
       return;
+    }
+
+    // 400 is NOT 401, and this used to treat them as the same thing. A 400
+    // from /unread is the server refusing this REQUEST — the only part of it
+    // this hook composes is \`?project=\` — while the credentials it just
+    // authenticated with are fine. Reporting it as a rejected machine told
+    // people to reconfigure a working install, on every session, forever, and
+    // reconfiguring could not have fixed it.
+    //
+    // So drop the narrowing and ask again. Losing the scope hint costs the
+    // reader a wider digest; staying silent would cost them the digest
+    // itself, which is the same "never saw another share" the misleading
+    // message came with. A reader with no project sees the whole board — that
+    // is already what a machine with no git remote gets, and it is the right
+    // fallback for a key this server will not take.
+    if (status === 400 && project) {
+      ({ status, digest } = await fetchUnread(cfg, TIMEOUT_MS, undefined));
     }
     if (status !== 200) return;
 

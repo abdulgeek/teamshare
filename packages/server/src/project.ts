@@ -1,12 +1,28 @@
-// The externally-facing shape of a project key: a lowercase host segment
-// that starts with a letter or digit (never `.` or `-`, which is what keeps
-// a path-traversal-shaped string like "../../etc" from ever passing as one),
-// then a `/`-joined path. Used to VALIDATE a value someone else claims is
-// already normalized — the HTTP /unread route's query parameter, and
-// validateShare's `project` field — never to derive one; only normalizeProject
-// below does that. Exported so both call sites share one definition instead
-// of two regexes that could quietly drift apart.
-export const PROJECT_KEY_SHAPE = /^[a-z0-9][a-z0-9.-]*\/[a-z0-9._/-]+$/;
+// The shape of a project key: a lowercase host segment that starts with a
+// letter or digit (never `.` or `-`, which is what keeps a path-traversal
+// -shaped string like "../../etc" from ever passing as one), then a `/`-joined
+// path of anything that is neither whitespace nor a control/format character.
+//
+// It is BOTH definitions, deliberately. It validates a value someone else
+// claims is already normalized — the HTTP /unread route's query parameter, and
+// validateShare's `project` field — and it is also the final guard
+// normalizeProject returns through, so producer and validator cannot disagree
+// about a single string. They used to: the path half was `[a-z0-9._/-]+` while
+// normalizeProject accepted `.+` after the host, and an ordinary remote that
+// landed in the gap (a Gerrit per-user path `.../a/~sam/tools`, a non-ASCII
+// repo name, a URL with a query string) normalized fine on the hook side and
+// came back 400 from /unread — costing that reader every share they would ever
+// have received, with a token that was never wrong.
+//
+// Widened rather than narrowed, in that repair: a key is an opaque token,
+// compared only for equality as a bound SQL parameter and printed on a digest
+// line. Nothing reads it as a path or a URL, so the characters worth excluding
+// are the ones that would make it lie on the line it is printed on
+// (whitespace, control and bidi-format characters) — not every character git
+// hosting happens to allow. Narrowing normalizeProject instead would have left
+// those teams permanently unable to scope a share at all, which is the same
+// silent loss wearing different clothes.
+export const PROJECT_KEY_SHAPE = /^[a-z0-9][a-z0-9.-]*\/[^\s\p{Cc}\p{Cf}]+$/u;
 
 /**
  * A project key that is the same for everyone on the team.
@@ -42,5 +58,10 @@ export function normalizeProject(remoteUrl: string): string | null {
     rest = host + (m[2] ?? '');
   }
   const key = rest.replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase();
-  return /^[a-z0-9.-]+\/.+/.test(key) ? key : null;
+  // The validator IS the guard, rather than a second regex that says roughly
+  // the same thing: whatever comes back from here is by construction a key
+  // /unread and validateShare will accept. That also closes the gap in the
+  // other direction — the old guard's `[a-z0-9.-]+` host let `git@..:etc`
+  // fold to `../etc`, the one shape a project key must never take.
+  return PROJECT_KEY_SHAPE.test(key) ? key : null;
 }

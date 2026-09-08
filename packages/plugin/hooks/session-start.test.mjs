@@ -258,6 +258,57 @@ describe('session-start hook', () => {
     expect(await runHook()).toContain('/plugin');
   });
 
+  // 400 is NOT 401. A 400 from /unread means the server refused this
+  // REQUEST — the only thing it can refuse is the `project` query parameter —
+  // and the machine's credentials are untouched. Conflating the two told a
+  // user with a perfectly good token to "reconfigure via /plugin" on every
+  // single session, forever, and reconfiguring could never fix it. Worse, the
+  // digest was gone with it: the reader would never see another share and had
+  // no way to learn why.
+  it('does not tell the user to reconfigure a working install when the server refuses the request', async () => {
+    repo = initRepoWithRemote('https://gerrit.example.com/a/~sam/tools');
+    writeConfig();
+    const asked = [];
+    respond = (res) => {
+      asked.push(lastRequestUrl);
+      if (lastRequestUrl.includes('project=')) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end('{"error":"project must be a normalized git remote key"}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        total: 1,
+        older: 0,
+        shares: [{
+          id: 'shr_400',
+          sender_name: 'Grace Hopper',
+          sender_email: 'grace@team.com',
+          created_at: '2026-08-29T09:00:00.000Z',
+          priority: 'fyi',
+          what: 'auth refactor lands Friday',
+          age: '3 hours ago',
+          day: 'Friday, 29-08-2026',
+          relevance: 'new',
+        }],
+      }));
+    };
+
+    const out = await runHook({ hook_event_name: 'SessionStart', source: 'startup', cwd: repo });
+
+    // Never the credential message: nothing is wrong with this token.
+    // Matched on its distinctive half, not on "/plugin" — a delivered digest
+    // carries its own "reconfigure via /plugin" line in the standing
+    // instructions, and that one is about the MCP connection, not the token.
+    expect(out).not.toContain('rejected this machine');
+    // And never silence either. A narrowing the server will not accept costs
+    // the reader the narrowing, not the digest — the same "no project, see the
+    // whole board" a machine with no git remote already gets.
+    expect(out).toContain('Grace Hopper');
+    expect(asked.length).toBe(2);
+    expect(asked[1]).toBe('/unread');
+  });
+
   it('exits 0 and prints nothing when the server is unreachable', async () => {
     writeConfig({ url: 'http://127.0.0.1:1' });
     expect((await runHook()).trim()).toBe('');

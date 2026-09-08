@@ -1,5 +1,5 @@
 import { normalizeEmail, type TeamScope } from './db.js';
-import type { Priority } from './shares.js';
+import { visibleToClause, type Priority } from './shares.js';
 import { classifyRelevance, RELEVANCE_WINDOW_DAYS, type Relevance } from './relevance.js';
 
 export const UNREAD_LIMIT = 20;
@@ -23,9 +23,12 @@ export interface DigestEntry {
    */
   project: string | null;
   /**
-   * Task 8: true when this share has share_recipients rows at all — which,
-   * since AND_RECIPIENT (below) never returns a row addressed to someone
-   * else, means it is true exactly when it was addressed to THIS reader.
+   * Task 8: true when this share has share_recipients rows at all — which
+   * means it is true exactly when it was addressed to THIS reader. Two facts
+   * make that equivalence hold, and neither is incidental: visibleToClause
+   * (shares.ts) never returns a row addressed to someone else, and
+   * WHERE_UNREAD never returns the reader's own shares, so the only way to
+   * have recipient rows and still be here is to be named in them.
    * Every renderer (mcp.ts's renderDigest, both hooks) uses this to print
    * "to you" instead of the recipient list: the other names on an addressed
    * share are other people's business and tell this reader nothing.
@@ -81,20 +84,27 @@ const AND_RELEVANT = `AND (s.priority = 'blocking' OR s.created_at >= ?)`;
 // no project of their own (not sitting in any repo) is not narrowed at all —
 // this clause is omitted entirely for them, never bound with an empty string.
 // See project.ts / the design doc for why "no remote, no scope" on both ends.
-const AND_PROJECT = `AND (s.project IS NULL OR s.project = ?)`;
-
-// Task 7 (address a share to specific people): a share with no
-// share_recipients rows is unaddressed and team-wide — the first EXISTS arm
-// is what makes that true; drop it and every share ever created before this
-// table existed (and every future team-wide share) would vanish for
-// everyone. A share WITH rows is visible only to the people named in them —
-// never to the sender, who WHERE_UNREAD already excludes regardless. Unlike
-// AND_PROJECT this clause is never omitted: eligibility to see a share at
-// all isn't optional the way narrowing-by-repo is.
-const AND_RECIPIENT = `
+//
+// The third arm is the controller's ruling, and it is a rule about which kind
+// of narrowing outranks the other. A repo scope is a relevance hint the author
+// dropped on a note; naming a recipient is a deliberate decision about whose
+// note it is. Letting the hint win meant a share addressed to Sam and scoped
+// to a repo he was not sitting in was invisible on every surface at once —
+// not in his digest, not in his `older` count, no signal anywhere — while its
+// author was told `notified: 1` and `receipts` reported him unseen forever.
+// If the author named you, you get it wherever you are working. README's
+// "Addressing a share to specific people" has always said so.
+//
+// Note what this does NOT do: it widens only for the person named. An
+// unaddressed share scoped to a repo is still narrowed away from a reader
+// somewhere else, exactly as before.
+const AND_PROJECT = `
   AND (
-    NOT EXISTS (SELECT 1 FROM share_recipients sr WHERE sr.team_id = ? AND sr.share_id = s.id)
-    OR EXISTS (SELECT 1 FROM share_recipients sr WHERE sr.team_id = ? AND sr.share_id = s.id AND sr.email = ?)
+    s.project IS NULL
+    OR s.project = ?
+    OR EXISTS (
+      SELECT 1 FROM share_recipients sr WHERE sr.team_id = ? AND sr.share_id = s.id AND sr.email = ?
+    )
   )
 `;
 
@@ -144,13 +154,21 @@ export function getUnread(
   // second, separately-tracked array that a query has to remember to zip
   // back in in the right order.
   const relevance: Clause | null = includeOld ? null : { sql: AND_RELEVANT, args: [relevantFrom] };
-  const project: Clause | null = options.project ? { sql: AND_PROJECT, args: [options.project] } : null;
-  // Not optional like `project` — always active, so never a `Clause | null`.
-  // A share addressed to someone else was never unread for this reader at
-  // all, exactly like a share scoped to a repo they're not in.
-  const recipient: Clause = { sql: AND_RECIPIENT, args: [scope.teamId, scope.teamId, me] };
+  const project: Clause | null = options.project
+    ? { sql: AND_PROJECT, args: [options.project, scope.teamId, me] }
+    : null;
+  // "May this person see this share at all?" has ONE definition, and it lives
+  // in shares.ts beside the accessors that answer it. This used to be a
+  // second copy of the same rule (AND_RECIPIENT), and the two agreed only
+  // because WHERE_UNREAD's `sender_email != ?` happened to cover the author
+  // arm the copy here lacked — an accident, not a design, and exactly the
+  // kind that survives right up until someone edits one of the two. Not
+  // optional like `project`: eligibility to see a share is never a narrowing
+  // the caller can decline.
+  const visible = visibleToClause(scope, me);
+  const visibility: Clause = { sql: `AND ${visible.sql}`, args: visible.args };
 
-  const { sql: extraSql, args: extraArgs } = composeClauses(relevance, project, recipient);
+  const { sql: extraSql, args: extraArgs } = composeClauses(relevance, project, visibility);
 
   const { n: total } = scope.db
     .prepare(`SELECT COUNT(*) AS n FROM shares s ${base.sql} ${extraSql}`)
@@ -159,11 +177,13 @@ export function getUnread(
   // Counted separately rather than inferred from `total`, so a caller can say
   // exactly how many it is not showing without a second round trip. This is
   // relevance's own count (shares hidden ONLY by the window), so it composes
-  // with `project` and `recipient` — a share outside the reader's repo, or
-  // not addressed to them, was never unread for them at all, and must not
-  // inflate "older" — but never with `relevance` itself, which is what
-  // "older" is counting the absence of.
-  const { sql: olderExtraSql, args: olderExtraArgs } = composeClauses(project, recipient);
+  // with `project` and `visibility` — a share the reader may not see, or one
+  // narrowed away from the repo they are in, was never unread for them at all
+  // and must not inflate "older" — but never with `relevance` itself, which
+  // is what "older" is counting the absence of. Because `project` now defers
+  // to an explicit recipient, an addressed share the reader is out of the
+  // repo of lands here when it ages out, rather than vanishing.
+  const { sql: olderExtraSql, args: olderExtraArgs } = composeClauses(project, visibility);
   const { n: older } = includeOld
     ? { n: 0 }
     : (scope.db

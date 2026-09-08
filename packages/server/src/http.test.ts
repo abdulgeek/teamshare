@@ -7,6 +7,7 @@ import {
   type Db, type TeamScope,
 } from './db.js';
 import { createShare } from './shares.js';
+import { normalizeProject } from './project.js';
 import { createApp, type AppOptions } from './app.js';
 import { authenticate } from './http.js';
 
@@ -181,6 +182,28 @@ describe('GET /unread?project=', () => {
     const body = await res.json();
     expect(body.shares.map((s: { what: string }) => s.what)).toContain('api thing');
     expect(body.shares.map((s: { what: string }) => s.what)).not.toContain('web thing');
+  });
+
+  // The loop closed end to end, at the only place a user ever felt it: the
+  // hook normalizes the remote, sends it here, and this route decides. When
+  // the two disagreed about a perfectly ordinary remote, the answer was 400
+  // on every session that machine would ever start, and that reader never saw
+  // another share. Each of these three was verified reachable by the
+  // whole-branch review; each used to be a 400.
+  it('accepts every key normalizeProject can actually mint, not a narrower subset of them', async () => {
+    createShare(scope, 'adnan@team.com', { what: 'gerrit thing', priority: 'fyi' }, NOW);
+    for (const remote of [
+      'https://gerrit.example.com/a/~sam/tools',
+      'https://gitlab.com/acme/caf\u00e9',
+      'https://github.com/acme/api?ref=main',
+    ]) {
+      const key = normalizeProject(remote);
+      expect(key, remote).not.toBeNull();
+      const res = await fetch(`${base}/unread?project=${encodeURIComponent(key as string)}`, {
+        headers: headers(),
+      });
+      expect(res.status, `${remote} -> ${key}`).toBe(200);
+    }
   });
 
   it('rejects a project key that is not one', async () => {

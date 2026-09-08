@@ -15,7 +15,7 @@ import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { buildStandaloneHook, spliceHookSource } from '../../../scripts/sync-plugin-bin.mjs';
 import { TEAMSHARE_HOOK_SOURCE } from '../../server/src/teamshare-connect.mjs';
-import { normalizeProject } from '../../server/src/project.ts';
+import { normalizeProject, PROJECT_KEY_SHAPE } from '../../server/src/project.ts';
 import { normalizeProjectKey } from '../hooks/shared.mjs';
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -113,6 +113,17 @@ describe('normalizeProjectKey (plugin) stays in sync with normalizeProject (serv
     'ssh://git@github.com:22/owner/repo.git',
     'https://github.com/owner/repo.git',
     'git@gitlab.example.com:group/sub/project.git',
+    // Remotes that are ordinary for somebody: a Gerrit per-user path, a
+    // non-ASCII repo name, a URL that carries a query string. Each normalized
+    // cleanly on this side and was then rejected by the server's own
+    // validator with a 400 — see the round-trip test below for why that cost
+    // the reader every share they would ever have received.
+    'https://gerrit.example.com/a/~sam/tools',
+    'https://gitlab.com/acme/caf\u00e9',
+    'https://github.com/acme/api?ref=main',
+    // Folds to a path-traversal-shaped key unless the final guard forbids it.
+    'git@..:etc/passwd',
+    'https://github.com/acme/a b',
     '',
     '   ',
     'not a url',
@@ -125,6 +136,24 @@ describe('normalizeProjectKey (plugin) stays in sync with normalizeProject (serv
       // packages/server/src/project.ts, never the other way around — the
       // server copy has the tests and the types.
       expect(normalizeProjectKey(input), JSON.stringify(input)).toBe(normalizeProject(input));
+    }
+  });
+
+  // The other half of "in sync", and the half that was missing: agreeing with
+  // each other is not enough if BOTH disagree with the validator the key is
+  // about to be handed to. Whatever this copy mints goes straight into
+  // `?project=` on /unread, where app.ts tests it against PROJECT_KEY_SHAPE
+  // and answers 400 to anything that does not match. The hook cannot show a
+  // digest it never received, so a single unlucky remote used to mean that
+  // reader never saw another share — with a token that was fine the whole
+  // time. Property, not examples: every key either copy produces must be one
+  // the validator accepts.
+  it('mints only keys the server will accept, so a normal remote can never 400 a reader out of their digest', () => {
+    for (const input of CASES) {
+      for (const key of [normalizeProjectKey(input), normalizeProject(input)]) {
+        if (key === null) continue;
+        expect(PROJECT_KEY_SHAPE.test(key), `${JSON.stringify(input)} -> ${key}`).toBe(true);
+      }
     }
   });
 });

@@ -119,17 +119,34 @@ async function main() {
     // not an identity claim, and a git remote that resolves to nothing (no
     // git, no repo, no remote) simply means no narrowing at all.
     const project = resolveProject(cwd);
-    const { status, digest } = await fetchUnread(cfg, TIMEOUT_MS, project);
+    let { status, digest } = await fetchUnread(cfg, TIMEOUT_MS, project);
 
     // A rejected token is a misconfiguration the user must see; a network
     // failure is not worth interrupting them over.
-    if (status === 401 || status === 400) {
+    if (status === 401) {
       // BOTH writes go through the renderer. This one is easy to miss: on
       // Claude Code a bare line of stdout is valid context, but on Cursor the
       // same bytes are malformed JSON, so a rejected token would break the
       // hook itself rather than reporting the rejection.
       emit('teamshare: server rejected this machine — reconfigure via /plugin');
       return;
+    }
+
+    // 400 is NOT 401, and this used to treat them as the same thing. A 400
+    // from /unread is the server refusing this REQUEST — the only part of it
+    // this hook composes is `?project=` — while the credentials it just
+    // authenticated with are fine. Reporting it as a rejected machine told
+    // people to reconfigure a working install, on every session, forever, and
+    // reconfiguring could not have fixed it.
+    //
+    // So drop the narrowing and ask again. Losing the scope hint costs the
+    // reader a wider digest; staying silent would cost them the digest
+    // itself, which is the same "never saw another share" the misleading
+    // message came with. A reader with no project sees the whole board — that
+    // is already what a machine with no git remote gets, and it is the right
+    // fallback for a key this server will not take.
+    if (status === 400 && project) {
+      ({ status, digest } = await fetchUnread(cfg, TIMEOUT_MS, undefined));
     }
     if (status !== 200) return;
 

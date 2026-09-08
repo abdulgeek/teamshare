@@ -92,6 +92,15 @@ export async function fetchUnread(cfg, timeoutMs, project) {
   }
 }
 
+// A hand-maintained copy of PROJECT_KEY_SHAPE in
+// packages/server/src/project.ts, which carries the reasoning. In short: it is
+// the one definition of a project key's shape, and the server tests every
+// ?project= against it. A key this file mints that the server would reject is
+// a 400 on every session that machine ever starts — and a hook cannot show a
+// digest it never received. packages/plugin/tests/bin-sync.test.mjs asserts
+// the round trip: every key either copy produces is one this shape accepts.
+const PROJECT_KEY_SHAPE = /^[a-z0-9][a-z0-9.-]*\/[^\s\p{Cc}\p{Cf}]+$/u;
+
 // A hand-maintained copy of normalizeProject in packages/server/src/project.ts
 // — this file ships inside packages/plugin and is bundled into
 // standalone.mjs, so it cannot import from packages/server. Kept in sync by
@@ -121,7 +130,9 @@ export function normalizeProjectKey(remoteUrl) {
     rest = host + (m[2] ?? '');
   }
   const key = rest.replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase();
-  return /^[a-z0-9.-]+\/.+/.test(key) ? key : null;
+  // The shape above IS the guard, exactly as on the server: whatever comes
+  // back from here is a key /unread will accept.
+  return PROJECT_KEY_SHAPE.test(key) ? key : null;
 }
 
 // The reader's own repo, resolved once per hook run from the payload's

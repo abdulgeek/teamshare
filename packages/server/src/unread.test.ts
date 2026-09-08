@@ -3,7 +3,7 @@ import {
   openDb, upsertMember, createTeam, hashToken, getOrCreateDefaultTeamId, makeTeamScope,
   type Db, type TeamScope,
 } from './db.js';
-import { createShare, markStale } from './shares.js';
+import { createShare, getShare, markStale } from './shares.js';
 import { getUnread, UNREAD_LIMIT } from './unread.js';
 
 let db: Db;
@@ -397,24 +397,138 @@ describe('getUnread: recipients', () => {
     createShare(
       scope, 'adnan@team.com',
       { what: 'fresh web note for sam', priority: 'fyi', project: 'github.com/acme/web', recipients: ['sam@team.com'] },
-      daysAgo(1),
+      // Two days rather than one: still inside the relevance window, but
+      // strictly older than the api note, so the digest's newest-first order
+      // is decided by the timestamps and not by a random share id.
+      daysAgo(2),
     );
 
     const sam = getUnread(scope, 'sam@team.com', NOW, 14, { project: 'github.com/acme/api' });
-    // Only the fresh api note addressed to sam survives all three filters:
-    // relevance (not too old), project (api, not web), recipient (sam, not
-    // priya).
-    expect(sam.shares.map((s) => s.what)).toEqual(['fresh api note for sam']);
-    expect(sam.total).toBe(1);
+    // BEHAVIOUR CHANGE (controller ruling): the web note is here too, and
+    // this assertion used to say it was not. Relevance and recipient still
+    // filter as before — the old note is held back, priya's note is not
+    // sam's to see — but the project scope no longer narrows away a share
+    // whose author named sam personally. Repo scope is a relevance hint the
+    // author drops on a note; addressing is a deliberate decision about whose
+    // note it is, and the deliberate one wins. Ordered newest-first, so the
+    // api note (1 day) precedes the web note (2 days).
+    expect(sam.shares.map((s) => s.what)).toEqual(['fresh api note for sam', 'fresh web note for sam']);
+    expect(sam.total).toBe(2);
     // The old api note IS addressed to sam and in scope, but past the
     // relevance window — held back and counted as "older", never conflated
-    // with the notes that were never addressed to (or in scope for) sam at
-    // all, which must not inflate this count.
+    // with the note that was never addressed to sam at all, which must not
+    // inflate this count.
     expect(sam.older).toBe(1);
 
     // From priya's side, in the same repo: only the note addressed to her.
+    // The scoped-and-addressed notes are not hers at any scope.
     const priya = getUnread(scope, 'priya@team.com', NOW, 14, { project: 'github.com/acme/api' });
     expect(priya.shares.map((s) => s.what)).toEqual(['fresh api note for priya']);
     expect(priya.older).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Repo scope vs. an explicit recipient
+  //
+  // Controller ruling: an explicit recipient bypasses repo narrowing. The two
+  // are not the same kind of thing. Scope is a relevance hint — "this note is
+  // about the api repo" — and narrowing on it costs a reader nothing they
+  // wanted. Addressing is access control: the author decided who this note
+  // belongs to. Letting the hint override the decision meant a share
+  // addressed to Sam and scoped to a repo he was not sitting in was invisible
+  // everywhere at once — absent from his digest, absent from his `older`
+  // count, no signal on any surface — while its author saw `notified: 1` and
+  // `receipts` reported him unseen forever. README's "Addressing a share to
+  // specific people" has documented the ruling from the start: once a share
+  // names people it reaches them "regardless of where anyone is working".
+  // -------------------------------------------------------------------------
+
+  it('delivers a share addressed to me even when it is scoped to a repo I am not sitting in', () => {
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'for sam, about api', priority: 'fyi', project: 'github.com/acme/api', recipients: ['sam@team.com'] },
+      NOW,
+    );
+
+    const sam = getUnread(scope, 'sam@team.com', NOW, 14, { project: 'github.com/acme/web' });
+    expect(sam.shares.map((s) => s.what)).toEqual(['for sam, about api']);
+    expect(sam.total).toBe(1);
+    // Still "to you" on the line, and still carrying the scope it was
+    // published with, so the reader can see why it mentions another repo.
+    expect(sam.shares[0].to_me).toBe(true);
+    expect(sam.shares[0].project).toBe('github.com/acme/api');
+  });
+
+  it('still narrows an UNADDRESSED scoped share away from a reader in another repo', () => {
+    // The other half of the ruling, and the one a careless fix breaks: it is
+    // being named that outranks the scope, not merely being on the team.
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'for the team, about api', priority: 'fyi', project: 'github.com/acme/api' },
+      NOW,
+    );
+    const sam = getUnread(scope, 'sam@team.com', NOW, 14, { project: 'github.com/acme/web' });
+    expect(sam.shares).toEqual([]);
+    expect(sam.total).toBe(0);
+    expect(sam.older).toBe(0);
+  });
+
+  it('counts an addressed out-of-repo share as older rather than as nothing at all', () => {
+    const daysAgo = (n: number) => new Date(Date.parse(NOW) - n * 86_400_000).toISOString();
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'old note for sam', priority: 'fyi', project: 'github.com/acme/api', recipients: ['sam@team.com'] },
+      daysAgo(10),
+    );
+    const sam = getUnread(scope, 'sam@team.com', NOW, 14, { project: 'github.com/acme/web' });
+    expect(sam.total).toBe(0);
+    // Past the relevance window, so not pushed at him — but counted, which is
+    // the difference between "held back" and "silently gone".
+    expect(sam.older).toBe(1);
+  });
+
+  it('never gives a scoped share to someone it was addressed away from, whatever repo they are in', () => {
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'for sam only', priority: 'fyi', project: 'github.com/acme/api', recipients: ['sam@team.com'] },
+      NOW,
+    );
+    for (const project of ['github.com/acme/api', 'github.com/acme/web', undefined]) {
+      const priya = getUnread(scope, 'priya@team.com', NOW, 14, { project });
+      expect(priya.shares, String(project)).toEqual([]);
+      expect(priya.total, String(project)).toBe(0);
+      expect(priya.older, String(project)).toBe(0);
+    }
+  });
+
+  // The digest and the accessors now ask ONE question — shares.ts's
+  // visibleToClause — instead of each spelling out its own copy of "may this
+  // person see this share at all". The two copies agreed only because
+  // WHERE_UNREAD's `sender_email != ?` happened to cover the author arm the
+  // digest's copy lacked; an accident is not a design. This pins the
+  // consequence a reader can actually observe: anything the digest hands you
+  // is something the accessor will hand you too, and anything it withholds
+  // for someone else's sake stays withheld there as well.
+  it('delivers exactly what the accessors agree this reader may read', () => {
+    const mine = createShare(
+      scope, 'adnan@team.com',
+      { what: 'for sam, about api', priority: 'fyi', project: 'github.com/acme/api', recipients: ['sam@team.com'] },
+      NOW,
+    ).id;
+    const hers = createShare(
+      scope, 'adnan@team.com',
+      { what: 'for priya', priority: 'fyi', recipients: ['priya@team.com'] },
+      NOW,
+    ).id;
+    const everyones = createShare(scope, 'adnan@team.com', { what: 'for the team', priority: 'fyi' }, NOW).id;
+
+    // Sam is sitting in a different repo than the one his note is scoped to.
+    const sam = getUnread(scope, 'sam@team.com', NOW, 14, { project: 'github.com/acme/web' });
+    expect(sam.shares.map((s) => s.id).sort()).toEqual([mine, everyones].sort());
+
+    // Everything delivered is readable, and the one thing withheld is
+    // withheld by the same gate rather than by a second copy of the rule.
+    for (const s of sam.shares) expect(getShare(scope, s.id, 'sam@team.com'), s.id).toBeDefined();
+    expect(getShare(scope, hers, 'sam@team.com')).toBeUndefined();
   });
 });
