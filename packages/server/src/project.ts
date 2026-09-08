@@ -4,8 +4,8 @@
 // path of anything that is neither whitespace nor a control/format character.
 //
 // It is BOTH definitions, deliberately. It validates a value someone else
-// claims is already normalized — the HTTP /unread route's query parameter, and
-// validateShare's `project` field — and it is also the final guard
+// claims is already normalized — the HTTP /unread route's query parameter,
+// sent by a hook that has already folded it — and it is also the final guard
 // normalizeProject returns through, so producer and validator cannot disagree
 // about a single string. They used to: the path half was `[a-z0-9._/-]+` while
 // normalizeProject accepted `.+` after the host, and an ordinary remote that
@@ -22,6 +22,11 @@
 // hosting happens to allow. Narrowing normalizeProject instead would have left
 // those teams permanently unable to scope a share at all, which is the same
 // silent loss wearing different clothes.
+//
+// What it is NOT is the author-side check. Widening made that gap visible: a
+// shape is "could this be a key", and the author side has to answer "is this
+// the key a reader will mint" — a different question, which `foldProjectKey`
+// below answers by folding rather than by asking a regex.
 export const PROJECT_KEY_SHAPE = /^[a-z0-9][a-z0-9.-]*\/[^\s\p{Cc}\p{Cf}]+$/u;
 
 /**
@@ -57,11 +62,41 @@ export function normalizeProject(remoteUrl: string): string | null {
     const host = m[1].replace(/:\d+$/, '');
     rest = host + (m[2] ?? '');
   }
-  const key = rest.replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase();
   // The validator IS the guard, rather than a second regex that says roughly
   // the same thing: whatever comes back from here is by construction a key
   // /unread and validateShare will accept. That also closes the gap in the
   // other direction — the old guard's `[a-z0-9.-]+` host let `git@..:etc`
   // fold to `../etc`, the one shape a project key must never take.
+  return foldProjectKey(rest);
+}
+
+/**
+ * Fold a string that is already meant to BE a project key into the exact key
+ * `normalizeProject` would mint for the same repository — or null if no such
+ * key exists.
+ *
+ * This is `normalizeProject`'s own tail, extracted rather than copied, so the
+ * two can never fold differently. Everything it does is a fold, not a
+ * rejection: case, a `.git` suffix, trailing slashes. Its output is therefore
+ * idempotent and always mintable — `foldProjectKey(x)`, when it is not null,
+ * is exactly what `normalizeProject('https://' + x)` returns. It deliberately
+ * does NOT trim: `normalizeProject` trims its own input up front, and a fold
+ * that quietly ate whitespace here would make the server's copy disagree with
+ * the plugin's (`normalizeProjectKey` in hooks/shared.mjs) about a remote like
+ * `https:// host/repo` — the drift the bin-sync guard exists to catch.
+ * Callers with author-supplied text trim before calling.
+ *
+ * It exists because PROJECT_KEY_SHAPE alone is the WRONG author-side check.
+ * The shape is a reader-side validator: it answers "could this be a key",
+ * and it says yes to `github.com/ACME/API`, which normalizeProject can never
+ * mint. Stored verbatim, that scoped a share to a repository nobody is
+ * sitting in — invisible in every reader's digest AND absent from their
+ * `older` count, with the author told `notified: N`. Capitalised repo names
+ * are ordinary (`github.com/Netflix/Hystrix`), so an agent echoing one back
+ * published into the void. An author-supplied key is folded here instead of
+ * being taken at its word.
+ */
+export function foldProjectKey(value: string): string | null {
+  const key = String(value || '').replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase();
   return PROJECT_KEY_SHAPE.test(key) ? key : null;
 }

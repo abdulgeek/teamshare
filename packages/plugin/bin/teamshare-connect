@@ -1011,7 +1011,7 @@ async function readStdin() {
 }
 
 function render(digest) {
-  // A teammate controls sender_name/what, so the fence itself must be
+  // A teammate controls sender_name/what/project, so the fence itself must be
   // something they cannot predict — otherwise they close it early and the
   // rest of their share is read as instructions.
   const tag = randomBytes(6).toString('hex');
@@ -1025,7 +1025,14 @@ function render(digest) {
     const when = s.age && s.day ? \`\${s.age} (\${s.day})\` : s.day || s.created_at;
     // A scoped share says so, right on the line — otherwise a reader has no
     // way to tell "this never happened" from "this was never meant for you."
-    const scope = s.project ? \` | \${s.project}\` : '';
+    //
+    // Neutralised like every other teammate-authored field on this line.
+    // \`project\` is author-supplied text, not a server-computed label, so it
+    // can carry a forged \`</teamshare-unread>\` or a fence lookalike just as
+    // \`what\` can. It was never neutralised here — an \`---end_of_untrusted---\`
+    // lookalike passed even the old, narrower key charset — so this is the
+    // general defect, not just the tag form the widened shape newly admits.
+    const scope = s.project ? \` | \${neutralizeFences(s.project)}\` : '';
     // "to you" rather than the recipient list: the other names on an
     // addressed share are other people's business, and to_me is true here
     // exactly when this share was addressed to THIS reader.
@@ -1115,17 +1122,6 @@ async function main() {
     const project = resolveProject(cwd);
     let { status, digest } = await fetchUnread(cfg, TIMEOUT_MS, project);
 
-    // A rejected token is a misconfiguration the user must see; a network
-    // failure is not worth interrupting them over.
-    if (status === 401) {
-      // BOTH writes go through the renderer. This one is easy to miss: on
-      // Claude Code a bare line of stdout is valid context, but on Cursor the
-      // same bytes are malformed JSON, so a rejected token would break the
-      // hook itself rather than reporting the rejection.
-      emit('teamshare: server rejected this machine — reconfigure via /plugin');
-      return;
-    }
-
     // 400 is NOT 401, and this used to treat them as the same thing. A 400
     // from /unread is the server refusing this REQUEST — the only part of it
     // this hook composes is \`?project=\` — while the credentials it just
@@ -1141,6 +1137,23 @@ async function main() {
     // fallback for a key this server will not take.
     if (status === 400 && project) {
       ({ status, digest } = await fetchUnread(cfg, TIMEOUT_MS, undefined));
+    }
+
+    // A rejected token is a misconfiguration the user must see; a network
+    // failure is not worth interrupting them over. Checked AFTER the retry,
+    // and deliberately: a 401 that arrives only on the second attempt is the
+    // same broken credential as one on the first, and reporting it only on
+    // the first attempt meant a machine whose token was revoked between the
+    // two — or whose first call was refused for its \`project\` — fell silent
+    // forever with nothing to act on. That is the very failure the 400 split
+    // was made to end, reintroduced one line further down.
+    if (status === 401) {
+      // BOTH writes go through the renderer. This one is easy to miss: on
+      // Claude Code a bare line of stdout is valid context, but on Cursor the
+      // same bytes are malformed JSON, so a rejected token would break the
+      // hook itself rather than reporting the rejection.
+      emit('teamshare: server rejected this machine — reconfigure via /plugin');
+      return;
     }
     if (status !== 200) return;
 
@@ -1266,9 +1279,9 @@ function selectNew({ shares, seenIds, seeding }) {
 }
 
 function renderAnnouncement(shares) {
-  // A teammate controls sender_name and what, so the fence has to be something
-  // they cannot predict — otherwise they close it early and the rest of their
-  // share is read as instructions.
+  // A teammate controls sender_name, what and project, so the fence has to be
+  // something they cannot predict — otherwise they close it early and the rest
+  // of their share is read as instructions.
   const tag = randomBytes(6).toString('hex');
   const lines = shares.map((s) => {
     // Mid-session arrivals are minutes old, so the age is nearly always "just
@@ -1276,7 +1289,9 @@ function renderAnnouncement(shares) {
     // teammate is typing this at you right now" and "this was waiting".
     const grade = s.relevance && s.relevance !== 'new' ? \` | \${s.relevance}\` : '';
     const when = s.age && s.day ? \`\${s.age} (\${s.day})\` : s.day || s.created_at;
-    const scope = s.project ? \` | \${s.project}\` : '';
+    // Neutralised for the same reason as \`what\` — see session-start.mjs's
+    // identical line. \`project\` is author-supplied text and can forge a fence.
+    const scope = s.project ? \` | \${neutralizeFences(s.project)}\` : '';
     // "to you" rather than the recipient list — see session-start.mjs's
     // identical comment.
     const addressed = s.to_me ? ' | to you' : '';
@@ -1308,7 +1323,15 @@ function renderAnnouncement(shares) {
 }
 
 function renderSystemMessage(shares) {
-  const names = [...new Set(shares.map((s) => String(s.sender_name).trim()).filter(Boolean))];
+  // Neutralised too, though this line goes to the host's user-visible channel
+  // rather than into the model's context (renderResponse puts it in
+  // \`systemMessage\` on Claude Code and drops it entirely on Codex/Cursor).
+  // Every OTHER teammate-authored string either hook emits goes through
+  // neutralizeFences; leaving this one out made the rule "remember to call it"
+  // instead of "we always call it", and that is how the \`project\` hole above
+  // survived two reviews. No host is known to feed systemMessage back to the
+  // model, so this is consistency, not a demonstrated escape.
+  const names = [...new Set(shares.map((s) => neutralizeFences(String(s.sender_name)).trim()).filter(Boolean))];
   const who = names.length === 0 ? 'a teammate' : names.length <= 2 ? names.join(' and ') : \`\${names[0]} and \${names.length - 1} others\`;
   const blocking = shares.some((s) => String(s.priority).toLowerCase() === 'blocking');
   return \`teamshare: \${shares.length} new share\${shares.length === 1 ? '' : 's'} from \${who}\${blocking ? ' (blocking)' : ''}\`;

@@ -85,6 +85,28 @@ describe('validateShare', () => {
     if (r.ok) expect(r.value.project).toBe('github.com/acme/api');
   });
 
+  // Regression: PROJECT_KEY_SHAPE is a READER-side validator — "could this be
+  // a key" — and using it here made it the author-side one too, where the
+  // question is "is this the key a reader will mint". It is not the same
+  // question: the shape says yes to `github.com/ACME/API`, which
+  // normalizeProject can never produce, so the share was stored scoped to a
+  // repository that does not exist. Capitalised repo names are ordinary, so an
+  // agent echoing back `github.com/Netflix/Hystrix` published into the void.
+  it('folds an author-supplied project key into the one a reader would actually mint', () => {
+    const cases: [string, string][] = [
+      ['github.com/ACME/API', 'github.com/acme/api'],
+      ['github.com/Netflix/Hystrix', 'github.com/netflix/hystrix'],
+      ['GitHub.com/acme/api', 'github.com/acme/api'],
+      ['github.com/acme/api.git', 'github.com/acme/api'],
+      ['github.com/acme/api/', 'github.com/acme/api'],
+    ];
+    for (const [supplied, want] of cases) {
+      const r = validateShare({ what: 'ok', priority: 'fyi', project: supplied });
+      expect(r.ok, supplied).toBe(true);
+      if (r.ok) expect(r.value.project, supplied).toBe(want);
+    }
+  });
+
   it('rejects a project that is not normalizeProject-shaped, e.g. a raw URL or a path-traversal string', () => {
     for (const bad of ['https://github.com/acme/api.git', '../../etc', 'not a remote at all', 'github.com']) {
       const r = validateShare({ what: 'ok', priority: 'fyi', project: bad });
@@ -99,6 +121,23 @@ describe('validateShare', () => {
       expect(r.error).toContain('project');
       expect(r.error).toContain('200');
     }
+  });
+
+  // The end the folding is for, asserted where it is actually observable: the
+  // reader. Storing the author's capitalisation verbatim meant the share was
+  // addressed to a repo nobody sits in — no digest line, and not even counted
+  // in `older`, so nothing anywhere said it had happened.
+  it('delivers a share whose author capitalised the repo to a reader sitting in that repo', () => {
+    createShare(
+      scope,
+      'adnan@team.com',
+      { what: 'api thing', priority: 'fyi', project: 'github.com/Netflix/Hystrix' },
+      NOW,
+    );
+    const reader = getUnread(scope, 'priya@team.com', NOW, 14, { project: 'github.com/netflix/hystrix' });
+    expect(reader.shares.map((s) => s.what)).toEqual(['api thing']);
+    expect(reader.shares[0].project).toBe('github.com/netflix/hystrix');
+    expect(reader.older).toBe(0);
   });
 
   it('treats an omitted or blank project as null, same as why/action', () => {

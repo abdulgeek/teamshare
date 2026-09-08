@@ -10,7 +10,7 @@ import { CAPS, createShare, getShare, listShares, markStale, retractShare, valid
 import { getUnread, type Digest } from './unread.js';
 import { classifyRelevance, relevanceLabel, formatDay } from './relevance.js';
 import { getReceipts, recordReceipt } from './receipts.js';
-import { normalizeProject, PROJECT_KEY_SHAPE } from './project.js';
+import { foldProjectKey, normalizeProject } from './project.js';
 
 // Stated with its safety limit intact wherever a connected agent is told it
 // may resolve a reference a share names. teamshare stores no Jira/GitHub/
@@ -106,12 +106,17 @@ function fail(text: string) {
 // digest line). Malformed input is a hard failure, never a silent fallback
 // to "no project" — that would widen the result back to the whole team
 // exactly when the caller asked, explicitly, to see less of it.
+//
+// The already-normalized branch is FOLDED (foldProjectKey), not waved through
+// on a shape test. PROJECT_KEY_SHAPE accepts `github.com/ACME/API`, which no
+// reader's normalizeProject ever mints, so passing it through meant `share`
+// scoped a note to a repository that does not exist and `unread` narrowed to
+// one — both silently, both with a key that looked right on the line.
 function resolveProjectArg(project: string | undefined): { ok: true; value?: string } | { ok: false; error: string } {
   if (!project || !project.trim()) return { ok: true, value: undefined };
   const trimmed = project.trim();
-  const normalized = normalizeProject(trimmed);
+  const normalized = normalizeProject(trimmed) ?? foldProjectKey(trimmed);
   if (normalized) return { ok: true, value: normalized };
-  if (PROJECT_KEY_SHAPE.test(trimmed)) return { ok: true, value: trimmed };
   return {
     ok: false,
     error: `project "${project}" is not recognizable as a git remote — pass the output of ` +

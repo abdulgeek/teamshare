@@ -105,9 +105,9 @@ export function selectNew({ shares, seenIds, seeding }) {
 }
 
 export function renderAnnouncement(shares) {
-  // A teammate controls sender_name and what, so the fence has to be something
-  // they cannot predict — otherwise they close it early and the rest of their
-  // share is read as instructions.
+  // A teammate controls sender_name, what and project, so the fence has to be
+  // something they cannot predict — otherwise they close it early and the rest
+  // of their share is read as instructions.
   const tag = randomBytes(6).toString('hex');
   const lines = shares.map((s) => {
     // Mid-session arrivals are minutes old, so the age is nearly always "just
@@ -115,7 +115,9 @@ export function renderAnnouncement(shares) {
     // teammate is typing this at you right now" and "this was waiting".
     const grade = s.relevance && s.relevance !== 'new' ? ` | ${s.relevance}` : '';
     const when = s.age && s.day ? `${s.age} (${s.day})` : s.day || s.created_at;
-    const scope = s.project ? ` | ${s.project}` : '';
+    // Neutralised for the same reason as `what` — see session-start.mjs's
+    // identical line. `project` is author-supplied text and can forge a fence.
+    const scope = s.project ? ` | ${neutralizeFences(s.project)}` : '';
     // "to you" rather than the recipient list — see session-start.mjs's
     // identical comment.
     const addressed = s.to_me ? ' | to you' : '';
@@ -147,7 +149,15 @@ export function renderAnnouncement(shares) {
 }
 
 export function renderSystemMessage(shares) {
-  const names = [...new Set(shares.map((s) => String(s.sender_name).trim()).filter(Boolean))];
+  // Neutralised too, though this line goes to the host's user-visible channel
+  // rather than into the model's context (renderResponse puts it in
+  // `systemMessage` on Claude Code and drops it entirely on Codex/Cursor).
+  // Every OTHER teammate-authored string either hook emits goes through
+  // neutralizeFences; leaving this one out made the rule "remember to call it"
+  // instead of "we always call it", and that is how the `project` hole above
+  // survived two reviews. No host is known to feed systemMessage back to the
+  // model, so this is consistency, not a demonstrated escape.
+  const names = [...new Set(shares.map((s) => neutralizeFences(String(s.sender_name)).trim()).filter(Boolean))];
   const who = names.length === 0 ? 'a teammate' : names.length <= 2 ? names.join(' and ') : `${names[0]} and ${names.length - 1} others`;
   const blocking = shares.some((s) => String(s.priority).toLowerCase() === 'blocking');
   return `teamshare: ${shares.length} new share${shares.length === 1 ? '' : 's'} from ${who}${blocking ? ' (blocking)' : ''}`;

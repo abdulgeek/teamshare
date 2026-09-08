@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { normalizeEmail, type TeamScope } from './db.js';
 import { validateEmailAddress } from './http.js';
-import { PROJECT_KEY_SHAPE } from './project.js';
+import { foldProjectKey } from './project.js';
 
 export type Priority = 'fyi' | 'heads-up' | 'blocking';
 export const PRIORITIES: readonly Priority[] = ['fyi', 'heads-up', 'blocking'];
@@ -118,29 +118,35 @@ export function validateShare(input: ShareInput): ValidationResult {
     return { ok: false, error: `priority must be one of ${PRIORITIES.join(', ')}` };
   }
 
-  // Not re-normalised here: the caller is expected to have already run the
-  // remote through normalizeProject (project.ts). This DOES still validate
-  // the shape and cap the length, though — trusting a caller to have
-  // pre-normalized was harmless while nothing could set this field, and
-  // became a real gap the moment a client (the `share` tool) could put
-  // arbitrary text here. A value that does not look like normalizeProject's
-  // output is rejected outright rather than stored as a scope nothing will
-  // ever match.
+  // NORMALISED here, not merely shape-checked. This is the author-side
+  // validator, and testing the raw string against PROJECT_KEY_SHAPE was the
+  // wrong question: the shape is a reader-side "could this be a key", and it
+  // says yes to strings normalizeProject can never mint. `github.com/ACME/API`
+  // passed and was stored verbatim — a scope no reader's own key ever equals,
+  // so the share was invisible in every digest AND missing from every `older`
+  // count, while its author was told it went out. Capitalised repo names are
+  // ordinary, so an agent echoing back `github.com/Netflix/Hystrix` published
+  // into the void. Silent loss is the exact class this branch exists to
+  // remove, so what gets stored is what a reader would mint (foldProjectKey,
+  // which is normalizeProject's own fold), and a value that does not survive
+  // that round trip is an error saying so.
   const projectRaw = input.project?.trim() ? input.project.trim() : null;
   let project: string | null = null;
   if (projectRaw) {
     if (projectRaw.length > CAPS.project) {
       return { ok: false, error: `project is ${projectRaw.length} chars; cap is ${CAPS.project}.` };
     }
-    if (!PROJECT_KEY_SHAPE.test(projectRaw)) {
+    const folded = foldProjectKey(projectRaw);
+    if (!folded) {
       return {
         ok: false,
         error:
-          `project "${projectRaw}" does not look like a normalized git remote ` +
-          '(expected host/owner/repo, e.g. "github.com/acme/api").',
+          `project "${projectRaw}" does not fold to a normalized git remote key ` +
+          '(expected host/owner/repo, e.g. "github.com/acme/api"). Pass the output of ' +
+          '`git remote get-url origin`, or omit project for a team-wide share.',
       };
     }
-    project = projectRaw;
+    project = folded;
   }
 
   // Recipients are validated HERE, with every other field, rather than being
