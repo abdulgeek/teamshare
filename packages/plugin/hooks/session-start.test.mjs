@@ -723,3 +723,67 @@ describe('project scoping (Task 6)', () => {
     expect(line.trim().endsWith('(Tuesday, 08-09-2026)')).toBe(true);
   });
 });
+
+describe('addressed shares (Task 8)', () => {
+  it('marks an addressed share "to you" instead of listing its recipients', async () => {
+    writeConfig();
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          total: 1,
+          older: 0,
+          shares: [
+            {
+              id: 'shr_addressed',
+              sender_name: 'Ann',
+              sender_email: 'ann@team.com',
+              created_at: '2026-09-08T09:00:00.000Z',
+              priority: 'fyi',
+              what: 'just for you',
+              age: '3 hours ago',
+              day: 'Tuesday, 08-09-2026',
+              relevance: 'new',
+              project: null,
+              to_me: true,
+            },
+          ],
+        }),
+      );
+    };
+    const out = await runHook();
+    expect(out).toContain('to you');
+    expect(out).toContain('just for you');
+  });
+
+  it('does not print "to you" for a team-wide share', async () => {
+    writeConfig();
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          total: 1,
+          older: 0,
+          shares: [
+            {
+              id: 'shr_wide2',
+              sender_name: 'Ann',
+              sender_email: 'ann@team.com',
+              created_at: '2026-09-08T09:00:00.000Z',
+              priority: 'fyi',
+              what: 'team-wide note two',
+              age: '3 hours ago',
+              day: 'Tuesday, 08-09-2026',
+              relevance: 'new',
+              project: null,
+              to_me: false,
+            },
+          ],
+        }),
+      );
+    };
+    const out = await runHook();
+    const line = out.split('\n').find((l) => l.includes('shr_wide2'));
+    expect(line).not.toContain('to you');
+  });
+});

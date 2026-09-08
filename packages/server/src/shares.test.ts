@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   openDb, upsertMember, createTeam, hashToken, getOrCreateDefaultTeamId, makeTeamScope,
+  createMemberToken,
   type Db, type TeamScope,
 } from './db.js';
 import { validateShare, createShare, getShare, listShares, retractShare, markStale } from './shares.js';
@@ -333,6 +334,42 @@ describe('createShare: an addressed share never fails open (fix round 1)', () =>
       ),
     ).toThrow(/sma@team\.com/);
 
+    expect(countShares()).toBe(0);
+  });
+
+  // Task 8, controller ruling: "not a members row" used to lump together two
+  // different situations with two different remedies. These two tests pin
+  // each branch down on its own.
+  it('tells a never-invited address to check itself or invite the person (never-invited branch)', () => {
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['stranger@elsewhere.com'] },
+        NOW,
+      ),
+    ).toThrow(/not on this team: stranger@elsewhere\.com.*invite them/s);
+    expect(countShares()).toBe(0);
+  });
+
+  it('tells an invited-but-unconnected address to connect once, not that it is unknown (invited branch)', () => {
+    // Invited (a member_tokens row exists, from createMemberToken) but never
+    // authenticated — upsertMember, which is what actually creates a
+    // `members` row, is deliberately NOT called for this address.
+    createMemberToken(scope, 'newhire@team.com', 'New Hire', NOW);
+
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['newhire@team.com'] },
+        NOW,
+      ),
+    ).toThrow(/invited but not yet connected: newhire@team\.com.*connect once/s);
+    // And the never-invited wording must NOT appear for this address.
+    try {
+      createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi', recipients: ['newhire@team.com'] }, NOW);
+    } catch (e) {
+      expect((e as Error).message).not.toContain('not on this team');
+    }
     expect(countShares()).toBe(0);
   });
 

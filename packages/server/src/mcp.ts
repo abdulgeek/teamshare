@@ -153,7 +153,12 @@ function renderDigest(digest: Digest): string {
     // A scoped share says so, right on the line — otherwise a reader has no
     // way to tell "this never happened" from "this was never meant for you."
     const scope = s.project ? ` | ${s.project}` : '';
-    return `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} · ${s.age}${grade} (${s.day})${scope}: ${s.what}`;
+    // "to you" rather than the recipient list: the other names on an
+    // addressed share are other people's business, and to_me is true here
+    // exactly when this share was addressed to THIS reader (see
+    // unread.ts's DigestEntry.to_me).
+    const addressed = s.to_me ? ' | to you' : '';
+    return `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} · ${s.age}${grade} (${s.day})${scope}${addressed}: ${s.what}`;
   });
   const more =
     digest.total > digest.shares.length
@@ -199,16 +204,37 @@ export function buildMcpServer(ctx: {
               '`git remote get-url origin`\'s output, https, ssh, scp-style). Omitted (the default) ' +
               'means the whole team; only set this when the note is genuinely repo-specific.',
           ),
+        recipients: z
+          .array(z.string())
+          .max(CAPS.recipients)
+          .optional()
+          .describe(
+            'For a note meant for specific people, not the whole team — their email address(es), as ' +
+              'given on the roster. Every address must already belong to someone who has connected at ' +
+              'least once; an invited-but-unconnected teammate cannot be addressed yet, only reached by ' +
+              'a team-wide share. Omitted (the default) or an empty list means the whole team.',
+          ),
       },
     },
-    async ({ what, why, action, tags, priority, project }) => {
+    async ({ what, why, action, tags, priority, project, recipients }) => {
       const projectResult = resolveProjectArg(project);
       if (!projectResult.ok) return fail(projectResult.error);
-      const input = { what, why, action, tags, priority, project: projectResult.value };
+      const input = { what, why, action, tags, priority, project: projectResult.value, recipients };
       const check = validateShare(input);
       if (!check.ok) return fail(check.error);
-      const { id, notified } = createShare(scope, identity.email, input, now());
-      return ok(JSON.stringify({ id, notified }));
+      // createShare throws on a recipient list that would resolve to nobody
+      // real — an address nobody invited, one invited but never connected, a
+      // list naming only the sender, and so on (see shares.ts's
+      // resolveRecipients). Uncaught, that surfaces as an MCP transport
+      // error instead of a message the caller can act on; routed through
+      // fail() it reaches the caller exactly as shares.ts wrote it, naming
+      // the offending address and what to do about it.
+      try {
+        const { id, notified } = createShare(scope, identity.email, input, now());
+        return ok(JSON.stringify({ id, notified }));
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
     },
   );
 

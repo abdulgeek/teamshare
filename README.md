@@ -258,6 +258,78 @@ A scoped share says so, right on its line:
 That's what tells a colleague on a different repository why they never saw
 it — not silence, but a project scope that plainly wasn't theirs.
 
+### Addressing a share to specific people
+
+Sometimes a note is for one person, not the whole team or even one
+repository — *"can you review PR #482 before EOD?"* doesn't belong in
+everyone's digest. Your assistant sets `recipients` only when you actually
+name someone; an unqualified "share this" is still team-wide, same as
+leaving `project` off. The two combine — a note for one person about one
+repo — but most shares use neither.
+
+They narrow differently, though. Scope (above) only ever narrows for a
+reader who is themselves inside the matching repo — everyone else still
+sees a scoped share. Addressing is stricter: once a share names people, it
+reaches **only** them, full stop, regardless of where anyone is working.
+
+Captured from a live server: one team lead (Ana) and three invited
+teammates — Priya, Sam, and Maya — each already connected once.
+
+**An unscoped share reaches all three.** Ana shares *"Standup moved to 10am
+starting Monday"* with neither `project` nor `recipients` set. Priya's,
+Sam's, and Maya's `unread` all show it.
+
+**A share scoped to one repository reaches only a reader in that repo.**
+Ana shares *"API auth middleware refactor lands Friday"* scoped to
+`github.com/acme/api`. Sam, narrowed to that same repo, sees it:
+
+```
+- [shr_ab410596cd6f] HEADS-UP from ana · just now (Tuesday, 08-09-2026) | github.com/acme/api: API auth middleware refactor lands Friday.
+```
+
+Maya, narrowed to a different repo (`github.com/acme/web`), doesn't — her
+digest has only the team-wide standup note.
+
+**An addressed share reaches only its recipient.** Ana addresses *"Can you
+review PR #482 before EOD?"* to Sam alone (`recipients:
+["sam@example.com"]`). Sam's digest marks it **to you** — never the
+recipient list itself, which is nobody else's business to see:
+
+```
+- [shr_ff6f1bd38b9d] HEADS-UP from ana · just now (Tuesday, 08-09-2026) | to you: Can you review PR #482 before EOD?
+```
+
+Priya, who wasn't named, doesn't see it at all — her digest still has only
+the team-wide and scoped notes.
+
+**Receipts narrow the same way.** Asking "who's seen the PR share?" reports
+only the person it was actually addressed to:
+
+```
+0 viewed, 0 dismissed. Not yet seen by: sam@example.com (last seen just now).
+```
+
+**Every recipient must already be a connected teammate** — invited *and*
+having opened their assistant at least once against this server. An address
+that was never invited is refused outright, naming it:
+
+```
+not on this team: ghost@nowhere.com. Check the address — a typo here would
+address the share to nobody — or invite them (`teamshare invite <email>`)
+before addressing a share to them.
+```
+
+An address that **was** invited but hasn't connected yet gets a different
+answer, because the fix is different — there's nothing to check, they just
+need to show up once:
+
+```
+invited but not yet connected: newhire@example.com. They need to connect
+once (open their assistant so it authenticates against this server) before
+you can address a share to them directly — a team-wide share still reaches
+them in the meantime.
+```
+
 ### Taking something back
 
 Two ways, and they differ in what survives:

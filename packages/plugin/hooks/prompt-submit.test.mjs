@@ -331,3 +331,23 @@ describe('project scoping (Task 6)', () => {
     expect(ctx).toContain('shr_scoped');
   });
 });
+
+describe('addressed shares (Task 8)', () => {
+  it('marks a newly-arrived addressed share "to you" on its announcement line', async () => {
+    serveShares([]);
+    await runHook();
+    serveShares([share('shr_addressed', { to_me: true })]);
+    const ctx = parse(await runHook()).hookSpecificOutput.additionalContext;
+    expect(ctx).toContain('to you');
+    expect(ctx).toContain('shr_addressed');
+  });
+
+  it('does not print "to you" for a team-wide announcement', async () => {
+    serveShares([]);
+    await runHook();
+    serveShares([share('shr_wide3', { to_me: false })]);
+    const ctx = parse(await runHook()).hookSpecificOutput.additionalContext;
+    const line = ctx.split('\n').find((l) => l.includes('shr_wide3'));
+    expect(line).not.toContain('to you');
+  });
+});

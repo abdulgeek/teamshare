@@ -621,3 +621,83 @@ describe('mcp surface: project scoping', () => {
     await client.close();
   });
 });
+
+// Task 8: surface Task 7's addressed shares through the `share`/`unread`
+// tools. Verbatim from the task-8 brief's own Step 1 tests, plus coverage
+// for the failure path the brief calls out explicitly: createShare THROWS on
+// a bad recipient list and this handler has to route that through fail()
+// itself, rather than let it surface as an MCP transport error.
+describe('mcp surface: addressed shares', () => {
+  it('lets one member address a share to another, and shows who it went to', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'PR is ready', priority: 'fyi', recipients: ['priya@team.com'] },
+    });
+    await adnan.close();
+
+    const priya = await connectWithToken(priyaToken);
+    const digest = textOf(await priya.callTool({ name: 'unread', arguments: {} }));
+    expect(digest).toContain('PR is ready');
+    expect(digest).toContain('to you');
+    await priya.close();
+
+    const sam = await connectWithToken(samToken);
+    expect(textOf(await sam.callTool({ name: 'unread', arguments: {} }))).toContain('No unread');
+    await sam.close();
+  });
+
+  it('refuses a recipient who is not on the team', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    const res = await adnan.callTool({
+      name: 'share', arguments: { what: 'x', priority: 'fyi', recipients: ['stranger@elsewhere.com'] },
+    });
+    // Silently dropping an unknown recipient would look like a delivered share
+    // that nobody ever receives.
+    expect(res.isError).toBeTruthy();
+    await adnan.close();
+  });
+
+  it('names the offending address in the isError result, not a generic failure', async () => {
+    // Pins down WHY the above isError test passes: the failure must be
+    // createShare's own message routed through fail(), not some other
+    // generic error that happens to also set isError.
+    const adnan = await connectWithToken(adnanToken);
+    const res = await adnan.callTool({
+      name: 'share', arguments: { what: 'x', priority: 'fyi', recipients: ['stranger@elsewhere.com'] },
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('stranger@elsewhere.com');
+    await adnan.close();
+  });
+
+  it('does not publish anything when the recipient list is rejected', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({
+      name: 'share', arguments: { what: 'never published', priority: 'fyi', recipients: ['stranger@elsewhere.com'] },
+    });
+    expect(textOf(await adnan.callTool({ name: 'list_shares', arguments: {} }))).toBe('No shares match.');
+    await adnan.close();
+  });
+
+  it('does not mark a team-wide share "to you", and does not print a recipient list at all', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({ name: 'share', arguments: { what: 'for everyone', priority: 'fyi' } });
+    await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'for sam only', priority: 'fyi', recipients: ['sam@team.com'] },
+    });
+    await adnan.close();
+
+    const sam = await connectWithToken(samToken);
+    const digest = textOf(await sam.callTool({ name: 'unread', arguments: {} }));
+    await sam.close();
+
+    const wideLine = digest.split('\n').find((l) => l.includes('for everyone'));
+    const addressedLine = digest.split('\n').find((l) => l.includes('for sam only'));
+    expect(wideLine).not.toContain('to you');
+    expect(addressedLine).toContain('to you');
+    // The other recipient's own address is never printed to a bystander.
+    expect(digest).not.toContain('priya@team.com');
+  });
+});

@@ -116,8 +116,11 @@ export function renderAnnouncement(shares) {
     const grade = s.relevance && s.relevance !== 'new' ? ` | ${s.relevance}` : '';
     const when = s.age && s.day ? `${s.age} (${s.day})` : s.day || s.created_at;
     const scope = s.project ? ` | ${s.project}` : '';
+    // "to you" rather than the recipient list — see session-start.mjs's
+    // identical comment.
+    const addressed = s.to_me ? ' | to you' : '';
     return (
-      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}${scope}\n` +
+      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}${scope}${addressed}\n` +
       `    ${neutralizeFences(s.what)}`
     );
   });

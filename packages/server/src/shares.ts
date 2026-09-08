@@ -255,10 +255,43 @@ function resolveRecipients(scope: TeamScope, sender: string, addressed: string[]
 
   const unknown = withoutSender.filter((email) => !known.has(email));
   if (unknown.length > 0) {
-    throw new Error(
-      `not on this team: ${unknown.join(', ')}. Check the address — a typo here would address ` +
-        'the share to nobody — or omit recipients entirely to reach the whole team.',
+    // "Not a members row" lumps together two different situations, and the
+    // controller ruling is that the error must not: an address nobody ever
+    // invited (a typo, or genuinely not on this team) needs "check it or
+    // invite them"; an address someone DID invite — a live member_tokens row,
+    // the same table listRoster (db.ts) reads to report "invited, not yet
+    // active" — but who has never actually authenticated needs "they need to
+    // connect once", which is a completely different, and completely
+    // actionable, next step. Split on membership in member_tokens (any row,
+    // not just an unrevoked one — being invited at all is what distinguishes
+    // "unknown" from "known but not yet connected") to tell them apart.
+    const invitedPlaceholders = unknown.map(() => '?').join(', ');
+    const invited = new Set(
+      (
+        scope.db
+          .prepare(`SELECT DISTINCT email FROM member_tokens WHERE team_id = ? AND email IN (${invitedPlaceholders})`)
+          .all(scope.teamId, ...unknown) as { email: string }[]
+      ).map((r) => r.email),
     );
+    const neverInvited = unknown.filter((email) => !invited.has(email));
+    const notYetConnected = unknown.filter((email) => invited.has(email));
+
+    const parts: string[] = [];
+    if (neverInvited.length > 0) {
+      parts.push(
+        `not on this team: ${neverInvited.join(', ')}. Check the address — a typo here would ` +
+          'address the share to nobody — or invite them (`teamshare invite <email>`) before ' +
+          'addressing a share to them.',
+      );
+    }
+    if (notYetConnected.length > 0) {
+      parts.push(
+        `invited but not yet connected: ${notYetConnected.join(', ')}. They need to connect once ` +
+          '(open their assistant so it authenticates against this server) before you can address a ' +
+          'share to them directly — a team-wide share still reaches them in the meantime.',
+      );
+    }
+    throw new Error(parts.join(' '));
   }
   return withoutSender;
 }

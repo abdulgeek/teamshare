@@ -22,6 +22,15 @@ export interface DigestEntry {
    * "it was scoped to a different repo" reads very differently from silence.
    */
   project: string | null;
+  /**
+   * Task 8: true when this share has share_recipients rows at all — which,
+   * since AND_RECIPIENT (below) never returns a row addressed to someone
+   * else, means it is true exactly when it was addressed to THIS reader.
+   * Every renderer (mcp.ts's renderDigest, both hooks) uses this to print
+   * "to you" instead of the recipient list: the other names on an addressed
+   * share are other people's business and tell this reader nothing.
+   */
+  to_me: boolean;
 }
 
 export interface Digest {
@@ -168,7 +177,10 @@ export function getUnread(
   const rows = scope.db
     .prepare(
       `SELECT s.id, s.sender_email, s.priority, s.what, s.created_at, s.stale_at, s.project,
-              COALESCE(m.name, s.sender_email) AS sender_name
+              COALESCE(m.name, s.sender_email) AS sender_name,
+              EXISTS (
+                SELECT 1 FROM share_recipients sr WHERE sr.team_id = s.team_id AND sr.share_id = s.id
+              ) AS to_me
          FROM shares s
          LEFT JOIN members m ON m.email = s.sender_email AND m.team_id = s.team_id
          ${base.sql}
@@ -203,6 +215,7 @@ export function getUnread(
         day: freshness.day,
         relevance: freshness.relevance,
         project: (r.project as string | null) ?? null,
+        to_me: Boolean(r.to_me),
       };
     }),
   };

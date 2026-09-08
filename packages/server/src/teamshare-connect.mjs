@@ -1015,8 +1015,12 @@ function render(digest) {
     // A scoped share says so, right on the line — otherwise a reader has no
     // way to tell "this never happened" from "this was never meant for you."
     const scope = s.project ? \` | \${s.project}\` : '';
+    // "to you" rather than the recipient list: the other names on an
+    // addressed share are other people's business, and to_me is true here
+    // exactly when this share was addressed to THIS reader.
+    const addressed = s.to_me ? ' | to you' : '';
     return (
-      \`  - id=\${s.id} | \${String(s.priority).toUpperCase()} | from \${neutralizeFences(s.sender_name)} | \${when}\${grade}\${scope}\\n\` +
+      \`  - id=\${s.id} | \${String(s.priority).toUpperCase()} | from \${neutralizeFences(s.sender_name)} | \${when}\${grade}\${scope}\${addressed}\\n\` +
       \`    \${neutralizeFences(s.what)}\`
     );
   });
@@ -1245,8 +1249,11 @@ function renderAnnouncement(shares) {
     const grade = s.relevance && s.relevance !== 'new' ? \` | \${s.relevance}\` : '';
     const when = s.age && s.day ? \`\${s.age} (\${s.day})\` : s.day || s.created_at;
     const scope = s.project ? \` | \${s.project}\` : '';
+    // "to you" rather than the recipient list — see session-start.mjs's
+    // identical comment.
+    const addressed = s.to_me ? ' | to you' : '';
     return (
-      \`  - id=\${s.id} | \${String(s.priority).toUpperCase()} | from \${neutralizeFences(s.sender_name)} | \${when}\${grade}\${scope}\\n\` +
+      \`  - id=\${s.id} | \${String(s.priority).toUpperCase()} | from \${neutralizeFences(s.sender_name)} | \${when}\${grade}\${scope}\${addressed}\\n\` +
       \`    \${neutralizeFences(s.what)}\`
     );
   });

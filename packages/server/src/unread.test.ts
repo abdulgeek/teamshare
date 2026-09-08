@@ -358,6 +358,18 @@ describe('getUnread: recipients', () => {
     expect(getUnread(scope, 'priya@team.com', NOW, 14).total).toBe(1);
   });
 
+  // Task 8: DigestEntry.to_me is what every renderer uses to say "to you"
+  // instead of printing the recipient list — the other names on an addressed
+  // share are nobody else's business to see.
+  it('marks an addressed share to_me for its recipient, and not for a team-wide one', () => {
+    createShare(scope, 'adnan@team.com', { what: 'for sam', priority: 'fyi', recipients: ['sam@team.com'] }, NOW);
+    createShare(scope, 'adnan@team.com', { what: 'for everyone', priority: 'fyi' }, NOW);
+
+    const sam = getUnread(scope, 'sam@team.com', NOW, 14);
+    expect(sam.shares.find((s) => s.what === 'for sam')?.to_me).toBe(true);
+    expect(sam.shares.find((s) => s.what === 'for everyone')?.to_me).toBe(false);
+  });
+
   // The controller-flagged case: THREE independent conditional clauses
   // (relevance, project, recipient) all landing in one query is exactly
   // where a silent cross-wiring shows up — a digest that filters on the
