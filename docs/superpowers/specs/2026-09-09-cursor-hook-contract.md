@@ -136,18 +136,60 @@ sessionStartResponse:
 schema-valid: the composer code shows it aborting the chat and rendering
 `user_message` (or a default string) as the assistant's reply.
 
-## 5. Bonus finding: Claude Code's hook response shape is accepted too, unconditionally
+## 5. Bonus finding: Claude Code's hook response shape is accepted too — but not uniformly, and not unconditionally
 
-Buried in the same normalization step (`Nkf` → `Lkf` → `Mkf`) is a
-compatibility layer for Claude Code-shaped hook output — the exact shape
-`packages/plugin/hooks/prompt-submit.mjs` already emits for Claude Code:
+**Corrected 2026-09-09 (fix round 1).** The original version of this section
+overstated the scope of the compatibility layer on two points: which events
+the *nested* Claude shape actually works for, and whether the
+`hookEventName` check is skipped. Both are corrected below, with the exact
+call chain.
 
-```json
-{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "..."}}
+There are **two separate response shapes** Cursor's normalizer will accept
+for `additional_context`, read by two different functions, tried in this
+order (`Lkf`, the merge step, calls `Mkf(t) ?? Pkf(e, t, i)`):
+
+```js
+function Mkf(e) { return typeof e.additionalContext == "string" ? e.additionalContext : void 0 }
+
+function Pkf(e, t, n) {
+  if (!Dzs(n)) return;               // Dzs = enableClaudeNestedHookSpecificOutputCompatibility flag
+  const i = nmd[e];                  // nmd = Cursor-internal step -> Claude hookEventName string
+  if (i === void 0) return;          // no Claude event maps to this Cursor step -> bail, unrecognized
+  const r = Mzs(t);                  // Mzs = extract t.hookSpecificOutput (if it's an object)
+  if (Pzs(r, i)) return typeof r.additionalContext == "string" ? r.additionalContext : void 0
+}
+
+function Pzs(e, t) {                 // the hookEventName check
+  if (!e) return !1;
+  const n = e.hookEventName;
+  return n === void 0 || n === "" ? !0 : n === t
+}
 ```
 
-The gate for this, `enableClaudeNestedHookSpecificOutputCompatibility`, is
-**hardcoded to `true`** in `validateParsedHookResponse` in this build:
+- **`Mkf` is the *flat* reader.** It reads a top-level, unnested,
+  camelCase `additionalContext` field directly on the parsed hook response
+  (`{"additionalContext": "..."}`). It does not look at `hookEventName` at
+  all — there is no nested object here to check a name against.
+- **`Pkf` is the *nested* reader** — the one that recognizes
+  `packages/plugin/hooks/prompt-submit.mjs`'s actual output shape,
+  `{"hookSpecificOutput": {"hookEventName": "...", "additionalContext": "..."}}`.
+  It is gated on the compatibility flag (still hardcoded `true`, see below),
+  **and it does check `hookEventName`**, via `Pzs` — permissively:
+  - `hookEventName` absent or `""` → passes (no check performed).
+  - `hookEventName` present and equal to the expected name for the current
+    step → passes.
+  - `hookEventName` present and *different* from the expected name → `Pzs`
+    returns `false`, `Pkf` returns `undefined`, and the nested
+    `additionalContext` is **silently dropped** — no error, no warning, the
+    hook just behaves as if it returned no context at all. **This is the
+    trap:** a hook author who ships a mismatched `hookEventName` (e.g. a
+    stale value copied from a different step, or a typo) will not see any
+    failure — the context simply never arrives, and it's easy to misdiagnose
+    as an injection-mechanism problem rather than a name mismatch.
+
+The gate for the nested path, `enableClaudeNestedHookSpecificOutputCompatibility`,
+is still **hardcoded to `true`** in `validateParsedHookResponse` in this
+build — that part of the original finding holds:
 
 ```js
 validateParsedHookResponse(e, t) {
@@ -155,18 +197,52 @@ validateParsedHookResponse(e, t) {
 }
 ```
 
-And the extraction (`Mkf`) reads `hookSpecificOutput.additionalContext`
-**without even checking that `hookEventName` matches the current step** — it
-only checks that the flat `additional_context` field isn't already present.
-Net effect: a hook script that already speaks Claude Code's nested
-`hookSpecificOutput.additionalContext` shape will have that value picked up
-by Cursor's `sessionStart`, `beforeSubmitPrompt`, `preToolUse`,
-`postToolUse`, and `postToolUseFailure` handlers as-is, no format change
-required. (`cd.sessionStart`, `cd.beforeSubmitPrompt`, `cd.preToolUse`,
-`cd.postToolUse`, `cd.postToolUseFailure` are exactly the five steps in the
-internal `HOOK_STEPS_SUPPORTING_ADDITIONAL_CONTEXT` set — named that,
-literally, in an internal invariant-check error message.) Worth reusing for
-Task 3 rather than hand-rolling a second Cursor-flavored response shape.
+**Which events actually get the nested shape — corrected list.** `Pkf`'s
+early-return on `nmd[e] === void 0` means the nested shape only works for
+Cursor steps that have a corresponding entry in `nmd` (the table built by
+inverting `u4i`, Cursor's Claude-event-name → internal-step map):
+
+```js
+u4i = {
+  PreToolUse: cd.preToolUse, PermissionRequest: null,
+  PostToolUse: cd.postToolUse, UserPromptSubmit: cd.beforeSubmitPrompt,
+  Stop: cd.stop, SubagentStop: cd.subagentStop,
+  SessionStart: cd.sessionStart, SessionEnd: cd.sessionEnd,
+  PreCompact: cd.preCompact, Notification: null
+}
+nmd = Object.fromEntries(Object.entries(u4i).filter(e => e[1] !== null).map(([e, t]) => [t, e]))
+```
+
+**`u4i` has no `PostToolUseFailure` entry at all** — Claude Code has no such
+event, so there is nothing to map it from. Intersecting `nmd`'s keys with
+`d4i` (the set of five steps that support `additional_context` merging —
+`sessionStart`, `beforeSubmitPrompt`, `preToolUse`, `postToolUse`,
+`postToolUseFailure`), the **nested `hookSpecificOutput.additionalContext`
+shape is recognized only for `sessionStart`, `beforeSubmitPrompt`,
+`preToolUse`, and `postToolUse`. It is NOT recognized for
+`postToolUseFailure`** — `Pkf(cd.postToolUseFailure, ...)` hits
+`nmd[e] === void 0` and returns `undefined` before ever inspecting
+`hookSpecificOutput` or `hookEventName`.
+
+`postToolUseFailure` is still in `d4i`, so `Lkf` still tries `Mkf(t)` for
+it — meaning a hook responding to `postToolUseFailure` **can** inject
+`additional_context`, but only via the **flat, unnested**
+`{"additionalContext": "..."}` shape, never via
+`hookSpecificOutput.additionalContext`. A `postToolUseFailure` hook that
+emits Claude Code's usual nested envelope will have it silently ignored,
+same failure mode as the `hookEventName` mismatch above.
+
+**Net effect, corrected:** a hook script that already speaks Claude Code's
+nested `hookSpecificOutput.additionalContext` shape, with a correct (or
+omitted) `hookEventName`, will have that value picked up as-is by Cursor's
+`sessionStart`, `beforeSubmitPrompt`, `preToolUse`, and `postToolUse`
+handlers — no format translation needed. **`postToolUseFailure` is the one
+exception**: it must use the flat `additionalContext` shape instead. Worth
+reusing the nested shape for Task 3's four supported events rather than
+hand-rolling a second Cursor-flavored response shape, but Task 3 should
+**not** build a `postToolUseFailure` integration assuming the nested shape
+works there, and should be deliberate about setting (or omitting, never
+guessing) `hookEventName` on every nested response it does emit.
 
 ## 6. cwd and other operational semantics
 
