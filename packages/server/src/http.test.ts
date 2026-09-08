@@ -172,6 +172,34 @@ describe('GET /unread', () => {
   });
 });
 
+describe('GET /unread?project=', () => {
+  it("passes the caller's project through from the query string", async () => {
+    createShare(scope, 'adnan@team.com', { what: 'api thing', priority: 'fyi', project: 'github.com/acme/api' }, NOW);
+    createShare(scope, 'adnan@team.com', { what: 'web thing', priority: 'fyi', project: 'github.com/acme/web' }, NOW);
+    const res = await fetch(`${base}/unread?project=github.com/acme/api`, { headers: headers() });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.shares.map((s: { what: string }) => s.what)).toContain('api thing');
+    expect(body.shares.map((s: { what: string }) => s.what)).not.toContain('web thing');
+  });
+
+  it('rejects a project key that is not one', async () => {
+    // A malformed key must not silently widen the digest back to everything.
+    const res = await fetch(`${base}/unread?project=${encodeURIComponent('../../etc')}`, {
+      headers: headers(),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('a reader with no project of their own is not narrowed at all', async () => {
+    createShare(scope, 'adnan@team.com', { what: 'api thing', priority: 'fyi', project: 'github.com/acme/api' }, NOW);
+    const res = await fetch(`${base}/unread`, { headers: headers() });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.shares.map((s: { what: string }) => s.what)).toContain('api thing');
+  });
+});
+
 describe('cross-team isolation via HTTP', () => {
   it("a member token for team B cannot read team A's shares via /unread, and sees only its own", async () => {
     createShare(scope, 'adnan@team.com', { what: 'Team A confidential plan', priority: 'blocking' }, NOW);

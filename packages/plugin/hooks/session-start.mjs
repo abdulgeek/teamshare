@@ -2,7 +2,7 @@
 // SessionStart hook: print unread team shares as context for Claude.
 // Contract: plain stdout on exit 0 becomes session context.
 import { randomBytes } from 'node:crypto';
-import { loadConfig, neutralizeFences, fetchUnread } from './shared.mjs';
+import { loadConfig, neutralizeFences, fetchUnread, resolveProject } from './shared.mjs';
 import { detectHost, normalizePayload, renderResponse } from './hosts.mjs';
 
 const TIMEOUT_MS = 1500;
@@ -29,8 +29,11 @@ function render(digest) {
   const lines = digest.shares.map((s) => {
     const grade = s.relevance && s.relevance !== 'new' ? ` | ${s.relevance}` : '';
     const when = s.age && s.day ? `${s.age} (${s.day})` : s.day || s.created_at;
+    // A scoped share says so, right on the line — otherwise a reader has no
+    // way to tell "this never happened" from "this was never meant for you."
+    const scope = s.project ? ` | ${s.project}` : '';
     return (
-      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}\n` +
+      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}${scope}\n` +
       `    ${neutralizeFences(s.what)}`
     );
   });
@@ -85,7 +88,7 @@ async function main() {
   }
 
   const host = detectHost(payload, process.env);
-  normalizePayload(payload, host); // for parity with prompt-submit.mjs; this hook needs only `host`
+  const { cwd } = normalizePayload(payload, host);
 
   // The source gate applies to Claude Code and Codex, not Cursor: Cursor's
   // sessionStart sends no `source` at all, and gating on a field it never
@@ -107,8 +110,12 @@ async function main() {
   try {
     // Identity headers are gone deliberately: per-email invites moved identity
     // into the personal token itself, so the server resolves who you are from
-    // Authorization and ignores those headers everywhere.
-    const { status, digest } = await fetchUnread(cfg, TIMEOUT_MS);
+    // Authorization and ignores those headers everywhere. `project` is the one
+    // thing this hook DOES compute from cwd — narrowing what a reader sees is
+    // not an identity claim, and a git remote that resolves to nothing (no
+    // git, no repo, no remote) simply means no narrowing at all.
+    const project = resolveProject(cwd);
+    const { status, digest } = await fetchUnread(cfg, TIMEOUT_MS, project);
 
     // A rejected token is a misconfiguration the user must see; a network
     // failure is not worth interrupting them over.

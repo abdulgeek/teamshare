@@ -16,6 +16,12 @@ export interface DigestEntry {
   /** "Monday, 08-09-2026" — the calendar day, for readers who want the date rather than the gap. */
   day: string;
   relevance: Relevance;
+  /**
+   * The repo this share is scoped to, or null for a team-wide share. Carried
+   * through so a reader can tell WHY a colleague never saw something —
+   * "it was scoped to a different repo" reads very differently from silence.
+   */
+  project: string | null;
 }
 
 export interface Digest {
@@ -141,7 +147,7 @@ export function getUnread(
 
   const rows = scope.db
     .prepare(
-      `SELECT s.id, s.sender_email, s.priority, s.what, s.created_at, s.stale_at,
+      `SELECT s.id, s.sender_email, s.priority, s.what, s.created_at, s.stale_at, s.project,
               COALESCE(m.name, s.sender_email) AS sender_name
          FROM shares s
          LEFT JOIN members m ON m.email = s.sender_email AND m.team_id = s.team_id
@@ -176,6 +182,7 @@ export function getUnread(
         age: freshness.age,
         day: freshness.day,
         relevance: freshness.relevance,
+        project: (r.project as string | null) ?? null,
       };
     }),
   };

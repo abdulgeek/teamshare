@@ -10,6 +10,7 @@ import { CAPS, createShare, getShare, listShares, markStale, retractShare, valid
 import { getUnread, type Digest } from './unread.js';
 import { classifyRelevance, relevanceLabel, formatDay } from './relevance.js';
 import { getReceipts, recordReceipt } from './receipts.js';
+import { normalizeProject, PROJECT_KEY_SHAPE } from './project.js';
 
 // Stated with its safety limit intact wherever a connected agent is told it
 // may resolve a reference a share names. teamshare stores no Jira/GitHub/
@@ -98,6 +99,26 @@ function fail(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true };
 }
 
+// Accepts a project argument in EITHER shape an LLM caller might reasonably
+// send: a raw git remote (any form normalizeProject folds), or a key that is
+// already normalized (the same value the HTTP /unread route requires, and
+// what a caller would get by echoing back a project it saw on an earlier
+// digest line). Malformed input is a hard failure, never a silent fallback
+// to "no project" — that would widen the result back to the whole team
+// exactly when the caller asked, explicitly, to see less of it.
+function resolveProjectArg(project: string | undefined): { ok: true; value?: string } | { ok: false; error: string } {
+  if (!project || !project.trim()) return { ok: true, value: undefined };
+  const trimmed = project.trim();
+  const normalized = normalizeProject(trimmed);
+  if (normalized) return { ok: true, value: normalized };
+  if (PROJECT_KEY_SHAPE.test(trimmed)) return { ok: true, value: trimmed };
+  return {
+    ok: false,
+    error: `project "${project}" is not recognizable as a git remote — pass the output of ` +
+      '`git remote get-url origin`, or omit it for a team-wide share.',
+  };
+}
+
 // Human-readable "how long ago" for a member's last_seen, so `receipts` can
 // distinguish "hasn't read it yet" (recently seen, just hasn't answered)
 // from "hasn't connected in two weeks" (a member who may never see it).
@@ -129,7 +150,10 @@ function renderDigest(digest: Digest): string {
   }
   const lines = digest.shares.map((s) => {
     const grade = s.relevance === 'new' ? '' : ` [${s.relevance}]`;
-    return `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} · ${s.age}${grade} (${s.day}): ${s.what}`;
+    // A scoped share says so, right on the line — otherwise a reader has no
+    // way to tell "this never happened" from "this was never meant for you."
+    const scope = s.project ? ` | ${s.project}` : '';
+    return `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} · ${s.age}${grade} (${s.day})${scope}: ${s.what}`;
   });
   const more =
     digest.total > digest.shares.length
@@ -166,10 +190,21 @@ export function buildMcpServer(ctx: {
         action: z.string().max(CAPS.action).optional().describe('What teammates should do.'),
         tags: z.array(z.string().max(CAPS.tagLength)).max(CAPS.tags).optional(),
         priority: z.enum(['fyi', 'heads-up', 'blocking']),
+        project: z
+          .string()
+          .max(CAPS.project)
+          .optional()
+          .describe(
+            'For a note about ONE repository, not the whole team — pass its git remote (any form: ' +
+              '`git remote get-url origin`\'s output, https, ssh, scp-style). Omitted (the default) ' +
+              'means the whole team; only set this when the note is genuinely repo-specific.',
+          ),
       },
     },
-    async ({ what, why, action, tags, priority }) => {
-      const input = { what, why, action, tags, priority };
+    async ({ what, why, action, tags, priority, project }) => {
+      const projectResult = resolveProjectArg(project);
+      if (!projectResult.ok) return fail(projectResult.error);
+      const input = { what, why, action, tags, priority, project: projectResult.value };
       const check = validateShare(input);
       if (!check.ok) return fail(check.error);
       const { id, notified } = createShare(scope, identity.email, input, now());
@@ -183,11 +218,20 @@ export function buildMcpServer(ctx: {
       title: 'Unread team shares',
       description:
         'Team shares this user has not viewed or dismissed. Shares past the relevance window are ' +
-        'held back and only counted; pass include_old to get them too.',
-      inputSchema: { include_old: z.boolean().optional() },
+        'held back and only counted; pass include_old to get them too. Pass project to narrow to one ' +
+        "repository's shares plus team-wide ones; omit it to see everything (the default).",
+      inputSchema: {
+        include_old: z.boolean().optional(),
+        project: z.string().optional().describe('A git remote for the repo to narrow to. Omit to see everything.'),
+      },
     },
-    async ({ include_old }) => {
-      const digest = getUnread(scope, identity.email, now(), expiryDays, { includeOld: include_old });
+    async ({ include_old, project }) => {
+      const projectResult = resolveProjectArg(project);
+      if (!projectResult.ok) return fail(projectResult.error);
+      const digest = getUnread(scope, identity.email, now(), expiryDays, {
+        includeOld: include_old,
+        project: projectResult.value,
+      });
       return ok(renderDigest(digest));
     },
   );

@@ -27,7 +27,7 @@ import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, neutralizeFences, fetchUnread } from './shared.mjs';
+import { loadConfig, neutralizeFences, fetchUnread, resolveProject } from './shared.mjs';
 import { detectHost, normalizePayload, renderResponse } from './hosts.mjs';
 
 const FETCH_TIMEOUT_MS = 1200;
@@ -115,8 +115,9 @@ export function renderAnnouncement(shares) {
     // teammate is typing this at you right now" and "this was waiting".
     const grade = s.relevance && s.relevance !== 'new' ? ` | ${s.relevance}` : '';
     const when = s.age && s.day ? `${s.age} (${s.day})` : s.day || s.created_at;
+    const scope = s.project ? ` | ${s.project}` : '';
     return (
-      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}\n` +
+      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}${scope}\n` +
       `    ${neutralizeFences(s.what)}`
     );
   });
@@ -167,7 +168,7 @@ async function main() {
   if (!cfg) return;
 
   const host = detectHost(payload, process.env);
-  const { sessionId } = normalizePayload(payload, host);
+  const { sessionId, cwd } = normalizePayload(payload, host);
   const state = readPollState();
   const entry = state.servers[cfg.url];
   const nowMs = Date.now();
@@ -180,7 +181,8 @@ async function main() {
 
   let digest = null;
   try {
-    const res = await fetchUnread(cfg, FETCH_TIMEOUT_MS);
+    const project = resolveProject(cwd);
+    const res = await fetchUnread(cfg, FETCH_TIMEOUT_MS, project);
     // A rejected token is worth knowing about, but this is the wrong place to
     // say so — session start already reports it, and repeating it on every
     // prompt would be its own kind of broken. Stay quiet and let the poll

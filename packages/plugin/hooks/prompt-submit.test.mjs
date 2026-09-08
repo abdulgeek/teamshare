@@ -1,7 +1,7 @@
 // The mid-session poller: the thing that makes a share reach someone who has
 // had Claude Code open all day.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -11,20 +11,25 @@ import http from 'node:http';
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), 'prompt-submit.mjs');
 
 let home;
+let repo;
 let server;
 let port;
 let respond;
 let requestCount;
+let lastRequestUrl;
 
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), 'ts-poll-'));
+  repo = undefined;
   requestCount = 0;
+  lastRequestUrl = null;
   respond = (res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ total: 0, shares: [] }));
   };
   server = http.createServer((req, res) => {
     requestCount += 1;
+    lastRequestUrl = req.url;
     respond(res);
   });
   await new Promise((r) => server.listen(0, r));
@@ -34,7 +39,16 @@ beforeEach(async () => {
 afterEach(async () => {
   await new Promise((r) => server.close(r));
   rmSync(home, { recursive: true, force: true });
+  if (repo) rmSync(repo, { recursive: true, force: true });
 });
+
+function initRepoWithRemote(remoteUrl) {
+  const dir = mkdtempSync(join(tmpdir(), 'ts-poll-repo-'));
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(dir, '.gitconfig-unused') };
+  execFileSync('git', ['init', '-q'], { cwd: dir, env });
+  execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: dir, env });
+  return dir;
+}
 
 const share = (id, overrides = {}) => ({
   id,
@@ -288,5 +302,32 @@ describe('when the new share was published', () => {
     const ctx = parse(await runHook()).hookSpecificOutput.additionalContext;
     expect(ctx).toContain('shr_legacy');
     expect(ctx).not.toContain('undefined');
+  });
+});
+
+describe('project scoping (Task 6)', () => {
+  it("sends ?project= computed from the payload's cwd", async () => {
+    // The spawned process's own OS cwd stays `home` (never a git repo, see
+    // runHook above) — only the JSON payload claims `repo`. A poller that
+    // read process.cwd() instead of the payload's cwd would resolve nothing.
+    repo = initRepoWithRemote('https://github.com/acme/api.git');
+    serveShares([]);
+    await runHook({ cwd: repo });
+    expect(lastRequestUrl).toBe('/unread?project=github.com%2Facme%2Fapi');
+  });
+
+  it('sends no project query parameter when the payload carries no cwd', async () => {
+    serveShares([]);
+    await runHook();
+    expect(lastRequestUrl).toBe('/unread');
+  });
+
+  it("shows a newly-arrived scoped share's repo on its announcement line", async () => {
+    serveShares([]);
+    await runHook();
+    serveShares([share('shr_scoped', { project: 'github.com/acme/api' })]);
+    const ctx = parse(await runHook()).hookSpecificOutput.additionalContext;
+    expect(ctx).toContain('github.com/acme/api');
+    expect(ctx).toContain('shr_scoped');
   });
 });

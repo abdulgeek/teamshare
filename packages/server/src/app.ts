@@ -21,6 +21,7 @@ import {
 } from './http.js';
 import { getUnread } from './unread.js';
 import { registerMcpRoute } from './mcp.js';
+import { PROJECT_KEY_SHAPE } from './project.js';
 
 export interface SignupRateLimitOptions {
   windowMs: number;
@@ -111,11 +112,30 @@ export function createApp(opts: AppOptions): express.Express {
       res.status(auth.status).json({ error: auth.message });
       return;
     }
+
+    // The hooks send an already-normalized key (see shared.mjs's
+    // resolveProject/normalizeProjectKey) — this only checks the SHAPE, it
+    // never re-normalizes. A value that does not look like one is rejected
+    // outright rather than silently ignored: falling back to "no project" here
+    // would widen the digest back to the whole team exactly when a caller
+    // asked, explicitly, to see less of it.
+    const rawProject = req.query.project;
+    if (rawProject !== undefined) {
+      if (typeof rawProject !== 'string' || !PROJECT_KEY_SHAPE.test(rawProject)) {
+        res.status(400).json({ error: 'project must be a normalized git remote key, e.g. github.com/acme/api' });
+        return;
+      }
+    }
+    const project = typeof rawProject === 'string' ? rawProject : undefined;
+
     touchMember(auth.scope, auth.identity, nowIso);
     // `team` rides along on this response (not a new endpoint) so `doctor`,
     // which already calls /unread, can report which team a token belongs to
     // without an extra round trip.
-    res.json({ ...getUnread(auth.scope, auth.identity.email, nowIso, expiryDays), team: auth.teamName });
+    res.json({
+      ...getUnread(auth.scope, auth.identity.email, nowIso, expiryDays, { project }),
+      team: auth.teamName,
+    });
   });
 
   // §Creating a team. Gated by the instance signup secret in

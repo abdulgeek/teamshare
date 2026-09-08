@@ -225,6 +225,39 @@ SHARED: 2 days ago — Sunday, 06-09-2026
 RELEVANCE: recent
 ```
 
+### Scoping a share to one repository
+
+Most shares are for the whole team. Some aren't — a backend deploy note
+shouldn't reach a frontend engineer's session, and a note about one service
+shouldn't reach someone working on an unrelated one. Publishing is opt-in:
+your assistant sets a project scope only when the note is genuinely about one
+repository, never just because you happened to be sitting in it — "I'm out
+sick today" published from inside a repo is still team-wide.
+
+The scope key is your git remote (`git remote get-url origin`), folded to one
+form regardless of how it's written — `https://github.com/acme/api.git`,
+`git@github.com:acme/api.git`, and every other spelling of the same remote
+all resolve to `github.com/acme/api`. There's no separate ID to set up or
+remember; it's the one thing about a repository that's already the same for
+everyone on the team.
+
+Reading is automatic. Each session resolves its own remote the same way and
+narrows the digest to that repository's shares plus every team-wide one — you
+never ask for it, and there's nothing to configure. **A reader outside any
+repository, or in a repository with no remote, sees the entire board** —
+narrowing only ever happens for a reader who is themselves inside the
+matching repo, so nobody loses shares by working from a scratch directory.
+
+A scoped share says so, right on its line:
+
+```
+- id=shr_75c1350c76bb | BLOCKING | from Ann | 3 hours ago (Tuesday, 08-09-2026) | github.com/acme/api
+    Auth refactor lands Friday.
+```
+
+That's what tells a colleague on a different repository why they never saw
+it — not silence, but a project scope that plainly wasn't theirs.
+
 ### Taking something back
 
 Two ways, and they differ in what survives:

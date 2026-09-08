@@ -1,10 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { normalizeEmail, type TeamScope } from './db.js';
+import { PROJECT_KEY_SHAPE } from './project.js';
 
 export type Priority = 'fyi' | 'heads-up' | 'blocking';
 export const PRIORITIES: readonly Priority[] = ['fyi', 'heads-up', 'blocking'];
 
-export const CAPS = { what: 200, why: 300, action: 200, tags: 5, tagLength: 20 } as const;
+export const CAPS = { what: 200, why: 300, action: 200, tags: 5, tagLength: 20, project: 200 } as const;
 
 export interface ShareInput {
   what: string;
@@ -85,9 +86,29 @@ export function validateShare(input: ShareInput): ValidationResult {
   }
 
   // Not re-normalised here: the caller is expected to have already run the
-  // remote through normalizeProject (project.ts). This just trims blank-vs-
-  // absent into the same `null`, matching why/action above.
-  const project = input.project?.trim() ? input.project.trim() : null;
+  // remote through normalizeProject (project.ts). This DOES still validate
+  // the shape and cap the length, though — trusting a caller to have
+  // pre-normalized was harmless while nothing could set this field, and
+  // became a real gap the moment a client (the `share` tool) could put
+  // arbitrary text here. A value that does not look like normalizeProject's
+  // output is rejected outright rather than stored as a scope nothing will
+  // ever match.
+  const projectRaw = input.project?.trim() ? input.project.trim() : null;
+  let project: string | null = null;
+  if (projectRaw) {
+    if (projectRaw.length > CAPS.project) {
+      return { ok: false, error: `project is ${projectRaw.length} chars; cap is ${CAPS.project}.` };
+    }
+    if (!PROJECT_KEY_SHAPE.test(projectRaw)) {
+      return {
+        ok: false,
+        error:
+          `project "${projectRaw}" does not look like a normalized git remote ` +
+          '(expected host/owner/repo, e.g. "github.com/acme/api").',
+      };
+    }
+    project = projectRaw;
+  }
 
   return { ok: true, value: { what, why, action, tags, priority: input.priority, project } };
 }

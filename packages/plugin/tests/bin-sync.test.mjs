@@ -15,6 +15,8 @@ import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { buildStandaloneHook, spliceHookSource } from '../../../scripts/sync-plugin-bin.mjs';
 import { TEAMSHARE_HOOK_SOURCE } from '../../server/src/teamshare-connect.mjs';
+import { normalizeProject } from '../../server/src/project.ts';
+import { normalizeProjectKey } from '../hooks/shared.mjs';
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 // tests/ deliberately, not bin/: a directory Claude Code puts on PATH should
@@ -87,6 +89,43 @@ describe('one server address, written in four places that cannot import each oth
     // Both hooks resolve the address through hooks/shared.mjs, so there is one
     // constant here rather than one per hook.
     expect(constantIn('packages/plugin/hooks/shared.mjs')).toBe(declared.replace(/\/mcp$/, ''));
+  });
+});
+
+describe('normalizeProjectKey (plugin) stays in sync with normalizeProject (server)', () => {
+  // hooks/shared.mjs cannot import packages/server (see this file's own
+  // header comment), so normalizeProjectKey there is a hand-maintained copy
+  // of normalizeProject. It carries no TypeScript types, so its source text
+  // can never literally equal the server's — this compares BEHAVIOUR instead,
+  // against a table that includes the SCP-vs-URL-port distinction the two
+  // must agree on, or a scoped share silently reaches nobody: the publisher's
+  // key (folded server-side) and a reader's key (folded by this copy) would
+  // disagree about the same repository.
+  const CASES = [
+    'https://github.com/abdulgeek/teamshare.git',
+    'https://github.com/abdulgeek/teamshare',
+    'git@github.com:abdulgeek/teamshare.git',
+    'ssh://git@github.com/abdulgeek/teamshare.git',
+    'https://user:token@github.com/abdulgeek/teamshare.git',
+    'HTTPS://GitHub.com/AbdulGeek/TeamShare.git',
+    // The regression both copies were fixed for in the same change: an SSH
+    // remote with an explicit port must fold to the same key as its HTTPS form.
+    'ssh://git@github.com:22/owner/repo.git',
+    'https://github.com/owner/repo.git',
+    'git@gitlab.example.com:group/sub/project.git',
+    '',
+    '   ',
+    'not a url',
+  ];
+
+  it('produces exactly the same key, or exactly the same null, for every case', () => {
+    for (const input of CASES) {
+      // If this fails the fix is to update normalizeProjectKey in
+      // packages/plugin/hooks/shared.mjs to match normalizeProject in
+      // packages/server/src/project.ts, never the other way around — the
+      // server copy has the tests and the types.
+      expect(normalizeProjectKey(input), JSON.stringify(input)).toBe(normalizeProject(input));
+    }
   });
 });
 

@@ -284,4 +284,18 @@ describe('getUnread: project scoping', () => {
     expect(web.shares.map((s) => s.what)).toEqual(['fresh web note']);
     expect(web.older).toBe(0);
   });
+
+  // A reader has to be able to see WHY a colleague never got a share — "it
+  // was scoped to a different repo" is a very different answer from silence.
+  // That means the digest entry itself must carry the scope, not just use it
+  // to filter server-side.
+  it('carries each share\'s project (or null) on the digest entry itself', () => {
+    createShare(scope, 'adnan@team.com', { what: 'api thing', priority: 'fyi', project: 'github.com/acme/api' }, NOW);
+    createShare(scope, 'adnan@team.com', { what: 'team-wide note', priority: 'fyi' }, NOW);
+
+    const digest = getUnread(scope, 'priya@team.com', NOW, 14);
+    const byWhat = Object.fromEntries(digest.shares.map((s) => [s.what, s.project]));
+    expect(byWhat['api thing']).toBe('github.com/acme/api');
+    expect(byWhat['team-wide note']).toBeNull();
+  });
 });

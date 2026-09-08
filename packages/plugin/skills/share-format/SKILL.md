@@ -17,6 +17,7 @@ must carry signal and nothing else.
 | `action` | 200 chars | Optional. What they should do. Omit for pure FYI. |
 | `tags` | 5 × 20 chars | Optional, lowercase. |
 | `priority` | — | `fyi`, `heads-up`, or `blocking`. **Required.** |
+| `project` | — | Optional. Scopes the note to ONE repository instead of the whole team. |
 
 Pick `blocking` only when a teammate doing normal work would break something or
 waste real time without knowing. Otherwise `heads-up`, or `fyi` for context
@@ -38,6 +39,17 @@ When the thing being shared has a concrete identifier — a Jira key like
 `PROJ-123`, a PR or issue URL, a commit SHA, a branch name — put it in the
 share text. A bare reference is what lets a teammate's agent look it up
 later, using tools that teammate already has.
+
+## Scope
+
+Most shares are for the whole team — leave `project` off. Set it only when
+the note is genuinely about ONE repository, not merely written from inside
+one ("I'm out sick today" is not about the repo you happen to be sitting in).
+Pass whatever git remote you have (the output of `git remote get-url origin`
+works, in any form) — the server normalizes it, so it doesn't need to match
+any particular format by hand. A reader outside a repo, or in a different
+one, still sees every team-wide share; scoping only ever narrows, and only
+for readers who are themselves inside the matching repo.
 
 ## Examples
 

@@ -14,17 +14,20 @@ let server;
 let port;
 let respond;
 let lastRequestHeaders;
+let lastRequestUrl;
 
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), 'ts-home-'));
   repo = undefined;
   lastRequestHeaders = null;
+  lastRequestUrl = null;
   respond = (res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ total: 0, shares: [] }));
   };
   server = http.createServer((req, res) => {
     lastRequestHeaders = req.headers;
+    lastRequestUrl = req.url;
     respond(res);
   });
   await new Promise((r) => server.listen(0, r));
@@ -70,6 +73,16 @@ function initRepoWithLocalIdentity(name, email) {
   execFileSync('git', ['init', '-q'], { cwd: dir, env });
   execFileSync('git', ['config', 'user.name', name], { cwd: dir, env });
   execFileSync('git', ['config', 'user.email', email], { cwd: dir, env });
+  return dir;
+}
+
+// A throwaway repo with an `origin` remote — this is the whole input
+// resolveProject needs to compute the reader's project key.
+function initRepoWithRemote(remoteUrl) {
+  const dir = mkdtempSync(join(tmpdir(), 'ts-repo-remote-'));
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(dir, '.gitconfig-unused') };
+  execFileSync('git', ['init', '-q'], { cwd: dir, env });
+  execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: dir, env });
   return dir;
 }
 
@@ -605,5 +618,108 @@ describe('when a share was published', () => {
     // fallback — worse to read, but never "undefined".
     expect(out).toContain('2026-09-05T09:00:00.000Z');
     expect(out).not.toContain('undefined');
+  });
+});
+
+describe('project scoping (Task 6)', () => {
+  it("sends ?project= computed from the PAYLOAD's cwd, not the process's own", async () => {
+    // runHook's third argument sets the spawned process's actual OS cwd,
+    // which stays `home` (never a git repo) here — only the JSON payload
+    // claims `repo`. If resolveProject ever read process.cwd() instead of
+    // the payload's cwd, this would silently resolve nothing and this test
+    // would fail.
+    repo = initRepoWithRemote('https://github.com/acme/api.git');
+    writeConfig();
+    await runHook({ hook_event_name: 'SessionStart', source: 'startup', cwd: repo });
+    expect(lastRequestUrl).toBe('/unread?project=github.com%2Facme%2Fapi');
+  });
+
+  it('sends no project query parameter at all when the payload carries no cwd', async () => {
+    writeConfig();
+    await runHook({ hook_event_name: 'SessionStart', source: 'startup' });
+    expect(lastRequestUrl).toBe('/unread');
+  });
+
+  it('sends no project query parameter when the payload cwd is a repo with no remote', async () => {
+    repo = mkdtempSync(join(tmpdir(), 'ts-repo-noremote-'));
+    execFileSync('git', ['init', '-q'], {
+      cwd: repo,
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(repo, '.gitconfig-unused') },
+    });
+    writeConfig();
+    await runHook({ hook_event_name: 'SessionStart', source: 'startup', cwd: repo });
+    expect(lastRequestUrl).toBe('/unread');
+  });
+
+  it('sends no project query parameter when the payload cwd does not exist at all', async () => {
+    writeConfig();
+    await runHook({
+      hook_event_name: 'SessionStart',
+      source: 'startup',
+      cwd: join(tmpdir(), 'ts-does-not-exist-xyz'),
+    });
+    expect(lastRequestUrl).toBe('/unread');
+  });
+
+  it('shows a scoped share\'s repo right on its digest line', async () => {
+    writeConfig();
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          total: 1,
+          older: 0,
+          shares: [
+            {
+              id: 'shr_scoped',
+              sender_name: 'Ann',
+              sender_email: 'ann@team.com',
+              created_at: '2026-09-08T09:00:00.000Z',
+              priority: 'fyi',
+              what: 'api thing',
+              age: '3 hours ago',
+              day: 'Tuesday, 08-09-2026',
+              relevance: 'new',
+              project: 'github.com/acme/api',
+            },
+          ],
+        }),
+      );
+    };
+    const out = await runHook();
+    expect(out).toContain('github.com/acme/api');
+    expect(out).toContain('api thing');
+  });
+
+  it('does not print a scope for a team-wide (unscoped) share', async () => {
+    writeConfig();
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          total: 1,
+          older: 0,
+          shares: [
+            {
+              id: 'shr_wide',
+              sender_name: 'Ann',
+              sender_email: 'ann@team.com',
+              created_at: '2026-09-08T09:00:00.000Z',
+              priority: 'fyi',
+              what: 'team-wide note',
+              age: '3 hours ago',
+              day: 'Tuesday, 08-09-2026',
+              relevance: 'new',
+              project: null,
+            },
+          ],
+        }),
+      );
+    };
+    const out = await runHook();
+    expect(out).toContain('team-wide note');
+    // No stray " | " scope marker introduced for an unscoped share.
+    const line = out.split('\n').find((l) => l.includes('shr_wide'));
+    expect(line.trim().endsWith('(Tuesday, 08-09-2026)')).toBe(true);
   });
 });

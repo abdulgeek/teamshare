@@ -70,6 +70,44 @@ describe('validateShare', () => {
       expect(r.value.action).toBeNull();
     }
   });
+
+  // project trusts the caller to have already run the value through
+  // normalizeProject (project.ts) — but that trust was harmless only while
+  // nothing could set the field. Once a client (the `share` tool) can put
+  // arbitrary text here, the shape has to be enforced, or a share could be
+  // scoped to a string no reader's own normalizeProject output will ever
+  // equal — silently unreachable rather than team-wide or correctly scoped.
+  it('accepts a project that already looks like a normalized git remote', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', project: 'github.com/acme/api' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.project).toBe('github.com/acme/api');
+  });
+
+  it('rejects a project that is not normalizeProject-shaped, e.g. a raw URL or a path-traversal string', () => {
+    for (const bad of ['https://github.com/acme/api.git', '../../etc', 'not a remote at all', 'github.com']) {
+      const r = validateShare({ what: 'ok', priority: 'fyi', project: bad });
+      expect(r, bad).toEqual({ ok: false, error: expect.stringContaining('project') });
+    }
+  });
+
+  it('rejects an oversize project and names the field and cap', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', project: `github.com/${'a'.repeat(201)}` });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain('project');
+      expect(r.error).toContain('200');
+    }
+  });
+
+  it('treats an omitted or blank project as null, same as why/action', () => {
+    const omitted = validateShare({ what: 'ok', priority: 'fyi' });
+    expect(omitted.ok).toBe(true);
+    if (omitted.ok) expect(omitted.value.project).toBeNull();
+
+    const blank = validateShare({ what: 'ok', priority: 'fyi', project: '   ' });
+    expect(blank.ok).toBe(true);
+    if (blank.ok) expect(blank.value.project).toBeNull();
+  });
 });
 
 describe('createShare', () => {

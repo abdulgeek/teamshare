@@ -559,3 +559,65 @@ describe('mcp surface', () => {
     expect(adnanRow?.last_seen).toBe(T0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Project scoping (Task 6): the `share` tool accepts a raw git remote in any
+// form and normalizes it server-side — via the exact function a reader's own
+// hook uses to compute their project key — so an LLM caller never has to
+// replicate normalizeProject's folding rules by hand to land on a key that
+// will actually match. `unread` accepts the same and narrows on it.
+// ---------------------------------------------------------------------------
+describe('mcp surface: project scoping', () => {
+  it('normalizes a raw remote URL passed to `share` before storing it', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    const created = await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'api thing', priority: 'fyi', project: 'https://github.com/acme/api.git' },
+    });
+    await adnan.close();
+    const id = JSON.parse(textOf(created)).id as string;
+    expect(getShare(scope, id)?.project).toBe('github.com/acme/api');
+  });
+
+  it('rejects a `share` project that is not recognizable as a git remote, as an isError result', async () => {
+    const client = await connectWithToken(adnanToken);
+    const res = await client.callTool({
+      name: 'share',
+      arguments: { what: 'ok', priority: 'fyi', project: 'not a remote' },
+    });
+    expect(res.isError).toBe(true);
+    await client.close();
+  });
+
+  it('narrows `unread` to one repository plus team-wide shares, and shows the scope on the line', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'api thing', priority: 'fyi', project: 'github.com/acme/api' },
+    });
+    await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'web thing', priority: 'fyi', project: 'github.com/acme/web' },
+    });
+    await adnan.callTool({ name: 'share', arguments: { what: 'team-wide note', priority: 'fyi' } });
+    await adnan.close();
+
+    const priya = await connectWithToken(priyaToken);
+    const digest = textOf(
+      await priya.callTool({ name: 'unread', arguments: { project: 'github.com/acme/api' } }),
+    );
+    await priya.close();
+
+    expect(digest).toContain('api thing');
+    expect(digest).toContain('github.com/acme/api');
+    expect(digest).toContain('team-wide note');
+    expect(digest).not.toContain('web thing');
+  });
+
+  it('rejects an unread project that is not recognizable as a git remote, as an isError result', async () => {
+    const client = await connectWithToken(priyaToken);
+    const res = await client.callTool({ name: 'unread', arguments: { project: 'not a remote' } });
+    expect(res.isError).toBe(true);
+    await client.close();
+  });
+});

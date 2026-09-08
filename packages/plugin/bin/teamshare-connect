@@ -718,6 +718,7 @@ import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
 // One file, both hooks, and not one import of its own.
@@ -832,17 +833,74 @@ function neutralizeFences(text) {
     .replace(TEAMSHARE_TAG, '[redacted fence marker]');
 }
 
-async function fetchUnread(cfg, timeoutMs) {
+async function fetchUnread(cfg, timeoutMs, project) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(\`\${cfg.url}/unread\`, {
+    const url = new URL(\`\${cfg.url}/unread\`);
+    if (project) url.searchParams.set('project', project);
+    const res = await fetch(url, {
       headers: { Authorization: \`Bearer \${cfg.token}\` },
       signal: controller.signal,
     });
     return { status: res.status, digest: res.ok ? await res.json() : null };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// A hand-maintained copy of normalizeProject in packages/server/src/project.ts
+// — this file ships inside packages/plugin and is bundled into
+// standalone.mjs, so it cannot import from packages/server. Kept in sync by
+// packages/plugin/tests/bin-sync.test.mjs, which runs both against a shared
+// table of inputs (including the SCP-vs-URL-port distinction below) rather
+// than comparing source text, since this copy carries no TypeScript types.
+//
+// SCP syntax (\`user@host:path\`) has no \`://\` anywhere in it — that is the one
+// thing that tells it apart from a URL, and checking for a scheme FIRST is
+// what keeps an explicit port (\`ssh://git@host:22/owner/repo\`) from being
+// mistaken for the SCP host:path separator and folded to a different key
+// than the same repo's HTTPS form.
+function normalizeProjectKey(remoteUrl) {
+  const raw = String(remoteUrl || '').trim();
+  if (!raw) return null;
+  let rest;
+  if (!raw.includes('://')) {
+    // git@host:owner/repo -> host/owner/repo
+    const scp = /^[^@\\s]+@([^:\\s]+):(.+)$/.exec(raw);
+    if (!scp) return null;
+    rest = \`\${scp[1]}/\${scp[2]}\`;
+  } else {
+    const m = /^[a-z][a-z0-9+.-]*:\\/\\/(?:[^@/]*@)?([^/]+)(\\/.*)?$/i.exec(raw);
+    if (!m) return null;
+    // The host may carry an explicit port; strip it before folding.
+    const host = m[1].replace(/:\\d+$/, '');
+    rest = host + (m[2] ?? '');
+  }
+  const key = rest.replace(/\\.git$/i, '').replace(/\\/+$/, '').toLowerCase();
+  return /^[a-z0-9.-]+\\/.+/.test(key) ? key : null;
+}
+
+// The reader's own repo, resolved once per hook run from the payload's
+// working directory — never process.cwd(), which need not agree with it.
+// Never a reason to fail a session: no git binary, no repo, no remote, or a
+// cwd that no longer exists all land here as "no project", and a reader with
+// no project sees the whole board rather than an error.
+function resolveProject(cwd) {
+  if (!cwd) return undefined;
+  try {
+    const remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      cwd,
+      timeout: 800,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString('utf8')
+      .trim();
+    return normalizeProjectKey(remote) ?? undefined;
+  } catch {
+    // No git, no repo, no remote: the reader has no project and sees the
+    // whole board. Never a reason to fail a session start.
+    return undefined;
   }
 }
 
@@ -954,8 +1012,11 @@ function render(digest) {
   const lines = digest.shares.map((s) => {
     const grade = s.relevance && s.relevance !== 'new' ? \` | \${s.relevance}\` : '';
     const when = s.age && s.day ? \`\${s.age} (\${s.day})\` : s.day || s.created_at;
+    // A scoped share says so, right on the line — otherwise a reader has no
+    // way to tell "this never happened" from "this was never meant for you."
+    const scope = s.project ? \` | \${s.project}\` : '';
     return (
-      \`  - id=\${s.id} | \${String(s.priority).toUpperCase()} | from \${neutralizeFences(s.sender_name)} | \${when}\${grade}\\n\` +
+      \`  - id=\${s.id} | \${String(s.priority).toUpperCase()} | from \${neutralizeFences(s.sender_name)} | \${when}\${grade}\${scope}\\n\` +
       \`    \${neutralizeFences(s.what)}\`
     );
   });
@@ -1010,7 +1071,7 @@ async function main() {
   }
 
   const host = detectHost(payload, process.env);
-  normalizePayload(payload, host); // for parity with prompt-submit.mjs; this hook needs only \`host\`
+  const { cwd } = normalizePayload(payload, host);
 
   // The source gate applies to Claude Code and Codex, not Cursor: Cursor's
   // sessionStart sends no \`source\` at all, and gating on a field it never
@@ -1032,8 +1093,12 @@ async function main() {
   try {
     // Identity headers are gone deliberately: per-email invites moved identity
     // into the personal token itself, so the server resolves who you are from
-    // Authorization and ignores those headers everywhere.
-    const { status, digest } = await fetchUnread(cfg, TIMEOUT_MS);
+    // Authorization and ignores those headers everywhere. \`project\` is the one
+    // thing this hook DOES compute from cwd — narrowing what a reader sees is
+    // not an identity claim, and a git remote that resolves to nothing (no
+    // git, no repo, no remote) simply means no narrowing at all.
+    const project = resolveProject(cwd);
+    const { status, digest } = await fetchUnread(cfg, TIMEOUT_MS, project);
 
     // A rejected token is a misconfiguration the user must see; a network
     // failure is not worth interrupting them over.
@@ -1179,8 +1244,9 @@ function renderAnnouncement(shares) {
     // teammate is typing this at you right now" and "this was waiting".
     const grade = s.relevance && s.relevance !== 'new' ? \` | \${s.relevance}\` : '';
     const when = s.age && s.day ? \`\${s.age} (\${s.day})\` : s.day || s.created_at;
+    const scope = s.project ? \` | \${s.project}\` : '';
     return (
-      \`  - id=\${s.id} | \${String(s.priority).toUpperCase()} | from \${neutralizeFences(s.sender_name)} | \${when}\${grade}\\n\` +
+      \`  - id=\${s.id} | \${String(s.priority).toUpperCase()} | from \${neutralizeFences(s.sender_name)} | \${when}\${grade}\${scope}\\n\` +
       \`    \${neutralizeFences(s.what)}\`
     );
   });
@@ -1231,7 +1297,7 @@ async function main() {
   if (!cfg) return;
 
   const host = detectHost(payload, process.env);
-  const { sessionId } = normalizePayload(payload, host);
+  const { sessionId, cwd } = normalizePayload(payload, host);
   const state = readPollState();
   const entry = state.servers[cfg.url];
   const nowMs = Date.now();
@@ -1244,7 +1310,8 @@ async function main() {
 
   let digest = null;
   try {
-    const res = await fetchUnread(cfg, FETCH_TIMEOUT_MS);
+    const project = resolveProject(cwd);
+    const res = await fetchUnread(cfg, FETCH_TIMEOUT_MS, project);
     // A rejected token is worth knowing about, but this is the wrong place to
     // say so — session start already reports it, and repeating it on every
     // prompt would be its own kind of broken. Stay quiet and let the poll
