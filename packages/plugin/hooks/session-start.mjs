@@ -3,6 +3,7 @@
 // Contract: plain stdout on exit 0 becomes session context.
 import { randomBytes } from 'node:crypto';
 import { loadConfig, neutralizeFences, fetchUnread } from './shared.mjs';
+import { detectHost, normalizePayload, renderResponse } from './hosts.mjs';
 
 const TIMEOUT_MS = 1500;
 // The digest is re-injected on these sources only; compact/fork must not
@@ -83,11 +84,22 @@ async function main() {
     payload = {};
   }
 
-  // The hooks.json matcher already filters sources; re-check defensively.
-  if (payload.source && !ALLOWED_SOURCES.has(payload.source)) return;
+  const host = detectHost(payload, process.env);
+  normalizePayload(payload, host); // for parity with prompt-submit.mjs; this hook needs only `host`
+
+  // The source gate is Claude-Code-only: Cursor's sessionStart has no
+  // `source`, and gating on a field it never sends would silence it entirely.
+  // The hooks.json matcher already filters sources on Claude Code; re-check
+  // defensively.
+  if (host === 'claude-code' && payload.source && !ALLOWED_SOURCES.has(payload.source)) return;
 
   const cfg = loadConfig(process.env);
   if (!cfg) return;
+
+  const emit = (context) => {
+    const out = renderResponse({ host, event: 'session-start', context });
+    if (out) process.stdout.write(out);
+  };
 
   try {
     // Identity headers are gone deliberately: per-email invites moved identity
@@ -98,7 +110,11 @@ async function main() {
     // A rejected token is a misconfiguration the user must see; a network
     // failure is not worth interrupting them over.
     if (status === 401 || status === 400) {
-      process.stdout.write('teamshare: server rejected this machine — reconfigure via /plugin\n');
+      // BOTH writes go through the renderer. This one is easy to miss: on
+      // Claude Code a bare line of stdout is valid context, but on Cursor the
+      // same bytes are malformed JSON, so a rejected token would break the
+      // hook itself rather than reporting the rejection.
+      emit('teamshare: server rejected this machine — reconfigure via /plugin');
       return;
     }
     if (status !== 200) return;
@@ -106,7 +122,7 @@ async function main() {
     if (!digest || !digest.total || !Array.isArray(digest.shares) || digest.shares.length === 0) {
       return;
     }
-    process.stdout.write(`${render(digest)}\n`);
+    emit(render(digest));
   } catch {
     // Timeout, DNS failure, connection refused: stay silent.
   }

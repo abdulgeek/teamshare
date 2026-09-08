@@ -28,6 +28,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { loadConfig, neutralizeFences, fetchUnread } from './shared.mjs';
+import { detectHost, normalizePayload, renderResponse } from './hosts.mjs';
 
 const FETCH_TIMEOUT_MS = 1200;
 const DEFAULT_POLL_SECONDS = 60;
@@ -165,7 +166,8 @@ async function main() {
   const cfg = loadConfig(process.env);
   if (!cfg) return;
 
-  const sessionId = typeof payload.session_id === 'string' ? payload.session_id : 'unknown';
+  const host = detectHost(payload, process.env);
+  const { sessionId } = normalizePayload(payload, host);
   const state = readPollState();
   const entry = state.servers[cfg.url];
   const nowMs = Date.now();
@@ -204,15 +206,13 @@ async function main() {
 
   if (announce.length === 0) return;
 
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'UserPromptSubmit',
-        additionalContext: renderAnnouncement(announce),
-      },
-      systemMessage: renderSystemMessage(announce),
-    }),
-  );
+  const out = renderResponse({
+    host,
+    event: 'prompt-submit',
+    context: renderAnnouncement(announce),
+    userMessage: renderSystemMessage(announce),
+  });
+  if (out) process.stdout.write(out);
 }
 
 main().then(
