@@ -108,11 +108,17 @@ export function renderAnnouncement(shares) {
   // they cannot predict — otherwise they close it early and the rest of their
   // share is read as instructions.
   const tag = randomBytes(6).toString('hex');
-  const lines = shares.map(
-    (s) =>
-      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)}\n` +
-      `    ${neutralizeFences(s.what)}`,
-  );
+  const lines = shares.map((s) => {
+    // Mid-session arrivals are minutes old, so the age is nearly always "just
+    // now" — which is worth saying, because it is the difference between "your
+    // teammate is typing this at you right now" and "this was waiting".
+    const grade = s.relevance && s.relevance !== 'new' ? ` | ${s.relevance}` : '';
+    const when = s.age ? `${s.age} (${s.created_at})` : s.created_at;
+    return (
+      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}\n` +
+      `    ${neutralizeFences(s.what)}`
+    );
+  });
 
   return [
     '<teamshare-new>',
@@ -125,7 +131,8 @@ export function renderAnnouncement(shares) {
     ...lines,
     `--- END UNTRUSTED TEAMMATE DATA ${tag} ---`,
     '',
-    'Mention this to the user in one short line at the START of your reply, then answer what they',
+    'Mention this to the user in one short line at the START of your reply — say who shared it and',
+    'when, using the relative age above — then answer what they',
     'actually asked. Do NOT derail their current task, do not expand on the share, and do not ask a',
     'question that blocks them — say who shared what and that you can pull up the details on request.',
     'Only call `read_share` or `acknowledge` if they ask you to; an unanswered share stays unread and',

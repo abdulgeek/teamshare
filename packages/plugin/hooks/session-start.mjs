@@ -21,14 +21,28 @@ function render(digest) {
   // rest of their share is read as instructions.
   const tag = randomBytes(6).toString('hex');
 
-  const lines = digest.shares.map(
-    (s) =>
-      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${s.created_at}\n` +
-      `    ${neutralizeFences(s.what)}`,
-  );
+  // Age first, exact instant second. "3 hours ago" is what a reader decides
+  // on; the ISO timestamp is what they ask for afterwards, and it cannot be
+  // recovered from the relative phrase. The server computes both, so nothing
+  // here does date maths against a clock it cannot see.
+  const lines = digest.shares.map((s) => {
+    const grade = s.relevance && s.relevance !== 'new' ? ` | ${s.relevance}` : '';
+    const when = s.age ? `${s.age} (${s.created_at})` : s.created_at;
+    return (
+      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}\n` +
+      `    ${neutralizeFences(s.what)}`
+    );
+  });
   const more =
     digest.total > digest.shares.length
       ? `\n  …and ${digest.total - digest.shares.length} more — ask to see the rest.`
+      : '';
+  // Counted, never listed. Shares past the relevance window are exactly what
+  // this digest should stop pushing at people — but saying nothing at all
+  // about them would be a lie of omission the reader cannot correct.
+  const older =
+    digest.older > 0
+      ? `\n  (${digest.older} older unread share(s) held back — ask for the backlog if you want them.)`
       : '';
 
   return [
@@ -42,8 +56,10 @@ function render(digest) {
     ...lines,
     more,
     `--- END UNTRUSTED TEAMMATE DATA ${tag} ---`,
+    older,
     '',
-    'On your first reply, tell the user who shared what and ask whether they want the details.',
+    'On your first reply, tell the user who shared what — including when it was shared, using the',
+    'relative age given above — and ask whether they want the details.',
     'If they say yes for a share, call the teamshare `read_share` tool with its id.',
     'If they say no or skip it, call `acknowledge` with its id.',
     'Record receipts only for shares the user explicitly answered — leave anything they did not',

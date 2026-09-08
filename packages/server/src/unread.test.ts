@@ -56,11 +56,11 @@ describe('getUnread', () => {
   });
 
   it('orders blocking first, then newest', () => {
-    createShare(scope, 'adnan@team.com', { what: 'old-fyi', priority: 'fyi' }, '2026-08-20T00:00:00.000Z');
+    createShare(scope, 'adnan@team.com', { what: 'older-fyi', priority: 'fyi' }, '2026-08-26T00:00:00.000Z');
     createShare(scope, 'adnan@team.com', { what: 'new-fyi', priority: 'fyi' }, '2026-08-27T00:00:00.000Z');
     createShare(scope, 'adnan@team.com', { what: 'blocker', priority: 'blocking' }, '2026-08-21T00:00:00.000Z');
     const d = getUnread(scope, 'priya@team.com', NOW, 14);
-    expect(d.shares.map(s => s.what)).toEqual(['blocker', 'new-fyi', 'old-fyi']);
+    expect(d.shares.map((s) => s.what)).toEqual(['blocker', 'new-fyi', 'older-fyi']);
   });
 
   it('caps the list at UNREAD_LIMIT but reports the true total', () => {
@@ -138,5 +138,88 @@ describe('cross-team isolation', () => {
     expect(getUnread(teamA, 'priya@team.com', NOW, 14).total).toBe(0);
     expect(getUnread(teamB, 'reader@company.com', NOW, 14).total).toBe(1);
     expect(getUnread(teamB, 'reader@company.com', NOW, 14).shares[0].id).toBe(b.id);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Relevance: the digest exists to be read, so it stops pushing things nobody
+// is going to act on — while never pretending they are not there.
+// ---------------------------------------------------------------------------
+
+describe('getUnread: relevance', () => {
+  // Uses this file's shared beforeEach: a default-team scope with Adnan and
+  // Priya already members.
+  const daysAgo = (n: number) => new Date(Date.parse(NOW) - n * 86_400_000).toISOString();
+
+  it('holds back an ordinary share past the window, and counts it instead', () => {
+    createShare(scope, 'adnan@team.com', { what: 'fresh', priority: 'fyi' }, daysAgo(1));
+    createShare(scope, 'adnan@team.com', { what: 'ancient', priority: 'fyi' }, daysAgo(10));
+
+    const d = getUnread(scope, 'priya@team.com', NOW, 14);
+    expect(d.shares.map((s) => s.what)).toEqual(['fresh']);
+    expect(d.total).toBe(1);
+    // Not silently dropped: the caller can say "and 1 older".
+    expect(d.older).toBe(1);
+  });
+
+  it('still surfaces an old blocking share, because that is what blocking means', () => {
+    createShare(scope, 'adnan@team.com', { what: 'do not merge', priority: 'blocking' }, daysAgo(10));
+    const d = getUnread(scope, 'priya@team.com', NOW, 14);
+    expect(d.shares.map((s) => s.what)).toEqual(['do not merge']);
+    expect(d.older).toBe(0);
+  });
+
+  it('returns them all when the caller explicitly asks for the old ones', () => {
+    createShare(scope, 'adnan@team.com', { what: 'fresh', priority: 'fyi' }, daysAgo(1));
+    createShare(scope, 'adnan@team.com', { what: 'ancient', priority: 'fyi' }, daysAgo(10));
+
+    const d = getUnread(scope, 'priya@team.com', NOW, 14, { includeOld: true });
+    expect(d.shares.map((s) => s.what).sort()).toEqual(['ancient', 'fresh']);
+    expect(d.total).toBe(2);
+    expect(d.older).toBe(0);
+  });
+
+  it('carries a human age and a grade on every entry', () => {
+    createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, daysAgo(2));
+    const [entry] = getUnread(scope, 'priya@team.com', NOW, 14).shares;
+    expect(entry.age).toBe('2 days ago');
+    expect(entry.relevance).toBe('recent');
+    // The exact instant is still there for anyone who wants it.
+    expect(entry.created_at).toBe(daysAgo(2));
+  });
+
+  it('spends the row limit on shares it will actually show', () => {
+    // The relevance filter lives in SQL for this reason: applied to fetched
+    // rows instead, 25 old shares would consume the whole LIMIT and starve the
+    // recent ones the digest exists to surface.
+    for (let i = 0; i < 25; i++) {
+      createShare(scope, 'adnan@team.com', { what: `old${i}`, priority: 'fyi' }, daysAgo(9));
+    }
+    createShare(scope, 'adnan@team.com', { what: 'today', priority: 'fyi' }, daysAgo(0));
+
+    const d = getUnread(scope, 'priya@team.com', NOW, 14);
+    expect(d.shares.map((s) => s.what)).toEqual(['today']);
+    expect(d.older).toBe(25);
+  });
+
+  it('counts only genuinely hidden shares as older — never stale or expired ones', () => {
+    // Those are excluded from unread altogether, so counting them would
+    // promise the reader something `includeOld` would not deliver.
+    const stale = createShare(scope, 'adnan@team.com', { what: 'stale', priority: 'fyi' }, daysAgo(1));
+    markStale(scope, stale.id, 'adnan@team.com', NOW);
+    createShare(scope, 'adnan@team.com', { what: 'expired', priority: 'fyi' }, daysAgo(30));
+
+    const d = getUnread(scope, 'priya@team.com', NOW, 14);
+    expect(d.total).toBe(0);
+    expect(d.older).toBe(0);
+    expect(getUnread(scope, 'priya@team.com', NOW, 14, { includeOld: true }).total).toBe(0);
+  });
+
+  it('respects a narrower window on both the list and the count', () => {
+    createShare(scope, 'adnan@team.com', { what: 'two-days', priority: 'fyi' }, daysAgo(2));
+    const d = getUnread(scope, 'priya@team.com', NOW, 14, { relevanceWindowDays: 1 });
+    expect(d.shares).toHaveLength(0);
+    expect(d.older).toBe(1);
   });
 });

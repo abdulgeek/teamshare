@@ -8,6 +8,7 @@ import type { TeamScope } from './db.js';
 import { authenticate, touchMember, type Identity } from './http.js';
 import { CAPS, createShare, getShare, listShares, markStale, retractShare, validateShare } from './shares.js';
 import { getUnread, type Digest } from './unread.js';
+import { classifyRelevance, relevanceLabel } from './relevance.js';
 import { getReceipts, recordReceipt } from './receipts.js';
 
 // Stated with its safety limit intact wherever a connected agent is told it
@@ -114,16 +115,29 @@ function formatSince(nowIso: string, thenIso: string): string {
   return `${weeks}w ago`;
 }
 
+// Both the age and the grade, on every line. The raw instant stays too: "2
+// days ago" is what a reader decides on, but "which Tuesday exactly" is a
+// question that gets asked, and recomputing it from a relative phrase is not
+// possible.
 function renderDigest(digest: Digest): string {
-  if (digest.total === 0) return 'No unread team shares.';
-  const lines = digest.shares.map(
-    (s) => `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} (${s.created_at}): ${s.what}`,
-  );
+  if (digest.total === 0) {
+    return digest.older > 0
+      ? `No unread team shares worth surfacing. ${digest.older} older unread share(s) are being held back — ask to see them.`
+      : 'No unread team shares.';
+  }
+  const lines = digest.shares.map((s) => {
+    const grade = s.relevance === 'new' ? '' : ` [${s.relevance}]`;
+    return `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} · ${s.age}${grade} (${s.created_at}): ${s.what}`;
+  });
   const more =
     digest.total > digest.shares.length
       ? `\n…and ${digest.total - digest.shares.length} more — ask to see the rest.`
       : '';
-  return wrapUntrusted(`${digest.total} unread team share(s):`, lines.join('\n') + more);
+  const older =
+    digest.older > 0
+      ? `\n${digest.older} older unread share(s) not shown — ask for them if you want the backlog.`
+      : '';
+  return wrapUntrusted(`${digest.total} unread team share(s):`, lines.join('\n') + more + older);
 }
 
 export function buildMcpServer(ctx: {
@@ -165,11 +179,13 @@ export function buildMcpServer(ctx: {
     'unread',
     {
       title: 'Unread team shares',
-      description: 'Team shares this user has not viewed or dismissed.',
-      inputSchema: {},
+      description:
+        'Team shares this user has not viewed or dismissed. Shares past the relevance window are ' +
+        'held back and only counted; pass include_old to get them too.',
+      inputSchema: { include_old: z.boolean().optional() },
     },
-    async () => {
-      const digest = getUnread(scope, identity.email, now(), expiryDays);
+    async ({ include_old }) => {
+      const digest = getUnread(scope, identity.email, now(), expiryDays, { includeOld: include_old });
       return ok(renderDigest(digest));
     },
   );
@@ -185,19 +201,33 @@ export function buildMcpServer(ctx: {
       const share = getShare(scope, id);
       if (!share) return fail(`no share with id ${id}`);
       recordReceipt(scope, id, identity.email, 'viewed', now());
+      const freshness = classifyRelevance({
+        createdAt: share.created_at,
+        staleAt: share.stale_at,
+        priority: share.priority,
+        nowIso: now(),
+        expiryDays,
+      });
+      const label = relevanceLabel(freshness);
       const body = [
         `WHAT:   ${share.what}`,
         share.why ? `WHY:    ${share.why}` : null,
         share.action ? `ACTION: ${share.action}` : null,
         `TAGS:   ${share.tags.join(', ') || '—'}`,
         `PRIORITY: ${share.priority}`,
+        `SHARED: ${freshness.age} (${share.created_at})`,
+        // STATUS already says it, in the author's own terms, when a share is
+        // stale — a RELEVANCE line beside it would just repeat the sentence.
+        label && !share.stale_at ? `RELEVANCE: ${label}` : null,
         share.stale_at
           ? `STATUS: no longer relevant (marked by its author on ${share.stale_at})`
           : null,
       ]
         .filter(Boolean)
         .join('\n');
-      return ok(wrapUntrusted(`Share ${id} from ${share.sender_email} at ${share.created_at}:`, body));
+      return ok(
+        wrapUntrusted(`Share ${id} from ${share.sender_email}, shared ${freshness.age}:`, body),
+      );
     },
   );
 
@@ -229,9 +259,18 @@ export function buildMcpServer(ctx: {
     async ({ tag, sender, limit }) => {
       const shares = listShares(scope, { tag, sender, limit });
       if (shares.length === 0) return ok('No shares match.');
-      const lines = shares.map(
-        (s) => `- [${s.id}] ${s.priority} from ${s.sender_email} (${s.created_at}): ${s.what}`,
-      );
+      const nowIso = now();
+      const lines = shares.map((s) => {
+        const f = classifyRelevance({
+          createdAt: s.created_at,
+          staleAt: s.stale_at,
+          priority: s.priority,
+          nowIso,
+          expiryDays,
+        });
+        const label = relevanceLabel(f);
+        return `- [${s.id}] ${s.priority} from ${s.sender_email} · ${f.age}${label ? ` [${label}]` : ''} (${s.created_at}): ${s.what}`;
+      });
       return ok(wrapUntrusted(`${shares.length} share(s):`, lines.join('\n')));
     },
   );

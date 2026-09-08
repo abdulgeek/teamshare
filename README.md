@@ -3,10 +3,10 @@
 Your whole team uses AI coding assistants. None of them know what the others
 have been told.
 
-teamshare fixes that. One person says _"share with the team that the auth
-refactor lands Friday"_. Everyone else's assistant tells them at the start of
+teamshare fixes that. One person says *"share with the team that the auth
+refactor lands Friday"*. Everyone else's assistant tells them at the start of
 their next session, and asks if they want the details. Saying yes **or** no
-counts as read — so you can always ask _"who's seen this?"_ and get a real
+counts as read — so you can always ask *"who's seen this?"* and get a real
 answer.
 
 A server is already running. You never need its address. Everything below is
@@ -21,7 +21,11 @@ Every output block on this page is real, captured from a running server.
 
 ---
 
+
+
 # Part 1 — Claude Code
+
+
 
 ## Step 1 · Install
 
@@ -39,6 +43,8 @@ If your team already uses teamshare, ask whoever set it up to run
 
 ---
 
+
+
 ## Step 2A · You're setting up the team
 
 One command — the org name only. Do not paste a signup secret.
@@ -55,6 +61,9 @@ and the hosted server will reject it.
 `/teamshare:generate-secret` is optional: it prints a copy of the live value
 for a password manager. Use `--new` only when you are standing up a server
 that does not exist yet.
+
+Run create-team **once** per team name on this machine. A second run with the
+same name does not mint another team — it names the one you already have.
 
 ```
 teamshare create-team — success
@@ -102,10 +111,21 @@ others on the team. Whoever holds it can publish shares and record read receipts
 It also prints a ready-to-send message. **DM it to that person** — one per
 teammate, never a group channel.
 
-Take your own token from that output and paste it into
-`/plugin configure teamshare@teamshare`. Now you're on the board too.
+### Paste your own personal token
+
+The invite printed a token starting with `tsm_`. That is **not** the admin
+`ts_…` token from create-team, and it is the only value that logs you in.
+
+```
+/plugin configure teamshare@teamshare
+```
+
+Paste the `tsm_…` token. Restart Claude Code (or open a new session). Now
+you're on the board too.
 
 ---
+
+
 
 ## Step 2B · You're joining a team
 
@@ -117,6 +137,8 @@ Already installed and just need to change the token?
 `/plugin configure teamshare@teamshare`.
 
 ---
+
+
 
 ## Step 3 · Use it
 
@@ -144,15 +166,59 @@ cap is why people keep reading them.
 **What your teammates see**, before they type anything:
 
 ```
-2 unread team share(s) published by teammates.
-  - id=shr_f7d71cb96ec3 | BLOCKING | from Dev | 2026-08-30T17:36:48.220Z
-    Database migration 0042 is irreversible.
-  - id=shr_ddd81b0b4b92 | BLOCKING | from Priya | 2026-08-30T17:36:48.202Z
-    Auth middleware refactor lands Friday.
+3 unread team share(s) published by teammates.
+  - id=shr_75c1350c76bb | BLOCKING | from Ann | 3 hours ago (2026-09-08T11:57:15.607Z)
+    Auth refactor lands Friday.
+  - id=shr_6e02cc993393 | BLOCKING | from Ann | 10 days ago (2026-08-29T14:57:15.607Z) | old
+    Ancient blocking note nobody closed.
+  - id=shr_b699466a1071 | FYI | from Ann | 2 days ago (2026-09-06T12:57:15.607Z) | recent
+    Design review moved to Thursday.
+
+  (1 older unread share(s) held back — ask for the backlog if you want them.)
 ```
 
 Their assistant asks if they want details. Yes shows the full note; no skips
 it. Either way it's marked read and won't nag them again.
+
+### How old is it, and does it still matter?
+
+Every share carries **when it was published** — as a relative age *and* the
+exact instant. Your assistant can tell you "Ann shared this three hours ago"
+without guessing, because the server computes it rather than leaving Claude to
+do date maths against a clock it can't see.
+
+Each one also carries a **relevance grade**, and it decides what gets pushed at
+you:
+
+| Grade | Age | Surfaced unprompted? |
+| --- | --- | --- |
+| *(none)* | under a day | yes |
+| `recent` | 1–3 days | yes |
+| `ageing` | 3–7 days | yes |
+| `old` | over 7 days | **no** — held back and counted |
+| `no longer relevant` | author ran `mark_stale` | no |
+| `expired` | over 14 days | no |
+
+So a session doesn't open with a week-old note about a deadline that has
+already passed. Two deliberate exceptions:
+
+- **`blocking` shares keep showing past 7 days.** That label means "you must
+  not miss this", and quietly dropping one while it's still unread would break
+  the promise it makes. It gets labelled `still blocking, but old` instead.
+- **Nothing is ever silently hidden.** The digest says how many it held back,
+  and *"show me the older shares"* returns them. `list_shares` never hides
+  anything.
+
+The grade shows up in the summary line and in the full detail, so you can skip
+something stale without opening it:
+
+```
+Share shr_b699466a1071 from ann@x.com, shared 2 days ago:
+WHAT:   Design review moved to Thursday.
+PRIORITY: fyi
+SHARED: 2 days ago (2026-09-06T12:57:15.607Z)
+RELEVANCE: recent
+```
 
 **And if they're already mid-session**, they don't have to wait until tomorrow.
 Anyone with Claude Code open gets told on their next message:
@@ -171,6 +237,7 @@ Change the interval with `TEAMSHARE_POLL_SECONDS` (`0` polls every message).
 
 **Everything else is plain English:**
 
+
 | Say this                     | Get this                                                |
 | ---------------------------- | ------------------------------------------------------- |
 | "what's unread?"             | Your waiting shares                                     |
@@ -179,9 +246,12 @@ Change the interval with `TEAMSHARE_POLL_SECONDS` (`0` polls every message).
 | "retract my auth share"      | Deleted everywhere                                      |
 | "mark it stale"              | Stops showing as unread, stays in history               |
 
+
 Only the author can retract. Shares expire on their own after 14 days.
 
 ---
+
+
 
 ## Step 4 · Managing the team
 
@@ -217,6 +287,8 @@ not history.
 
 ---
 
+
+
 ## Something not working?
 
 teamshare stays quiet when it breaks, so it never interrupts you. The downside:
@@ -240,12 +312,14 @@ Admin tokens saved on this machine (invite / revoke / roster / rotate-team):
   - Platform (tm_6c772dbd6de4) — saved 2026-08-30T17:28:32.033Z
 ```
 
+
 | It says                   | Do this                                                                                 |
 | ------------------------- | --------------------------------------------------------------------------------------- |
 | `working`                 | Nothing — you're fine. `0 unread` really means nothing new.                             |
 | `not set on this machine` | `/plugin configure teamshare@teamshare`                                                 |
 | `rejected (401)`          | Your token was revoked, or you pasted the admin token by mistake. Ask for a new invite. |
 | `could not reach`         | Server or network issue, at the address shown.                                          |
+
 
 If the commands themselves are missing, restart Claude Code. If the tools are
 missing, check `/mcp` and make sure you trusted the workspace.
@@ -254,6 +328,8 @@ Broken config from an old setup? `/teamshare:setup` repairs it. You shouldn't
 need it otherwise.
 
 ---
+
+
 
 # Part 2 — Cursor, Codex, Windsurf, and the rest
 
@@ -316,6 +392,7 @@ does the same thing.
 
 No slash commands here — just ask:
 
+
 | Say this                                                  | Get this                 |
 | --------------------------------------------------------- | ------------------------ |
 | "what has my team shared?"                                | Your unread shares       |
@@ -323,6 +400,7 @@ No slash commands here — just ask:
 | "share with the team that the auth refactor lands Friday" | Publishes it             |
 | "who's seen my auth share?"                               | Read receipts            |
 | "retract that share"                                      | Deletes it everywhere    |
+
 
 **One difference, honestly:** Claude Code gets the automatic start-of-session
 digest, the mid-session nudge when something new lands, and
@@ -348,21 +426,25 @@ Code commands are this same file with a nicer front door.
 
 ---
 
+
+
 # Cheat sheet
 
 **Claude Code**
 
-| Command                             | Does                                                  |
-| ----------------------------------- | ----------------------------------------------------- |
-| `/teamshare:share <message>`        | Publish a note to the team                            |
+
+| Command                             | Does                                                                       |
+| ----------------------------------- | -------------------------------------------------------------------------- |
+| `/teamshare:share <message>`        | Publish a note to the team                                                 |
 | `/teamshare:generate-secret`        | Recover the live signup secret (optional; not required before create-team) |
-| `/teamshare:create-team <org-name>` | Create a team, save its admin token                   |
-| `/teamshare:invite <email> [name]`  | One person's token + the message to send them         |
-| `/teamshare:roster`                 | Who's on the team, who never connected                |
-| `/teamshare:revoke <email>`         | Remove someone completely                             |
-| `/teamshare:status`                 | Am I actually connected?                              |
-| `/teamshare:connect`                | Set up your other AI assistants                       |
-| `/teamshare:setup`                  | Repair a broken config (rarely needed)                |
+| `/teamshare:create-team <org-name>` | Create a team, save its admin token                                        |
+| `/teamshare:invite <email> [name]`  | One person's token + the message to send them                              |
+| `/teamshare:roster`                 | Who's on the team, who never connected                                     |
+| `/teamshare:revoke <email>`         | Remove someone completely                                                  |
+| `/teamshare:status`                 | Am I actually connected?                                                   |
+| `/teamshare:connect`                | Set up your other AI assistants                                            |
+| `/teamshare:setup`                  | Repair a broken config (rarely needed)                                     |
+
 
 **Terminal** — `node teamshare-team.mjs <command>` after the `curl` above.
 `generate-secret`, `create-team`, `invite`, `revoke`, `roster`, `rotate-team`,
@@ -371,21 +453,25 @@ run more than one team.
 
 ---
 
+
+
 # Two questions everyone asks
 
 **Why do I need a token?**
 
-Because it's how the server knows _which_ teammate you are. Every share and
+Because it's how the server knows *which* teammate you are. Every share and
 every "read" is attributed by your token, not by a name your app claims. That's
 what makes "who's seen this?" trustworthy instead of a guess — and it means one
 command removes one person without disturbing anyone else.
 
 There are two kinds, and mixing them up is the most common mistake:
 
+
 |                        | Can do                        | Cannot do           |
 | ---------------------- | ----------------------------- | ------------------- |
 | **Personal** (`tsm_…`) | Read and publish shares       | Invite anyone       |
 | **Admin** (`ts_…`)     | Invite, revoke, list the team | Read a single share |
+
 
 `/teamshare:status` will tell you if you've pasted the wrong one.
 
@@ -404,6 +490,8 @@ token in one step, and the signup secret opens no team's data at all.
 
 ---
 
+
+
 # Running your own server
 
 You don't need to. If you want to:
@@ -417,13 +505,13 @@ node packages/server/dist/cli.js serve --signup-secret <pick-one>
 Point the terminal commands at it with `--server <url>`.
 
 For **Claude Code**, the plugin's address lives in
-[`packages/plugin/.mcp.json`](packages/plugin/.mcp.json) as plain JSON. Fork
+`[packages/plugin/.mcp.json](packages/plugin/.mcp.json)` as plain JSON. Fork
 this repo, change that one line, and `/plugin marketplace add <your-fork>`.
 Everything else follows it automatically.
 
 For a real deployment with HTTPS and backups, see
-[`deploy/aws/README.md`](deploy/aws/README.md) — that's what the default server
+`[deploy/aws/README.md](deploy/aws/README.md)` — that's what the default server
 runs on.
 
 More detail — trust model, diagnostics, a full worked example:
-[`docs/reference.md`](docs/reference.md).
+`[docs/reference.md](docs/reference.md)`.

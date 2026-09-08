@@ -442,3 +442,136 @@ describe('session-start hook', () => {
     });
   });
 });
+
+describe('when a share was published', () => {
+  // Every surface used to print a bare ISO string, leaving Claude to work out
+  // "how long ago" by doing date maths against a clock it cannot see. The
+  // server computes it now; the digest just has to carry it.
+  it('shows the relative age and keeps the exact instant beside it', async () => {
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          total: 1,
+          older: 0,
+          shares: [
+            {
+              id: 'shr_aged',
+              sender_name: 'Priya',
+              sender_email: 'priya@team.com',
+              created_at: '2026-09-05T09:00:00.000Z',
+              priority: 'fyi',
+              what: 'x',
+              age: '3 days ago',
+              relevance: 'ageing',
+            },
+          ],
+        }),
+      );
+    };
+    writeConfig();
+    const out = await runHook();
+    expect(out).toContain('3 days ago');
+    // The instant survives too: "which Tuesday exactly" gets asked, and it
+    // cannot be recovered from the relative phrase.
+    expect(out).toContain('2026-09-05T09:00:00.000Z');
+    expect(out).toContain('ageing');
+    expect(out.toLowerCase()).toContain('when it was shared');
+  });
+
+  it('does not label the common case, so the labels that appear are noticed', async () => {
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          total: 1,
+          older: 0,
+          shares: [
+            {
+              id: 'shr_fresh',
+              sender_name: 'Priya',
+              sender_email: 'p@t.com',
+              created_at: '2026-09-08T09:00:00.000Z',
+              priority: 'fyi',
+              what: 'x',
+              age: '2 hours ago',
+              relevance: 'new',
+            },
+          ],
+        }),
+      );
+    };
+    writeConfig();
+    const out = await runHook();
+    expect(out).toContain('2 hours ago');
+    expect(out).not.toContain('| new');
+  });
+
+  it('counts the shares it is holding back rather than pretending they do not exist', async () => {
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          total: 1,
+          older: 4,
+          shares: [
+            {
+              id: 'shr_a',
+              sender_name: 'P',
+              sender_email: 'p@t.com',
+              created_at: '2026-09-08T09:00:00.000Z',
+              priority: 'fyi',
+              what: 'x',
+              age: '1 hour ago',
+              relevance: 'new',
+            },
+          ],
+        }),
+      );
+    };
+    writeConfig();
+    const out = await runHook();
+    expect(out).toContain('4 older unread share(s) held back');
+    // Held back means not listed — the point of holding them back.
+    expect(out).not.toContain('shr_b');
+  });
+
+  it('stays completely silent when nothing relevant is waiting, even with a backlog', async () => {
+    // "Do not surface irrelevant shares at chat initialization" — a session
+    // that opens with only stale backlog should open with nothing at all.
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ total: 0, older: 6, shares: [] }));
+    };
+    writeConfig();
+    expect((await runHook()).trim()).toBe('');
+  });
+
+  it('still renders when an older server omits the new fields', async () => {
+    // A teammate on a server that predates this change must not get a digest
+    // reading "undefined (2026-…)".
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          total: 1,
+          shares: [
+            {
+              id: 'shr_old_server',
+              sender_name: 'P',
+              sender_email: 'p@t.com',
+              created_at: '2026-09-05T09:00:00.000Z',
+              priority: 'fyi',
+              what: 'x',
+            },
+          ],
+        }),
+      );
+    };
+    writeConfig();
+    const out = await runHook();
+    expect(out).toContain('shr_old_server');
+    expect(out).toContain('2026-09-05T09:00:00.000Z');
+    expect(out).not.toContain('undefined');
+  });
+});

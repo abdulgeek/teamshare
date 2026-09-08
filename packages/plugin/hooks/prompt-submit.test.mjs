@@ -247,3 +247,41 @@ describe('never getting in the way', () => {
     expect(pollState().servers[`http://127.0.0.1:${port}`].seenIds.length).toBeLessThanOrEqual(300);
   });
 });
+
+describe('when the new share was published', () => {
+  it('carries the age into the mid-session announcement', async () => {
+    serveShares([]);
+    await runHook();
+    serveShares([share('shr_now')]);
+    const ctx = parse(await runHook()).hookSpecificOutput.additionalContext;
+    // The server supplies `age`; the hook must not invent or omit it.
+    expect(ctx).toContain('2026-08-31T09:00:00.000Z');
+    expect(ctx.toLowerCase()).toContain('say who shared it and');
+  });
+
+  it('renders without the new fields, for a server that predates them', async () => {
+    serveShares([]);
+    await runHook();
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          total: 1,
+          shares: [
+            {
+              id: 'shr_legacy',
+              sender_name: 'Priya',
+              sender_email: 'p@t.com',
+              created_at: '2026-08-31T09:00:00.000Z',
+              priority: 'fyi',
+              what: 'x',
+            },
+          ],
+        }),
+      );
+    };
+    const ctx = parse(await runHook()).hookSpecificOutput.additionalContext;
+    expect(ctx).toContain('shr_legacy');
+    expect(ctx).not.toContain('undefined');
+  });
+});
