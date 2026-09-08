@@ -223,3 +223,65 @@ describe('getUnread: relevance', () => {
     expect(d.older).toBe(1);
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// Project scoping (Task 5): opt-in, never inferred. A share carries a
+// project only when its author's assistant sets one; a reader narrows only
+// when they themselves are in a repo.
+// ---------------------------------------------------------------------------
+
+describe('getUnread: project scoping', () => {
+  const daysAgo = (n: number) => new Date(Date.parse(NOW) - n * 86_400_000).toISOString();
+
+  it('shows a scoped share only to a reader in that repo, and unscoped ones to everyone', () => {
+    createShare(scope, 'adnan@team.com', { what: 'api thing', priority: 'fyi', project: 'github.com/acme/api' }, NOW);
+    createShare(scope, 'adnan@team.com', { what: 'out sick', priority: 'fyi' }, NOW);
+
+    const inApi = getUnread(scope, 'priya@team.com', NOW, 14, { project: 'github.com/acme/api' });
+    expect(inApi.shares.map((s) => s.what).sort()).toEqual(['api thing', 'out sick']);
+
+    const inWeb = getUnread(scope, 'priya@team.com', NOW, 14, { project: 'github.com/acme/web' });
+    expect(inWeb.shares.map((s) => s.what)).toEqual(['out sick']);
+
+    // No project at all: the reader is not in a repo, so nothing is hidden.
+    const anywhere = getUnread(scope, 'priya@team.com', NOW, 14);
+    expect(anywhere.shares).toHaveLength(2);
+  });
+
+  // The controller-flagged case: two independent conditional clauses
+  // (relevance and project) appended to one positional-`?` query is exactly
+  // how a silent cross-wiring lands — a digest that filters on the wrong
+  // column while every single-feature test above still passes. This test
+  // exercises both together, so a mis-bound parameter shows up as a wrong
+  // count or a wrongly-included/excluded share rather than staying hidden.
+  it('composes relevance and project filtering together, not just each alone', () => {
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'old api note', priority: 'fyi', project: 'github.com/acme/api' }, daysAgo(10),
+    );
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'fresh api note', priority: 'fyi', project: 'github.com/acme/api' }, daysAgo(1),
+    );
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'fresh web note', priority: 'fyi', project: 'github.com/acme/web' }, daysAgo(1),
+    );
+
+    const d = getUnread(scope, 'priya@team.com', NOW, 14, { project: 'github.com/acme/api' });
+    // The web note is out of scope entirely — it must not appear, and must
+    // not be counted as "older" either (it was never unread for this reader).
+    expect(d.shares.map((s) => s.what)).toEqual(['fresh api note']);
+    expect(d.total).toBe(1);
+    // The old api note IS in scope but past the relevance window — held back
+    // and counted, not silently dropped and not conflated with the web note.
+    expect(d.older).toBe(1);
+
+    // Sanity check from the other side: a reader in the web repo sees
+    // neither api note, old or fresh.
+    const web = getUnread(scope, 'priya@team.com', NOW, 14, { project: 'github.com/acme/web' });
+    expect(web.shares.map((s) => s.what)).toEqual(['fresh web note']);
+    expect(web.older).toBe(0);
+  });
+});

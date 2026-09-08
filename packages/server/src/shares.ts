@@ -12,6 +12,13 @@ export interface ShareInput {
   action?: string;
   tags?: string[];
   priority: Priority;
+  /**
+   * A normalised git remote (see project.ts's normalizeProject), naming the
+   * one repository this share is about. Opt-in only — never inferred from
+   * the publisher's cwd here; see the design doc's reasoning ("I'm out sick
+   * today" published from inside a repo is not about that repo).
+   */
+  project?: string;
 }
 
 export interface CleanShare {
@@ -20,6 +27,7 @@ export interface CleanShare {
   action: string | null;
   tags: string[];
   priority: Priority;
+  project: string | null;
 }
 
 export interface ShareRow {
@@ -32,6 +40,7 @@ export interface ShareRow {
   priority: Priority;
   created_at: string;
   stale_at: string | null;
+  project: string | null;
 }
 
 export type ValidationResult =
@@ -75,7 +84,12 @@ export function validateShare(input: ShareInput): ValidationResult {
     return { ok: false, error: `priority must be one of ${PRIORITIES.join(', ')}` };
   }
 
-  return { ok: true, value: { what, why, action, tags, priority: input.priority } };
+  // Not re-normalised here: the caller is expected to have already run the
+  // remote through normalizeProject (project.ts). This just trims blank-vs-
+  // absent into the same `null`, matching why/action above.
+  const project = input.project?.trim() ? input.project.trim() : null;
+
+  return { ok: true, value: { what, why, action, tags, priority: input.priority, project } };
 }
 
 function rowToShare(row: Record<string, unknown>): ShareRow {
@@ -89,6 +103,7 @@ function rowToShare(row: Record<string, unknown>): ShareRow {
     priority: row.priority as Priority,
     created_at: row.created_at as string,
     stale_at: (row.stale_at as string | null) ?? null,
+    project: (row.project as string | null) ?? null,
   };
 }
 
@@ -103,14 +118,14 @@ export function createShare(
 
   const sender = normalizeEmail(senderEmail);
   const id = `shr_${randomBytes(6).toString('hex')}`;
-  const { what, why, action, tags, priority } = result.value;
+  const { what, why, action, tags, priority, project } = result.value;
 
   scope.db
     .prepare(
-      `INSERT INTO shares (id, team_id, sender_email, what, why, action, tags, priority, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO shares (id, team_id, sender_email, what, why, action, tags, priority, created_at, project)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, scope.teamId, sender, what, why, action, JSON.stringify(tags), priority, nowIso);
+    .run(id, scope.teamId, sender, what, why, action, JSON.stringify(tags), priority, nowIso, project);
 
   const row = scope.db
     .prepare('SELECT COUNT(*) AS n FROM members WHERE team_id = ? AND email != ?')

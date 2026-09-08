@@ -62,10 +62,37 @@ const WHERE_UNREAD = `
 // see classifyRelevance for why.
 const AND_RELEVANT = `AND (s.priority = 'blocking' OR s.created_at >= ?)`;
 
+// A share with no project is unscoped and visible to everyone; a reader with
+// no project of their own (not sitting in any repo) is not narrowed at all —
+// this clause is omitted entirely for them, never bound with an empty string.
+// See project.ts / the design doc for why "no remote, no scope" on both ends.
+const AND_PROJECT = `AND (s.project IS NULL OR s.project = ?)`;
+
 export interface UnreadOptions {
   /** Include shares past the relevance window. `list_shares` and an explicit ask do; the digest does not. */
   includeOld?: boolean;
   relevanceWindowDays?: number;
+  /** The reader's own repo (normalizeProject'd). Omitted -> no narrowing at all. */
+  project?: string;
+}
+
+// A SQL fragment paired with the exact positional params it consumes, so a
+// clause can never end up in the SQL string while its argument lands at the
+// wrong position in some other clause's slot (or vice versa) — which is
+// exactly how two independent optional clauses sharing one flat `?` list
+// tend to go quietly wrong. Each query below assembles its own list of
+// active clauses and flattens both halves together in the same step.
+interface Clause {
+  sql: string;
+  args: unknown[];
+}
+
+function composeClauses(...clauses: (Clause | null)[]): Clause {
+  const active = clauses.filter((c): c is Clause => c !== null);
+  return {
+    sql: active.map((c) => c.sql).join(' '),
+    args: active.flatMap((c) => c.args),
+  };
 }
 
 export function getUnread(
@@ -81,22 +108,36 @@ export function getUnread(
   const relevantFrom = relevanceCutoff(nowIso, windowDays);
   const includeOld = Boolean(options.includeOld);
 
-  const baseArgs = [scope.teamId, me, cutoff, scope.teamId, me];
-  const relevanceArgs = includeOld ? [] : [relevantFrom];
+  const base: Clause = { sql: WHERE_UNREAD, args: [scope.teamId, me, cutoff, scope.teamId, me] };
+  // Each conditional clause is built right where its own bound value is
+  // decided, and travels everywhere paired with that value — never as a
+  // second, separately-tracked array that a query has to remember to zip
+  // back in in the right order.
+  const relevance: Clause | null = includeOld ? null : { sql: AND_RELEVANT, args: [relevantFrom] };
+  const project: Clause | null = options.project ? { sql: AND_PROJECT, args: [options.project] } : null;
+
+  const { sql: extraSql, args: extraArgs } = composeClauses(relevance, project);
 
   const { n: total } = scope.db
-    .prepare(`SELECT COUNT(*) AS n FROM shares s ${WHERE_UNREAD} ${includeOld ? '' : AND_RELEVANT}`)
-    .get(...baseArgs, ...relevanceArgs) as { n: number };
+    .prepare(`SELECT COUNT(*) AS n FROM shares s ${base.sql} ${extraSql}`)
+    .get(...base.args, ...extraArgs) as { n: number };
 
   // Counted separately rather than inferred from `total`, so a caller can say
-  // exactly how many it is not showing without a second round trip.
+  // exactly how many it is not showing without a second round trip. This is
+  // relevance's own count (shares hidden ONLY by the window), so it composes
+  // with `project` — a share outside the reader's repo was never unread for
+  // them at all, and must not inflate "older" — but never with `relevance`
+  // itself, which is what "older" is counting the absence of.
+  const { sql: olderExtraSql, args: olderExtraArgs } = composeClauses(project);
   const { n: older } = includeOld
     ? { n: 0 }
     : (scope.db
         .prepare(
-          `SELECT COUNT(*) AS n FROM shares s ${WHERE_UNREAD} AND s.priority != 'blocking' AND s.created_at < ?`,
+          `SELECT COUNT(*) AS n FROM shares s ${base.sql}
+             AND s.priority != 'blocking' AND s.created_at < ?
+             ${olderExtraSql}`,
         )
-        .get(...baseArgs, relevantFrom) as { n: number });
+        .get(...base.args, relevantFrom, ...olderExtraArgs) as { n: number });
 
   const rows = scope.db
     .prepare(
@@ -104,12 +145,12 @@ export function getUnread(
               COALESCE(m.name, s.sender_email) AS sender_name
          FROM shares s
          LEFT JOIN members m ON m.email = s.sender_email AND m.team_id = s.team_id
-         ${WHERE_UNREAD}
-         ${includeOld ? '' : AND_RELEVANT}
+         ${base.sql}
+         ${extraSql}
          ${ORDER}
          LIMIT ?`,
     )
-    .all(...baseArgs, ...relevanceArgs, UNREAD_LIMIT) as Record<string, unknown>[];
+    .all(...base.args, ...extraArgs, UNREAD_LIMIT) as Record<string, unknown>[];
 
   return {
     total,

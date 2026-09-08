@@ -77,7 +77,7 @@ export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-function readConfig(db: Db, key: string): string | undefined {
+export function readConfig(db: Db, key: string): string | undefined {
   const row = db.prepare('SELECT value FROM config WHERE key = ?').get(key) as
     | { value: string }
     | undefined;
@@ -281,10 +281,27 @@ function migrateAddMemberTokens(db: Db, _nowIso: string, probe: MigrationProbe):
   probe('3->4:version');
 }
 
+// Task 5 (scope a share to one repository): `project` is nullable and no
+// existing column changes shape, so — like the 1->2 step above, and unlike
+// the 2->3 rebuild — a plain ALTER TABLE is enough. Every unread query filters
+// on (team_id, project) together (see unread.ts's AND_PROJECT), hence the
+// composite index rather than a bare one on `project`.
+function migrateAddProject(db: Db, _nowIso: string, probe: MigrationProbe): void {
+  db.exec('ALTER TABLE shares ADD COLUMN project TEXT');
+  probe('4->5:project');
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_shares_team_project ON shares (team_id, project);');
+  probe('4->5:index');
+
+  setConfig(db, 'schema_version', '5');
+  probe('4->5:version');
+}
+
 const MIGRATIONS: Migration[] = [
   { to: 2, run: migrateAddStaleAt },
   { to: 3, run: migrateAddMultiTeam },
   { to: 4, run: migrateAddMemberTokens },
+  { to: 5, run: migrateAddProject },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].to;
