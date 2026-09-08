@@ -382,12 +382,23 @@ Personal token (input hidden):
 teamshare connect — result
 
   [written]       Cursor -> /Users/you/.cursor/mcp.json (backup: /Users/you/.cursor/mcp.json.teamshare-backup-1788099903701)
+                  + session digest and mid-session nudge -> /Users/you/.cursor/hooks.json
 
 1 assistant(s) configured automatically.
 Restart the affected assistant(s) to pick up the change.
 ```
 
 Restart whatever it configured. Done.
+
+**That second Cursor line.** MCP lets Cursor *ask* teamshare for shares. It does
+not put a teammate's "don't merge src/auth" in front of you when you never
+thought to ask — so on Cursor, connect also installs the same two hooks the
+Claude Code plugin ships: the unread digest as a session starts, and a one-line
+nudge mid-session when a teammate publishes something. They arrive as two files
+(`~/.teamshare/hooks/teamshare-hook.mjs` and your token in `~/.teamshare.json`,
+owner-only) plus an entry per event in `~/.cursor/hooks.json` — merged into
+whatever hooks you already have there, backed up first, and replaced rather than
+duplicated if you run connect again.
 
 **Want to see what it'll touch first?**
 

@@ -36,6 +36,35 @@ export interface TargetResult {
   backupPath?: string;
   reason?: string;
   snippet?: string;
+  /** Cursor only: the outcome of installing the two hook scripts alongside the MCP entry. */
+  hooks?: CursorHooksResult;
+}
+
+export interface CursorHooksResult {
+  status: 'written' | 'skipped' | 'error';
+  /** ~/.cursor/hooks.json — reported even when nothing was written, so a caller can name the file. */
+  path: string;
+  /** Where the standalone hook was written. 'written' only. */
+  hookPath?: string;
+  /** ~/.teamshare.json, the credential the hook reads. 'written' only. */
+  credentialPath?: string;
+  /** Copy of the pre-existing hooks.json. Absent when there was none to back up. */
+  backup?: string;
+  /** Why the install failed. 'error' only. */
+  reason?: string;
+}
+
+export interface InstallCursorHooksOptions {
+  /** Defaults to os.homedir(); tests always pass a temp dir. */
+  home?: string;
+  url: string;
+  token: string;
+  /** Write nothing and report 'skipped'. */
+  dryRun?: boolean;
+  /** Defaults to Date.now; tests pin this so the backup filename is deterministic. */
+  now?: () => number;
+  /** Injectable fs, for tests that need to prove the failure path. */
+  fs?: object;
 }
 
 export interface DetectedTarget {
@@ -100,6 +129,16 @@ export function normalizeServerUrl(url: string): string;
 export function listTargets(home?: string, platform?: string): DetectedTarget[];
 export function discoverConnectedTargets(home?: string, platform?: string): DiscoveredCredentials[];
 export function runConnect(url: string, token: string, options?: ConnectOptions): ConnectRunResult;
+
+/**
+ * The standalone hook script, assembled from packages/plugin/hooks/*.mjs by
+ * scripts/sync-plugin-bin.mjs and embedded here because this file must stay a
+ * single curl-and-run download.
+ */
+export const TEAMSHARE_HOOK_SOURCE: string;
+/** The Cursor hook events teamshare registers for. */
+export const CURSOR_HOOK_EVENTS: string[];
+export function installCursorHooks(opts: InstallCursorHooksOptions): CursorHooksResult;
 export function formatListOutput(detected: DetectedTarget[]): string;
 export function formatConnectOutput(run: ConnectRunResult): string;
 
