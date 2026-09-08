@@ -1198,6 +1198,25 @@ describe('Cursor hooks', () => {
     expect(JSON.parse(readFileSync(join(home, '.teamshare.json'), 'utf8')).token).toBe('tsm_rotated');
   });
 
+  it('keeps keys it does not own in an existing ~/.teamshare.json', () => {
+    // This file is the documented credential for the hooks, so a self-hoster
+    // may well have written it by hand. Refreshing a token is not a licence to
+    // delete the rest of it — and unlike hooks.json nothing backs it up, so
+    // preserving is the only chance.
+    const home = tmp();
+    writeFileSync(
+      join(home, '.teamshare.json'),
+      JSON.stringify({ url: 'https://old.example.com', token: 'tsm_old', pollSeconds: 45 }),
+    );
+
+    installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+
+    const creds = JSON.parse(readFileSync(join(home, '.teamshare.json'), 'utf8'));
+    expect(creds).toEqual({ url: 'https://ts.example.com', token: 'tsm_abc', pollSeconds: 45 });
+    // Rewriting an existing file does not apply `mode`; the chmod after it does.
+    expect(statSync(join(home, '.teamshare.json')).mode & 0o777).toBe(0o600);
+  });
+
   it('points every registered event at the one hook file, telling it which host and event it is', () => {
     // One file holds both hooks, so the command has to say which one to run —
     // and Cursor takes a different response shape than Claude Code, so it has

@@ -161,6 +161,28 @@ describe('the standalone hook', () => {
     };
     expect(() => buildStandaloneHook(read)).toThrow(/main\(\)/);
   });
+
+  it('refuses a hook part that declares a name the generated file declares', () => {
+    // The block each hook part is wrapped in scopes its names away from the
+    // *other* hook's — not away from the dispatcher's. A `let runPromptSubmit;`
+    // at a hook part's own top level assembles cleanly and parses cleanly, and
+    // then dispatch() calls an undefined binding: the TypeError is swallowed by
+    // `dispatch().then(…, () => process.exit(0))`, so the hook exits 0 having
+    // printed nothing. On a host that swallows hook output that is
+    // indistinguishable from "no unread shares", and nobody would report it.
+    // `hookStdinText` is worse still — it would pass every execution test in
+    // this file, because a hook reading an empty payload still behaves.
+    for (const name of ['hookStdinText', 'readAllStdin', 'runPromptSubmit']) {
+      const read = (f) => {
+        const real = readFileSync(join(repoRoot, f), 'utf8');
+        // After the shebang, or stripShebang would leave a `#!` mid-file.
+        return f.endsWith('prompt-submit.mjs')
+          ? real.replace(/^(#![^\n]*\n)/, `$1let ${name};\n`)
+          : real;
+      };
+      expect(() => buildStandaloneHook(read)).toThrow(new RegExp(`declares \`${name}\``));
+    }
+  });
 });
 
 // The real test. Everything above compares bytes; this runs the file the way

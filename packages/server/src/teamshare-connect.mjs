@@ -1360,8 +1360,26 @@ export function installCursorHooks(opts) {
     // time after the write: `mode` on writeFileSync only applies when the file
     // is created, so an existing file left over from an earlier install (or a
     // hand-written one) would otherwise keep whatever permissions it had.
+    //
+    // Merged, not overwritten. Only `url` and `token` belong to this
+    // installer; a self-hoster's hand-written file may carry keys it has
+    // never heard of, and deleting someone's configuration to refresh a token
+    // is not a trade this is entitled to make on their behalf. Unlike
+    // hooks.json there is no backup here, so preserving is the only chance.
     const credPath = join(home, '.teamshare.json');
-    fsImpl.writeFileSync(credPath, JSON.stringify({ url, token }, null, 2) + '\n', { mode: 0o600 });
+    let creds = {};
+    if (fsImpl.existsSync(credPath)) {
+      try {
+        const parsed = JSON.parse(fsImpl.readFileSync(credPath, 'utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) creds = parsed;
+      } catch {
+        // Unparseable: there are no keys to preserve, so write ours fresh
+        // rather than refuse to connect over a file nobody can read anyway.
+      }
+    }
+    creds.url = url;
+    creds.token = token;
+    fsImpl.writeFileSync(credPath, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
     try {
       fsImpl.chmodSync(credPath, 0o600);
     } catch {

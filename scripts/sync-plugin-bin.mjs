@@ -300,6 +300,21 @@ export function buildStandaloneHook(read) {
       fail(file, 'expected `async function main() {` to use as this hook\'s entrypoint');
     }
 
+    // The block scopes this part's names away from the *other* hook's, but not
+    // away from the ones the generated file declares around it. A hook part
+    // that declared `hookStdinText`, or its own `runSessionStart`, would
+    // block-shadow the real binding: the dispatcher would then call an
+    // undefined one, the TypeError would be swallowed by
+    // `dispatch().then(…, () => process.exit(0))`, and the hook would exit 0
+    // having done nothing — indistinguishable, on a host that swallows hook
+    // output, from "no unread shares". So the reserved names are enforced
+    // against hook parts too, not only against the shared ones.
+    for (const name of declaredNames(body)) {
+      if (RESERVED_NAMES.includes(name)) {
+        fail(file, `declares \`${name}\`, which (the generated file itself) already declares`);
+      }
+    }
+
     sections.push(
       `// ${RULE}\n// ${file}\n// ${RULE}\n\n` +
         `let ${run};\n{\n` +
