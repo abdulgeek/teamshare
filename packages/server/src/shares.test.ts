@@ -175,10 +175,21 @@ describe('markStale', () => {
     if (!result.ok) expect(result.error).toContain('shr_missing');
   });
 
-  it('still appears in listShares after being marked stale', () => {
+  it('leaves listShares once marked irrelevant — withdrawn from the team, not just the digest', () => {
+    // "No longer relevant" that still turns up in every browse does not remove
+    // the noise, it moves it. The row survives so the author can find it and
+    // the receipts stay auditable; that is the difference from retract.
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
-    expect(listShares(scope, {}).map((s) => s.id)).toContain(id);
+    expect(listShares(scope, {}).map((s) => s.id)).not.toContain(id);
+  });
+
+  it('is still findable by an explicit ask, so the mark is not a one-way door', () => {
+    const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
+    expect(listShares(scope, { includeIrrelevant: true }).map((s) => s.id)).toContain(id);
+    // The row itself is untouched — only its visibility changed.
+    expect(getShare(scope, id)?.what).toBe('x');
   });
 });
 

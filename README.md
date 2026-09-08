@@ -167,11 +167,11 @@ cap is why people keep reading them.
 
 ```
 3 unread team share(s) published by teammates.
-  - id=shr_75c1350c76bb | BLOCKING | from Ann | 3 hours ago (2026-09-08T11:57:15.607Z)
+  - id=shr_75c1350c76bb | BLOCKING | from Ann | 3 hours ago (Tuesday, 08-09-2026)
     Auth refactor lands Friday.
-  - id=shr_6e02cc993393 | BLOCKING | from Ann | 10 days ago (2026-08-29T14:57:15.607Z) | old
+  - id=shr_6e02cc993393 | BLOCKING | from Ann | 10 days ago (Saturday, 29-08-2026) | old
     Ancient blocking note nobody closed.
-  - id=shr_b699466a1071 | FYI | from Ann | 2 days ago (2026-09-06T12:57:15.607Z) | recent
+  - id=shr_b699466a1071 | FYI | from Ann | 2 days ago (Sunday, 06-09-2026) | recent
     Design review moved to Thursday.
 
   (1 older unread share(s) held back — ask for the backlog if you want them.)
@@ -182,10 +182,15 @@ it. Either way it's marked read and won't nag them again.
 
 ### How old is it, and does it still matter?
 
-Every share carries **when it was published** — as a relative age *and* the
-exact instant. Your assistant can tell you "Ann shared this three hours ago"
-without guessing, because the server computes it rather than leaving Claude to
-do date maths against a clock it can't see.
+Every share carries **when it was published** — as a relative age *and* a
+readable date: `3 hours ago (Tuesday, 08-09-2026)`. Your assistant can tell you
+when something was shared without guessing, because the server computes both
+rather than leaving Claude to do date maths against a clock it can't see.
+
+No ISO timestamps anywhere. `2026-09-08T11:57:15.607Z` is precise, unreadable,
+and nobody deciding whether a note still matters wants milliseconds. Dates
+render in UTC — the server can't know your timezone, and the relative age
+resolves any near-midnight ambiguity.
 
 Each one also carries a **relevance grade**, and it decides what gets pushed at
 you:
@@ -196,7 +201,7 @@ you:
 | `recent` | 1–3 days | yes |
 | `ageing` | 3–7 days | yes |
 | `old` | over 7 days | **no** — held back and counted |
-| `no longer relevant` | author ran `mark_stale` | no |
+| `irrelevant` | author withdrew it | **no** — hidden from the team entirely |
 | `expired` | over 14 days | no |
 
 So a session doesn't open with a week-old note about a deadline that has
@@ -210,15 +215,36 @@ already passed. Two deliberate exceptions:
   anything.
 
 The grade shows up in the summary line and in the full detail, so you can skip
-something stale without opening it:
+something without opening it:
 
 ```
-Share shr_b699466a1071 from ann@x.com, shared 2 days ago:
+Share shr_b699466a1071 from ann@x.com, shared 2 days ago (Sunday, 06-09-2026):
 WHAT:   Design review moved to Thursday.
 PRIORITY: fyi
-SHARED: 2 days ago (2026-09-06T12:57:15.607Z)
+SHARED: 2 days ago — Sunday, 06-09-2026
 RELEVANCE: recent
 ```
+
+### Taking something back
+
+Two ways, and they differ in what survives:
+
+**"Mark it irrelevant"** withdraws it from the team. It leaves the digest, it
+leaves `list_shares`, and anyone who asks for it by id gets the fact of the
+withdrawal and nothing else:
+
+```
+Share shr_9f6543d277a5 from ann@x.com is marked IRRELEVANT — its author
+withdrew it on Tuesday, 08-09-2026. Its contents are no longer shown to the team.
+```
+
+You can still see your own, so a mis-click isn't a one-way door. Read receipts
+survive too, which is the point of not deleting it.
+
+**"Retract it"** is the hard delete — the share and every receipt for it are
+gone, as if it had never been sent. For a share that leaked something.
+
+Only the author can do either.
 
 **And if they're already mid-session**, they don't have to wait until tomorrow.
 Anyone with Claude Code open gets told on their next message:
@@ -309,7 +335,7 @@ Your personal token (publishes shares, records receipts, receives the digest):
   working — 0 unread share(s) waiting.
 
 Admin tokens saved on this machine (invite / revoke / roster / rotate-team):
-  - Platform (tm_6c772dbd6de4) — saved 2026-08-30T17:28:32.033Z
+  - Platform (tm_6c772dbd6de4) — saved Sunday, 30-08-2026
 ```
 
 

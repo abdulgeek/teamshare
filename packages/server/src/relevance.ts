@@ -30,9 +30,37 @@ export interface Freshness {
   ageMs: number;
   /** Human phrasing of ageMs — "3 hours ago", "2 days ago". */
   age: string;
+  /** "Monday, 08-09-2026" — the calendar day, for anyone who wants the actual date. */
+  day: string;
   relevance: Relevance;
   /** Whether this should still be pushed at a reader who has not asked. */
   relevant: boolean;
+}
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/**
+ * "Monday, 08-09-2026".
+ *
+ * An ISO instant — 2026-09-08T11:57:15.607Z — is precise and unreadable, and
+ * nobody deciding whether a note still matters cares about the milliseconds.
+ * The weekday is the part people actually navigate by ("that was the Friday
+ * thing"), and day-first numbers match how the team writes dates.
+ *
+ * Rendered in UTC, deliberately: the server has no idea what timezone the
+ * reader is in, and quietly using the server's own would be wrong for
+ * everybody except whoever deployed it. At day granularity the only cost is a
+ * share published within a few hours of midnight UTC, and the relative age
+ * beside it ("3 hours ago") resolves that anyway.
+ */
+export function formatDay(iso: string): string {
+  const ms = Date.parse(iso);
+  // Never throw mid-render over one bad row; show the raw value instead.
+  if (!Number.isFinite(ms)) return iso;
+  const d = new Date(ms);
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${WEEKDAYS[d.getUTCDay()]}, ${dd}-${mm}-${d.getUTCFullYear()}`;
 }
 
 const MINUTE = 60_000;
@@ -94,21 +122,22 @@ export function classifyRelevance(input: ClassifyInput): Freshness {
   // digest; treat it as ageless and let it through rather than hiding it.
   const ageMs = Number.isFinite(created) && Number.isFinite(now) ? Math.max(0, now - created) : 0;
   const age = describeAge(ageMs);
+  const day = formatDay(createdAt);
 
-  if (staleAt) return { ageMs, age, relevance: 'stale', relevant: false };
-  if (ageMs >= expiryDays * DAY) return { ageMs, age, relevance: 'expired', relevant: false };
+  if (staleAt) return { ageMs, age, day, relevance: 'stale', relevant: false };
+  if (ageMs >= expiryDays * DAY) return { ageMs, age, day, relevance: 'expired', relevant: false };
 
   // The window is checked BEFORE the new/recent/ageing grades, not after. With
   // it the other way round, a caller who narrows the window to a day still got
   // "recent" for a two-day-old share, because the fixed 3-day threshold fired
   // first — the custom window silently did nothing.
   if (ageMs >= windowDays * DAY) {
-    return { ageMs, age, relevance: 'old', relevant: priority === 'blocking' };
+    return { ageMs, age, day, relevance: 'old', relevant: priority === 'blocking' };
   }
 
-  if (ageMs < DAY) return { ageMs, age, relevance: 'new', relevant: true };
-  if (ageMs < 3 * DAY) return { ageMs, age, relevance: 'recent', relevant: true };
-  return { ageMs, age, relevance: 'ageing', relevant: true };
+  if (ageMs < DAY) return { ageMs, age, day, relevance: 'new', relevant: true };
+  if (ageMs < 3 * DAY) return { ageMs, age, day, relevance: 'recent', relevant: true };
+  return { ageMs, age, day, relevance: 'ageing', relevant: true };
 }
 
 /**
@@ -118,6 +147,6 @@ export function classifyRelevance(input: ClassifyInput): Freshness {
 export function relevanceLabel(f: Freshness): string | null {
   if (f.relevance === 'new') return null;
   if (f.relevance === 'old') return f.relevant ? 'still blocking, but old' : 'old';
-  if (f.relevance === 'stale') return 'no longer relevant';
+  if (f.relevance === 'stale') return 'irrelevant';
   return f.relevance;
 }

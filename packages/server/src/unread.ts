@@ -13,6 +13,8 @@ export interface DigestEntry {
   what: string;
   /** "3 hours ago" — computed here so no client does date maths against a clock it cannot see. */
   age: string;
+  /** "Monday, 08-09-2026" — the calendar day, for readers who want the date rather than the gap. */
+  day: string;
   relevance: Relevance;
 }
 
@@ -131,6 +133,7 @@ export function getUnread(
         priority,
         what: r.what as string,
         age: freshness.age,
+        day: freshness.day,
         relevance: freshness.relevance,
       };
     }),

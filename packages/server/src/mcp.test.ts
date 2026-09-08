@@ -348,7 +348,7 @@ describe('mcp surface', () => {
     await adnan2.close();
   });
 
-  it('lets the author mark their own share stale: absent from unread (and total), still in list_shares, labelled in read_share', async () => {
+  it('marking a share irrelevant withdraws it from the team entirely', async () => {
     const adnan = await connectWithToken(adnanToken);
     const created = await adnan.callTool({
       name: 'share', arguments: { what: 'plan changed', priority: 'heads-up' },
@@ -360,16 +360,45 @@ describe('mcp surface', () => {
     await adnan.close();
 
     const priya = await connectWithToken(priyaToken);
-    const digest = textOf(await priya.callTool({ name: 'unread', arguments: {} }));
-    expect(digest).toContain('No unread');
 
-    const list = textOf(await priya.callTool({ name: 'list_shares', arguments: {} }));
-    expect(list).toContain(id);
+    expect(textOf(await priya.callTool({ name: 'unread', arguments: {} }))).toContain('No unread');
 
+    // Gone from history too, not merely from the digest.
+    expect(textOf(await priya.callTool({ name: 'list_shares', arguments: {} }))).not.toContain(id);
+    // And it cannot be listed back by asking for irrelevant ones — that flag
+    // finds your OWN withdrawn shares, it is not a way to read round someone
+    // else's withdrawal.
+    const asked = textOf(
+      await priya.callTool({ name: 'list_shares', arguments: { include_irrelevant: true } }),
+    );
+    expect(asked).not.toContain(id);
+
+    // read_share reports the withdrawal and withholds the body.
     const read = textOf(await priya.callTool({ name: 'read_share', arguments: { id } }));
-    expect(read).toContain('no longer relevant');
-    expect(read).toContain('marked by its author');
+    expect(read).toContain('IRRELEVANT');
+    expect(read).toContain('withdrew it on');
+    expect(read).not.toContain('plan changed');
     await priya.close();
+  });
+
+  it('lets the author still see what they withdrew, so the mark is recoverable', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    const created = await adnan.callTool({
+      name: 'share', arguments: { what: 'my own note', priority: 'fyi' },
+    });
+    const id = JSON.parse(textOf(created)).id as string;
+    await adnan.callTool({ name: 'mark_stale', arguments: { id } });
+
+    const read = textOf(await adnan.callTool({ name: 'read_share', arguments: { id } }));
+    expect(read).toContain('my own note');
+    expect(read).toContain('IRRELEVANT');
+    expect(read).toContain('only because you wrote it');
+
+    const mine = textOf(
+      await adnan.callTool({ name: 'list_shares', arguments: { include_irrelevant: true } }),
+    );
+    expect(mine).toContain(id);
+    await adnan.close();
   });
 
   it('rejects a mark_stale attempt from anyone other than the author, and it still surfaces as unread', async () => {

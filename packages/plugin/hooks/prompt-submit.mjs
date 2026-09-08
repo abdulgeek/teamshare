@@ -113,7 +113,7 @@ export function renderAnnouncement(shares) {
     // now" — which is worth saying, because it is the difference between "your
     // teammate is typing this at you right now" and "this was waiting".
     const grade = s.relevance && s.relevance !== 'new' ? ` | ${s.relevance}` : '';
-    const when = s.age ? `${s.age} (${s.created_at})` : s.created_at;
+    const when = s.age && s.day ? `${s.age} (${s.day})` : s.day || s.created_at;
     return (
       `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}\n` +
       `    ${neutralizeFences(s.what)}`

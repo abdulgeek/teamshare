@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  formatDay,
   describeAge,
   classifyRelevance,
   relevanceLabel,
@@ -11,6 +12,30 @@ const ago = (ms: number) => new Date(Date.parse(NOW) - ms).toISOString();
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
+
+describe('formatDay', () => {
+  it('reads as a weekday and a day-first date, not an ISO instant', () => {
+    // 2026-09-08 is a Tuesday.
+    expect(formatDay('2026-09-08T11:57:15.607Z')).toBe('Tuesday, 08-09-2026');
+    expect(formatDay('2027-01-29T00:00:00.000Z')).toBe('Friday, 29-01-2027');
+  });
+
+  it('zero-pads day and month so the shape never shifts', () => {
+    expect(formatDay('2026-01-05T10:00:00.000Z')).toBe('Monday, 05-01-2026');
+  });
+
+  it('works in UTC regardless of the machine it renders on', () => {
+    // The server cannot know the reader's timezone, and using its own would be
+    // wrong for everyone but whoever deployed it. Pinned so a TZ-dependent
+    // implementation cannot creep in unnoticed.
+    expect(formatDay('2026-09-08T23:30:00.000Z')).toBe('Tuesday, 08-09-2026');
+    expect(formatDay('2026-09-08T00:30:00.000Z')).toBe('Tuesday, 08-09-2026');
+  });
+
+  it('never throws on a malformed timestamp mid-render', () => {
+    expect(formatDay('not a date')).toBe('not a date');
+  });
+});
 
 describe('describeAge', () => {
   it('reads the way a person would say it', () => {
@@ -92,8 +117,10 @@ describe('classifyRelevance', () => {
     expect(classifyRelevance({ ...twoDaysOld, relevanceWindowDays: 30 }).relevance).toBe('recent');
   });
 
-  it('carries the human age alongside the grade', () => {
-    expect(classifyRelevance({ ...base, createdAt: ago(3 * HOUR) }).age).toBe('3 hours ago');
+  it('carries the human age and the calendar day alongside the grade', () => {
+    const f = classifyRelevance({ ...base, createdAt: '2026-09-08T09:00:00.000Z' });
+    expect(f.age).toBe('3 hours ago');
+    expect(f.day).toBe('Tuesday, 08-09-2026');
   });
 
   it('never throws on an unparseable timestamp, and does not hide the share', () => {
@@ -119,6 +146,6 @@ describe('relevanceLabel', () => {
     expect(relevanceLabel(at(ago(9 * DAY)))).toBe('old');
     expect(relevanceLabel(at(ago(9 * DAY), 'blocking'))).toBe('still blocking, but old');
     expect(relevanceLabel(at(ago(20 * DAY)))).toBe('expired');
-    expect(relevanceLabel({ ...at(ago(HOUR)), relevance: 'stale', relevant: false })).toBe('no longer relevant');
+    expect(relevanceLabel({ ...at(ago(HOUR)), relevance: 'stale', relevant: false })).toBe('irrelevant');
   });
 });

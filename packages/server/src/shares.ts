@@ -128,13 +128,20 @@ export function getShare(scope: TeamScope, id: string): ShareRow | undefined {
 
 export function listShares(
   scope: TeamScope,
-  opts: { tag?: string; sender?: string; limit?: number },
+  opts: { tag?: string; sender?: string; limit?: number; includeIrrelevant?: boolean },
 ): ShareRow[] {
   // team_id is seeded into the WHERE clause itself, never appended to the
   // optional predicate list — so a caller passing no filters at all still
   // gets `WHERE team_id = ?`, never a clause-free scan of every team's shares.
   const clauses: string[] = ['team_id = ?'];
   const params: unknown[] = [scope.teamId];
+
+  // A share its author marked irrelevant leaves the history too, not just the
+  // digest. "No longer relevant" that still turns up in every browse is not a
+  // useful state — it just moves the noise. The author can still find their
+  // own with includeIrrelevant, which is what makes the mark reversible in
+  // practice rather than a one-way door.
+  if (!opts.includeIrrelevant) clauses.push('stale_at IS NULL');
 
   if (opts.sender) {
     clauses.push('sender_email = ?');
@@ -172,9 +179,14 @@ export function retractShare(scope: TeamScope, id: string, callerEmail: string):
   return { ok: true };
 }
 
-// Soft, author only. Sets stale_at so the share drops out of `unread` for
-// everyone but stays in history via listShares/getShare. Idempotent: marking
-// an already-stale share leaves its original stale_at untouched.
+// Soft, author only. Sets stale_at, which withdraws the share from the team
+// entirely: it leaves `unread`, it leaves `list_shares`, and `read_share`
+// stops returning its body to anyone but the author. The row survives, so the
+// author can still see what they withdrew and the receipts stay auditable —
+// that is the whole difference from `retract`, which deletes.
+//
+// Idempotent: marking an already-stale share leaves its original stale_at
+// untouched.
 export function markStale(
   scope: TeamScope,
   id: string,

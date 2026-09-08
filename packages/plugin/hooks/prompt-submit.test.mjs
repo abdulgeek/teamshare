@@ -41,6 +41,8 @@ const share = (id, overrides = {}) => ({
   sender_name: 'Priya',
   sender_email: 'priya@team.com',
   created_at: '2026-08-31T09:00:00.000Z',
+  day: 'Sunday, 31-08-2026',
+  age: 'just now',
   priority: 'fyi',
   what: `about ${id}`,
   ...overrides,
@@ -254,8 +256,11 @@ describe('when the new share was published', () => {
     await runHook();
     serveShares([share('shr_now')]);
     const ctx = parse(await runHook()).hookSpecificOutput.additionalContext;
-    // The server supplies `age`; the hook must not invent or omit it.
-    expect(ctx).toContain('2026-08-31T09:00:00.000Z');
+    // The server supplies both; the hook must not invent, omit, or fall back
+    // to the ISO instant when they are present.
+    expect(ctx).toContain('just now');
+    expect(ctx).toContain('Sunday, 31-08-2026');
+    expect(ctx).not.toContain('2026-08-31T09:00:00.000Z');
     expect(ctx.toLowerCase()).toContain('say who shared it and');
   });
 

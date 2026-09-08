@@ -463,6 +463,7 @@ describe('when a share was published', () => {
               priority: 'fyi',
               what: 'x',
               age: '3 days ago',
+              day: 'Saturday, 05-09-2026',
               relevance: 'ageing',
             },
           ],
@@ -472,9 +473,12 @@ describe('when a share was published', () => {
     writeConfig();
     const out = await runHook();
     expect(out).toContain('3 days ago');
-    // The instant survives too: "which Tuesday exactly" gets asked, and it
-    // cannot be recovered from the relative phrase.
-    expect(out).toContain('2026-09-05T09:00:00.000Z');
+    // The calendar day survives too — "which Saturday exactly" gets asked, and
+    // it cannot be recovered from the relative phrase. What must NOT survive is
+    // the ISO instant: unreadable, and nobody judging relevance wants
+    // milliseconds.
+    expect(out).toContain('Saturday, 05-09-2026');
+    expect(out).not.toContain('2026-09-05T09:00:00.000Z');
     expect(out).toContain('ageing');
     expect(out.toLowerCase()).toContain('when it was shared');
   });
@@ -495,6 +499,7 @@ describe('when a share was published', () => {
               priority: 'fyi',
               what: 'x',
               age: '2 hours ago',
+              day: 'Tuesday, 08-09-2026',
               relevance: 'new',
             },
           ],
@@ -523,6 +528,7 @@ describe('when a share was published', () => {
               priority: 'fyi',
               what: 'x',
               age: '1 hour ago',
+              day: 'Tuesday, 08-09-2026',
               relevance: 'new',
             },
           ],
@@ -571,6 +577,8 @@ describe('when a share was published', () => {
     writeConfig();
     const out = await runHook();
     expect(out).toContain('shr_old_server');
+    // With no `day` from an older server, the raw instant is the honest
+    // fallback — worse to read, but never "undefined".
     expect(out).toContain('2026-09-05T09:00:00.000Z');
     expect(out).not.toContain('undefined');
   });

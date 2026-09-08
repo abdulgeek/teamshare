@@ -27,7 +27,7 @@ function render(digest) {
   // here does date maths against a clock it cannot see.
   const lines = digest.shares.map((s) => {
     const grade = s.relevance && s.relevance !== 'new' ? ` | ${s.relevance}` : '';
-    const when = s.age ? `${s.age} (${s.created_at})` : s.created_at;
+    const when = s.age && s.day ? `${s.age} (${s.day})` : s.day || s.created_at;
     return (
       `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}\n` +
       `    ${neutralizeFences(s.what)}`
@@ -59,7 +59,7 @@ function render(digest) {
     older,
     '',
     'On your first reply, tell the user who shared what — including when it was shared, using the',
-    'relative age given above — and ask whether they want the details.',
+    'age and date given above exactly as written — and ask whether they want the details.',
     'If they say yes for a share, call the teamshare `read_share` tool with its id.',
     'If they say no or skip it, call `acknowledge` with its id.',
     'Record receipts only for shares the user explicitly answered — leave anything they did not',

@@ -551,6 +551,29 @@ export function resolveGitIdentity(opts = {}) {
 // URL pasted with a trailing "/mcp" (the single most common paste mistake,
 // since that's the literal MCP endpoint) still resolves to the right origin
 // for /teams, /teams/rotate, /health, and /unread.
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/**
+ * "Monday, 08-09-2026", in UTC.
+ *
+ * A hand-maintained duplicate of formatDay in packages/server/src/relevance.ts
+ * — this file must stay a single dependency-free download with no relative
+ * imports, the same constraint DEFAULT_SERVER_URL lives under. If the format
+ * changes in one, change it in the other.
+ *
+ * An ISO instant is precise and unreadable; nobody reading a roster wants
+ * milliseconds.
+ * @param {string} iso
+ */
+export function formatDay(iso) {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return String(iso);
+  const d = new Date(ms);
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${WEEKDAYS[d.getUTCDay()]}, ${dd}-${mm}-${d.getUTCFullYear()}`;
+}
+
 export function normalizeServerUrl(url) {
   let u = String(url).trim();
   for (;;) {
@@ -1450,7 +1473,7 @@ export function formatRosterOutput(opts) {
     lines.push(`(nobody yet — invite the first teammate with \`${cmdName} invite <email>\`)`);
   }
   for (const m of members) {
-    const seen = m.last_seen ? `last seen ${m.last_seen}` : 'never connected';
+    const seen = m.last_seen ? `last seen ${formatDay(m.last_seen)}` : 'never connected';
     const label = m.name && m.name !== m.email ? `${m.email} (${m.name})` : m.email;
     lines.push(`  - ${label} — ${m.status}, ${m.active_tokens} active token(s), ${seen}`);
   }
@@ -1489,7 +1512,7 @@ export function formatWhoamiOutput(opts) {
     lines.push(`  Already have one elsewhere? Set ${ADMIN_TOKEN_ENV} and the admin commands will use it.`);
   } else {
     for (const t of adminTeams) {
-      lines.push(`  - ${t.name} (${t.team_id}) — saved ${t.created_at}`);
+      lines.push(`  - ${t.name} (${t.team_id}) — saved ${formatDay(t.created_at)}`);
     }
     if (adminTeams.length > 1) {
       lines.push('');
