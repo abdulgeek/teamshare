@@ -191,6 +191,105 @@ That's the *arrival* half. The other half fires when someone names a ticket
 key later on, long after the note stopped being unread — see
 [Before you start on a ticket](#before-you-start-on-a-ticket).
 
+### Two things worth learning first
+
+Everything above is the team-wide case. These two are what you'll actually
+reach for day to day. Both are captured from a running server — type the
+left-hand thing, see the right-hand thing.
+
+#### 1. Say something to one person
+
+Just name them. You never look up an email address.
+
+```
+tell Sam I'm on EN-2022, doing the middleware refactor first,
+so don't start the auth work until I land it
+```
+
+Your assistant publishes it addressed to Sam, and tells you it reached
+exactly one person:
+
+```json
+{ "id": "shr_3f850f4feac7", "notified": 1 }
+```
+
+**Sam sees it, marked `to you`:**
+
+```
+- [shr_3f850f4feac7] HEADS-UP from Abdul Sagheer · just now (Wednesday, 09-09-2026) | to you: Reviewing EN-2022 now, middleware refactor first
+```
+
+**Nobody else does.** Not in their digest, and not by asking for that id
+either — they get the same *"no share with id …"* a made-up id gets.
+
+`Sam`, `@Sam`, `Sam Okafor` and `sam@acme.com` all work. If two people
+match, it stops and asks rather than guessing:
+
+```
+"Priya" matches 2 people on this team: Priya Raman <priya@acme.com>, Priya
+Nair <priyan@acme.com>. Ask which one they mean and pass that address.
+```
+
+Teach it your own name for someone, once:
+
+```
+Pri is priyan@acme.com — remember that
+```
+
+```
+Saved: "pri" means priyan@acme.com.
+```
+
+That's stored on the server against your account, so it follows you to your
+other machines and survives restarts. It's private to you — your "Pri" never
+changes who a teammate's "Pri" means. Ask *"who's on the team?"* any time to
+see everyone's names.
+
+More detail, including who can and can't be addressed:
+[Addressing a share to specific people](#addressing-a-share-to-specific-people).
+
+#### 2. Get warned before you start on a ticket
+
+Name a ticket and you're told what the team already said about it, **before**
+Claude opens the ticket or reads any code:
+
+```
+let's pick up EN-2022
+```
+
+```
+teamshare: EN-2022 — Ravi is blocked on this (blocking, 2 hours ago).
+He expects to land the auth refactor end of day. Want me to tell him
+you've picked it up?
+```
+
+That works even for a note you read last week and forgot, which is the whole
+point — your digest gave up on it long ago. It's a heads-up, never a block:
+you may be taking the ticket over on purpose.
+
+It runs the other way too. If **you're** the one doing the work and a
+teammate has published that they're stuck behind you, naming the ticket
+surfaces that and offers to send them a status. It never publishes anything
+without you saying yes.
+
+Only ticket keys (`EN-2022`) and repo references (`acme/api#412`) trigger it.
+Not free text, and not lookalikes such as `UTF-8` or `GPT-4`.
+
+More detail, including what leaves your machine:
+[Before you start on a ticket](#before-you-start-on-a-ticket).
+
+#### When does it reach them?
+
+You don't have to tell anyone to restart anything.
+
+| They are... | They see it |
+| --- | --- |
+| Mid-session, Claude open all morning | At their next message, once the once-a-minute check comes round |
+| Starting a fresh session | Immediately, before they type anything |
+
+It won't say the same thing twice — if the session-start digest just showed
+it, the mid-session check stays quiet.
+
 ### How old is it, and does it still matter?
 
 Every share carries **when it was published** — as a relative age *and* a
@@ -653,6 +752,9 @@ No slash commands here — just ask:
 | "share with the team that the auth refactor lands Friday" | Publishes it             |
 | "who's seen my auth share?"                               | Read receipts            |
 | "has anyone said anything about EN-2022?"                  | What the team published about that ticket |
+| "tell Sam I'm on EN-2022"                                  | A note only Sam sees     |
+| "who's on the team?"                                       | Names and addresses      |
+| "Pri is priyan@acme.com, remember that"                    | Saves your name for them |
 | "retract that share"                                      | Deletes it everywhere    |
 
 
@@ -713,6 +815,7 @@ Code commands are this same file with a nicer front door.
 | A session starts                         | Unread shares, blocking first then newest                          |
 | A teammate publishes mid-session         | A one-line nudge before your next message                          |
 | You name a ticket key or `owner/repo#N`  | What the team already published about it, plus an offer to reply   |
+| You name a teammate in a share           | It goes only to them, resolved from the roster or a name you saved |
 
 
 **Terminal** — `node teamshare-team.mjs <command>` after the `curl` above.
