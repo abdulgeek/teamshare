@@ -58,21 +58,47 @@ Both `project` and `recipients` stay off by default — a share with neither
 is team-wide, which is the common case and should be your default reading of
 an unqualified "share this with the team."
 
-Set `recipients` when the user names a specific person or a small group by
-name: "tell Sam the migration is done," "let Priya and Sam know before you
-merge." List their email address(es) as given on the roster — if you don't
-already know an address from context, ask rather than guess one. Do not set
-`recipients` for "let the backend team know" or similar group phrasing
-unless the user actually names the individuals; a named team is not a list
-of addresses, and the safe default there is still a team-wide (or
+Set `recipients` when the user names a specific person or a small group:
+"tell Sam the migration is done," "@Priya can you look at this," "let Priya
+and Sam know before you merge."
+
+**Pass the name they used. Do not ask for an email address.** `recipients`
+takes a name the roster knows just as happily as an address — `Sam`,
+`@Sam`, `Sam Okafor` and `sam@example.com` all resolve to the same person.
+Asking someone for the email of a teammate they just named by name is the
+single most annoying thing this tool can do, and it is never necessary.
+
+Three cases and what to do:
+
+- **The name resolves.** Nothing to do; publish as normal.
+- **It matches two people.** The error names both, with addresses. Ask the
+  user which one they meant, then publish with that address. If they are
+  likely to use that name again, offer `remember_name` so it resolves next
+  time.
+- **Nobody matches.** The error says so and lists the team. Ask, rather than
+  guessing at a different teammate — and NEVER fall back to a team-wide
+  share, which would broadcast something meant for one person.
+
+Call `teammates` when you want to check a name before publishing, or to
+tell two people with the same first name apart up front rather than after
+the user has confirmed a draft. It also lists anyone invited who has never
+connected, who cannot be addressed yet.
+
+`remember_name` records what this user calls somebody — "Adnan is
+adnan@acme.com". It is private to them and beats the roster spelling, which
+is what makes a nickname work. Use it when the user says who someone is, or
+after you have had to ask.
+
+Do not set `recipients` for "let the backend team know" or similar group
+phrasing unless the user actually names the individuals; a named team is
+not a list of people, and the safe default there is still a team-wide (or
 project-scoped) share.
 
-Every address must belong to someone who has already connected at least
-once — the tool will refuse an address it has never seen, or one that was
-invited but hasn't connected yet, and it names which case and what to do
-about it. If it refuses, relay that message rather than silently dropping
-the recipient and broadcasting instead: a share addressed to the wrong
-audience is worse than a failed one.
+Everyone named must have connected at least once. An address on some other
+team, or on no team, cannot be reached at all — a share is delivered by
+being readable to that person's token, and a stranger holds none. Relay
+that message rather than silently dropping the recipient and broadcasting
+instead: a share sent to the wrong audience is worse than a failed one.
 
 `project` and `recipients` can combine (a note for one person about one
 repo), but most shares use neither.

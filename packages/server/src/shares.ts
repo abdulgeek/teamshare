@@ -1,6 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { normalizeEmail, type TeamScope } from './db.js';
 import { validateEmailAddress } from './http.js';
+import {
+  describeResolutionFailure,
+  extractAngleAddress,
+  looksLikeEmail,
+  resolveRecipientTerm,
+  TERM_PLACEHOLDER,
+} from './directory.js';
 import { foldProjectKey } from './project.js';
 
 export type Priority = 'fyi' | 'heads-up' | 'blocking';
@@ -14,6 +21,8 @@ export const CAPS = {
   tagLength: 20,
   project: 200,
   recipients: 20,
+  /** One recipient entry, which may be a name rather than an address. */
+  recipientTerm: 120,
 } as const;
 
 export interface ShareInput {
@@ -169,6 +178,13 @@ export function validateShare(input: ShareInput): ValidationResult {
   if (rawRecipients.length > CAPS.recipients) {
     return { ok: false, error: `recipients has ${rawRecipients.length} entries; cap is ${CAPS.recipients}.` };
   }
+  // Each entry is a TERM, not necessarily an address: "adnan@acme.com",
+  // "Adnan", or "@Adnan" are all legitimate here, and which teammate a name
+  // means is a question about the roster that only the database can answer.
+  // So this stays syntactic — shape, length, no control characters — and the
+  // real resolution happens in resolveRecipients, where the roster is in
+  // scope. An address is still checked as an address, right here, so a typo
+  // in one is reported as a bad address rather than as an unknown name.
   const recipients: string[] = [];
   for (const raw of rawRecipients) {
     if (typeof raw !== 'string' || raw.trim().length === 0) {
@@ -176,14 +192,28 @@ export function validateShare(input: ShareInput): ValidationResult {
         ok: false,
         error:
           `recipients contains an empty entry (${JSON.stringify(raw) ?? String(raw)}). ` +
-          'Name a real address, or omit recipients entirely to reach the whole team.',
+          'Name a teammate or their address, or omit recipients entirely to reach the whole team.',
       };
     }
-    // The label carries the offending address into the message, so an error
-    // says which entry is wrong rather than that "one of them" is.
-    const check = validateEmailAddress(raw, `recipient "${raw.trim().slice(0, 60)}"`);
-    if (!check.ok) return { ok: false, error: check.error };
-    if (!recipients.includes(check.value)) recipients.push(check.value);
+    const term = raw.trim();
+    if (term.length > CAPS.recipientTerm) {
+      return { ok: false, error: `recipient "${term.slice(0, 40)}…" is ${term.length} chars; cap is ${CAPS.recipientTerm}.` };
+    }
+    if (/[\p{Cc}\p{Cf}]/u.test(term)) {
+      return { ok: false, error: `recipient "${term.slice(0, 40)}" contains a control character` };
+    }
+    if (TERM_PLACEHOLDER.test(term)) {
+      return { ok: false, error: `recipient "${term.slice(0, 60)}" contains an unsubstituted placeholder` };
+    }
+    if (looksLikeEmail(term)) {
+      // The label carries the offending address into the message, so an error
+      // says which entry is wrong rather than that "one of them" is.
+      const check = validateEmailAddress(extractAngleAddress(term) ?? term, `recipient "${term.slice(0, 60)}"`);
+      if (!check.ok) return { ok: false, error: check.error };
+      if (!recipients.includes(check.value)) recipients.push(check.value);
+      continue;
+    }
+    if (!recipients.includes(term)) recipients.push(term);
   }
 
   return {
@@ -290,7 +320,19 @@ function resolveRecipients(scope: TeamScope, sender: string, addressed: string[]
   // The ONLY path to zero recipient rows.
   if (addressed.length === 0) return [];
 
-  const withoutSender = addressed.filter((email) => email !== sender);
+  // Names become addresses here, where the roster is in scope. A term that
+  // resolves to nobody, or to more than one person, THROWS — it is never
+  // dropped. Dropping it would turn "tell Adnan I'm on EN-2022" into telling
+  // the whole team, which is the one outcome the author definitely did not
+  // ask for. See directory.ts.
+  const resolved: string[] = [];
+  for (const term of addressed) {
+    const res = resolveRecipientTerm(scope, sender, term);
+    if (!res.ok) throw new Error(describeResolutionFailure(res));
+    if (!resolved.includes(res.email)) resolved.push(res.email);
+  }
+
+  const withoutSender = resolved.filter((email) => email !== sender);
   if (withoutSender.length === 0) {
     throw new Error(
       'recipients names only you, and a share never notifies its own author — so this would ' +

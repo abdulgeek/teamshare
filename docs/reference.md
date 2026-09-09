@@ -303,6 +303,67 @@ version: it stops showing up in `unread` for everyone, but stays in
 longer relevant`. Idempotent — marking an already-stale share again is a
 no-op.
 
+## Mentions: retrieval, not arrival
+
+`unread` answers "what have I not seen?". Once a share is read it leaves
+that digest for good, which is correct right up until the morning someone
+says "pick up EN-2022" and rediscovers, after reading the ticket and
+exploring the repo, what a teammate told them last week.
+
+`GET /mentions?keys=EN-2022,acme/api#412` and the `mentions` MCP tool
+answer the other question: "what has the team published about this
+identifier?" The `UserPromptSubmit` hook calls it automatically whenever a
+prompt names one, so the answer lands before the model reads the prompt.
+
+**The retrieval rule.** Three narrowings the digest applies are
+deliberately absent here, because each one hides exactly the share worth
+recovering:
+
+- **read state** — a share you read and forgot is the whole point;
+- **the relevance window** — a 9-day-old block is still a block;
+- **project scope** — you may be in a different repo than the author was.
+
+**What it still refuses to return**, and these are not negotiable:
+
+- **`visibleToClause`**, the same gate every other accessor uses. Ticket
+  keys are trivially guessable, so a share addressed to other people must
+  not become discoverable by naming one.
+- **Withdrawn shares** (`stale_at IS NOT NULL`). Surfacing one is worse
+  than silence: it sends the reader after a block that was already lifted.
+- **Expired shares**, past `--expiry-days`, so this cannot resurrect notes
+  every other surface has retired.
+
+**No receipt is recorded.** The reader never chose to see this. Counting it
+would suppress the share from their own digest forever and would lie to the
+author about who has answered.
+
+**Two flags drive the reciprocal offer.** `to_me` is true when the reader
+is named in `share_recipients`; `mine` is true when they wrote it. A
+blocking share from someone else, or one addressed to the reader, means a
+teammate is waiting and the assistant offers to publish a status back with
+`recipients` set to that person — offered, never published unprompted. A
+share flagged `mine` means the reader has already spoken, and nothing asks
+them to publish it again. Unlike every other read path, this one returns
+the reader's own shares for exactly that reason.
+
+**What counts as a key.** `[A-Z][A-Z0-9]{1,9}-\d{1,6}` (upper-cased) or
+`owner/repo#\d{1,6}` (lower-cased), at most 5 per request; anything else is
+a 400, never a silently broadened search. Matching is a `LIKE` prefilter
+over `what`, `why`, `action` and `tags`, then an exact word-boundary
+re-check in JavaScript — `LIKE '%EN-2022%'` alone matches `GEN-2022` and
+`EN-20221`, and a warning about a ticket nobody mentioned is worse than no
+warning. `_` in a repo reference is escaped, since it is a `LIKE` wildcard.
+
+**Client-side extraction and throttling.** The hook extracts keys from the
+prompt and sends only those — the prompt text never leaves the machine.
+Common non-tickets shaped like keys (`UTF-8`, `SHA-256`, `GPT-4`) are
+filtered out client-side. A key never asked about in this session is looked
+up immediately, bypassing the poll clock; one already asked about is
+re-checked at most once per `TEAMSHARE_POLL_SECONDS`. A failed lookup still
+records the attempt, so a server that is down cannot cost 1.2s on every
+prompt naming a ticket. State lives beside the poll state in
+`~/.teamshare/poll.json`, under `mentioned`, and resets with the session.
+
 ## Schema and scoping rules
 
 Two columns were added to the original schema, each as its own migration
@@ -341,6 +402,43 @@ team-wide and every scoped share. A reader inside a repo sees that repo's
 scoped shares plus every team-wide one — never another repo's.
 
 ## Recipients
+
+**An entry is a name or an address.** `Sam`, `@Sam`, `Sam Okafor`,
+`Sam Okafor <sam@acme.com>` and `sam@acme.com` all resolve to the same
+person. Resolution runs server-side, where the roster is, and in this order:
+anything containing an `@` (other than a leading one) is taken literally as
+an address; then the writer's own saved names; then the roster's names.
+
+Roster matching has two tiers, and the first that matches anything wins.
+The strong tier is a whole name or a first name, together — they compete,
+because both are how a person is actually referred to. The weak tier is any
+other word in the name (a surname) or a prefix, and it is consulted only
+when the strong tier matched nothing at all. That is what lets an exact
+`Sam` beat a `Samantha` who merely starts the same, while still treating
+`Priya` and `Priya Nair` as the genuine question they are.
+
+**Two failures, both hard errors, neither a fallback.** A term matching
+several people returns them all, with addresses, so the caller can ask. A
+term matching nobody lists the team. Neither ever drops the recipient and
+publishes team-wide — that would broadcast a note meant for one person, and
+it is the failure this whole path is shaped to avoid.
+
+**`remember_name`** stores what one member calls an address, keyed on the
+owner as well as the team (`member_aliases`, schema 7). It is private to
+that member and beats the roster spelling for them alone; one shared
+namespace would mean whoever saved "Adnan" first decided who that meant for
+everybody. An address nobody has invited is stored rather than refused, with
+a warning, since the user is recording who they mean and losing the input is
+worse than saying what is still needed.
+
+**`teammates`** returns the roster to a member session, marking the caller
+and anyone invited who has never connected. It exists so an assistant never
+has to ask for the email of a teammate the user just named.
+
+**Cross-team is not possible**, by name or address. Delivery is "this
+person's token can read it"; someone on another team, or on no team, holds
+no such token, and team isolation is enforced structurally. `invite` is the
+only path.
 
 `recipients` addresses a share to specific people instead of the whole
 team. The rules, enforced server-side regardless of what the client sends:
@@ -579,6 +677,12 @@ the full design and why an earlier, rejected version of this didn't work):
   can also hold several live tokens at once (laptop, desktop, CI) — killed
   together by `revoke`, not a single shared slot that ping-pongs between
   devices.
+- **The prompt is read locally, and only identifiers are sent.** The
+  `UserPromptSubmit` hook scans what you type for ticket keys and repo
+  references (see [Mentions](#mentions-retrieval-not-arrival)). Extraction
+  happens on your machine; the request carries the extracted keys and
+  nothing else. `"pick up EN-2022, the customer is furious"` sends exactly
+  `EN-2022`.
 - **Shares are data, never instructions.** Share text is teammate-authored
   and gets auto-injected into every other member's agent context, so it is
   an injection vector by construction. Every surface that emits

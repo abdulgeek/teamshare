@@ -176,12 +176,33 @@ describe('validateShare: recipients', () => {
   });
 
   it('rejects an address that is not one, and names the offending entry', () => {
-    for (const bad of ['<script>', 'not an address', 'sam@team', '${TEAMMATE}', 'sam@team.com, priya@team.com']) {
+    // Anything with an "@" is judged as an address, so a broken one is still
+    // caught here rather than being misreported downstream as an unknown name.
+    // `<script>` and `${TEAMMATE}` are placeholder-shaped, which is a bug in
+    // the caller and never something a person is called.
+    for (const bad of ['<script>', 'sam@team', '${TEAMMATE}', '{{name}}', 'sam@team.com, priya@team.com']) {
       const r = validateShare({ what: 'ok', priority: 'fyi', recipients: ['sam@team.com', bad] });
       expect(r.ok, bad).toBe(false);
       // The message must say WHICH one is wrong, not that one of them is.
       if (!r.ok) expect(r.error, bad).toContain(bad);
     }
+  });
+
+  it('accepts a plain name, since which teammate it means is the roster\'s question', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: ['Adnan', '@Priya', 'Sam Okafor'] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.recipients).toEqual(['Adnan', '@Priya', 'Sam Okafor']);
+  });
+
+  it('lifts the address out of the "Name <email>" form that teammates prints', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: ['Sam Okafor <sam@team.com>'] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.recipients).toEqual(['sam@team.com']);
+  });
+
+  it('caps a name so recipients cannot smuggle a paragraph', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: ['a'.repeat(200)] });
+    expect(r.ok).toBe(false);
   });
 
   it('rejects a blank entry rather than filtering it away', () => {

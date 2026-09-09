@@ -751,3 +751,64 @@ describe('a rejected signup secret says what to do next', () => {
     }
   });
 });
+
+describe('GET /mentions', () => {
+  const ask = (keys: string, auth = true) =>
+    fetch(`${base}/mentions?keys=${encodeURIComponent(keys)}`, auth ? { headers: headers() } : {});
+
+  it('needs a member token', async () => {
+    expect((await ask('EN-2022', false)).status).toBe(401);
+  });
+
+  // A malformed key is a hard error, never a dropped term. Silently discarding
+  // one would turn "nobody said anything about EN-2022" into an answer the
+  // caller never asked for, and this feature is only worth having if its
+  // silence can be trusted.
+  it('rejects a missing, malformed, or over-long key list', async () => {
+    expect((await fetch(`${base}/mentions`, { headers: headers() })).status).toBe(400);
+    expect((await ask('')).status).toBe(400);
+    expect((await ask('auth refactor')).status).toBe(400);
+    expect((await ask('EN-2022,not-a-key')).status).toBe(400);
+    expect((await ask('AA-1,BB-2,CC-3,DD-4,EE-5,FF-6')).status).toBe(400);
+  });
+
+  it('accepts a ticket key and a repo reference together, in either case', async () => {
+    createShare(scope, 'adnan@team.com', { what: 'EN-2022 is blocked', priority: 'blocking' }, NOW);
+    createShare(scope, 'adnan@team.com', { what: 'landed acme/api#412', priority: 'fyi' }, NOW);
+    const res = await ask('en-2022,ACME/API#412');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { matches: { keys: string[] }[] };
+    expect(body.matches).toHaveLength(2);
+    expect(body.matches.flatMap((m) => m.keys).sort()).toEqual(['EN-2022', 'acme/api#412']);
+  });
+
+  it('returns a share the reader has already read, which is the entire point', async () => {
+    const s = createShare(scope, 'adnan@team.com', { what: 'EN-2022 is blocked', priority: 'blocking' }, NOW);
+    db.prepare(`INSERT INTO receipts (team_id, share_id, member_email, status, at) VALUES (?, ?, ?, ?, ?)`)
+      .run(scope.teamId, s.id, 'priya@team.com', 'viewed', NOW);
+    // Gone from the digest for good...
+    const digest = (await fetch(`${base}/unread`, { headers: headers() })).json() as Promise<{ total: number }>;
+    expect((await digest).total).toBe(0);
+    // ...but this is exactly the share worth resurfacing.
+    const body = (await (await ask('EN-2022')).json()) as { matches: unknown[] };
+    expect(body.matches).toHaveLength(1);
+  });
+
+  it('never surfaces a share addressed to somebody else', async () => {
+    upsertMember(scope, 'sam@team.com', 'Sam', NOW);
+    createShare(
+      scope, 'adnan@team.com',
+      { what: 'EN-2022 is blocked', priority: 'blocking', recipients: ['sam@team.com'] },
+      NOW,
+    );
+    const body = (await (await ask('EN-2022')).json()) as { matches: unknown[] };
+    expect(body.matches).toEqual([]);
+  });
+
+  it('marks nothing as read', async () => {
+    createShare(scope, 'adnan@team.com', { what: 'EN-2022 is blocked', priority: 'blocking' }, NOW);
+    await ask('EN-2022');
+    const digest = (await (await fetch(`${base}/unread`, { headers: headers() })).json()) as { total: number };
+    expect(digest.total).toBe(1);
+  });
+});

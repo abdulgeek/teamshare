@@ -14,6 +14,7 @@ import {
   generateTeamToken, rotateTeamToken, getSignupSecret, getOrCreateSignupSecret,
   readConfig,
   type Db, type TeamScope,
+  CURRENT_SCHEMA_VERSION,
 } from './db.js';
 import { createShare, getShare, listShares, retractShare } from './shares.js';
 import { recordReceipt, getReceipts } from './receipts.js';
@@ -642,7 +643,7 @@ describe('schema migration', () => {
           | undefined;
         const teams = opened.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
         const members = opened.prepare('SELECT COUNT(*) AS n FROM members').get() as { n: number };
-        expect(version?.value).toBe('6');
+        expect(version?.value).toBe(String(CURRENT_SCHEMA_VERSION));
         expect(teams.n).toBe(1);
         expect(members.n).toBe(6);
       } finally {
@@ -708,7 +709,7 @@ describe('schema migration', () => {
           const recoveredVersion = recovered
             .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
             .get() as { value: string };
-          expect(recoveredVersion.value).toBe('6');
+          expect(recoveredVersion.value).toBe(String(CURRENT_SCHEMA_VERSION));
           const teams = recovered.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
           expect(teams.n).toBe(1);
           const members = recovered.prepare('SELECT COUNT(*) AS n FROM members').get() as { n: number };
@@ -767,7 +768,7 @@ describe('schema migration', () => {
           const recoveredVersion = recovered
             .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
             .get() as { value: string };
-          expect(recoveredVersion.value).toBe('6');
+          expect(recoveredVersion.value).toBe(String(CURRENT_SCHEMA_VERSION));
           const shares = recovered.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
           expect(shares.n).toBe(2);
         } finally {
@@ -820,7 +821,7 @@ describe('schema migration', () => {
           const recoveredVersion = recovered
             .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
             .get() as { value: string };
-          expect(recoveredVersion.value).toBe('6');
+          expect(recoveredVersion.value).toBe(String(CURRENT_SCHEMA_VERSION));
           const recoveredCols = recovered.prepare('PRAGMA table_info(shares)').all() as { name: string }[];
           expect(recoveredCols.some((c) => c.name === 'project')).toBe(true);
           const shares = recovered.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
@@ -842,7 +843,7 @@ describe('schema migration', () => {
     const freshScope = makeTeamScope(freshDb, getOrCreateDefaultTeamId(freshDb));
     const { id } = createShare(freshScope, 'a@t.com', { what: 'x', priority: 'fyi' }, T0);
     expect(getShare(freshScope, id, 'a@t.com')?.project).toBeNull();
-    expect(readConfig(freshDb, 'schema_version')).toBe('6');
+    expect(readConfig(freshDb, 'schema_version')).toBe(String(CURRENT_SCHEMA_VERSION));
     freshDb.close();
   });
 
@@ -895,7 +896,7 @@ describe('schema migration', () => {
           const recoveredVersion = recovered
             .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
             .get() as { value: string };
-          expect(recoveredVersion.value).toBe('6');
+          expect(recoveredVersion.value).toBe(String(CURRENT_SCHEMA_VERSION));
           const shares = recovered.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
           expect(shares.n).toBe(2);
         } finally {
@@ -916,8 +917,91 @@ describe('schema migration', () => {
     expect(getShare(freshScope, id, 'a@t.com')?.recipients).toEqual([]);
     const count = freshDb.prepare('SELECT COUNT(*) AS n FROM share_recipients').get() as { n: number };
     expect(count.n).toBe(0);
-    expect(readConfig(freshDb, 'schema_version')).toBe('6');
+    expect(readConfig(freshDb, 'schema_version')).toBe(String(CURRENT_SCHEMA_VERSION));
     freshDb.close();
+  });
+
+  // The 6->7 migration (the personal address book behind "tell Adnan"): another
+  // plain CREATE, so the same atomicity property as 3->4 and 5->6. Getting a
+  // real v6 file to inject into uses the machinery under test — migrate a v5
+  // fixture with a fault at the FIRST 6->7 sub-step, which commits 5->6 and
+  // rolls back 6->7, leaving exactly the shape a pre-upgrade install has.
+  describe('fault injection: the 6->7 migration (member_aliases) is atomic', () => {
+    const subSteps = ['6->7:member_aliases-table', '6->7:version'];
+
+    function createV6Db(dbPath: string): void {
+      const raw = createV5Db(dbPath);
+      seedV5FatShape(raw, 'tm_v6faultinject', hashToken('ts_v6faultinject'));
+      raw.close();
+      const probeDb = new Database(dbPath);
+      probeDb.pragma('foreign_keys = ON');
+      expect(() => {
+        migrateSchema(probeDb, '2026-09-09T00:00:00.000Z', (l) => {
+          if (l === '6->7:member_aliases-table') throw new Error('stop at v6');
+        });
+      }).toThrow('stop at v6');
+      const version = probeDb.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as {
+        value: string;
+      };
+      expect(version.value).toBe('6');
+      probeDb.close();
+    }
+
+    for (const label of subSteps) {
+      it(`rolls back completely when the migration throws at "${label}"`, () => {
+        const dbPath = join(dir, `fault67-${label.replace(/[^a-z0-9]/gi, '_')}.db`);
+        createV6Db(dbPath);
+
+        const probeDb = new Database(dbPath);
+        probeDb.pragma('foreign_keys = ON');
+        expect(() => {
+          migrateSchema(probeDb, '2026-09-09T00:00:00.000Z', (l) => {
+            if (l === label) throw new Error(`injected fault at ${label}`);
+          });
+        }).toThrow(`injected fault at ${label}`);
+
+        const version = probeDb.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as {
+          value: string;
+        };
+        expect(version?.value).toBe('6');
+        // Whatever the fault, no alias row can survive it.
+        const exists = probeDb
+          .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='member_aliases'`)
+          .all();
+        if (exists.length > 0) {
+          const n = probeDb.prepare('SELECT COUNT(*) AS n FROM member_aliases').get() as { n: number };
+          expect(n.n).toBe(0);
+        }
+        probeDb.close();
+
+        const recovered = openDb(dbPath);
+        try {
+          const recoveredVersion = recovered
+            .prepare(`SELECT value FROM config WHERE key = 'schema_version'`)
+            .get() as { value: string };
+          expect(recoveredVersion.value).toBe(String(CURRENT_SCHEMA_VERSION));
+          const shares = recovered.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
+          expect(shares.n).toBe(2);
+        } finally {
+          recovered.close();
+        }
+      });
+    }
+
+    it('carries a real v6 install to 7 with its shares and recipients intact', () => {
+      const dbPath = join(dir, 'upgrade67.db');
+      createV6Db(dbPath);
+      const upgraded = openDb(dbPath);
+      try {
+        expect(readConfig(upgraded, 'schema_version')).toBe(String(CURRENT_SCHEMA_VERSION));
+        const shares = upgraded.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number };
+        expect(shares.n).toBe(2);
+        const aliases = upgraded.prepare('SELECT COUNT(*) AS n FROM member_aliases').get() as { n: number };
+        expect(aliases.n).toBe(0);
+      } finally {
+        upgraded.close();
+      }
+    });
   });
 
   // Migration mints nothing: member_tokens must be an empty table
@@ -1112,7 +1196,7 @@ describe('schema migration', () => {
       const version = opened.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as {
         value: string;
       };
-      expect(version.value).toBe('6');
+      expect(version.value).toBe(String(CURRENT_SCHEMA_VERSION));
       const teams = opened.prepare('SELECT COUNT(*) AS n FROM teams').get() as { n: number };
       expect(teams.n).toBe(0);
     } finally {
@@ -1141,7 +1225,7 @@ describe('schema migration', () => {
       const version = opened.prepare(`SELECT value FROM config WHERE key = 'schema_version'`).get() as {
         value: string;
       };
-      expect(version.value).toBe('6');
+      expect(version.value).toBe(String(CURRENT_SCHEMA_VERSION));
       const cols = opened.prepare('PRAGMA table_info(shares)').all() as { name: string }[];
       expect(cols.some((c) => c.name === 'stale_at')).toBe(true);
       expect(cols.some((c) => c.name === 'team_id')).toBe(true);
