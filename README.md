@@ -225,6 +225,114 @@ SHARED: 2 days ago — Sunday, 06-09-2026
 RELEVANCE: recent
 ```
 
+### Scoping a share to one repository
+
+Most shares are for the whole team. Some aren't — a backend deploy note
+shouldn't reach a frontend engineer's session, and a note about one service
+shouldn't reach someone working on an unrelated one. Publishing is opt-in:
+your assistant sets a project scope only when the note is genuinely about one
+repository, never just because you happened to be sitting in it — "I'm out
+sick today" published from inside a repo is still team-wide.
+
+The scope key is your git remote (`git remote get-url origin`), folded to one
+form regardless of how it's written — `https://github.com/acme/api.git`,
+`git@github.com:acme/api.git`, and every other spelling of the same remote
+all resolve to `github.com/acme/api`. There's no separate ID to set up or
+remember; it's the one thing about a repository that's already the same for
+everyone on the team.
+
+Reading is automatic. Each session resolves its own remote the same way and
+narrows the digest to that repository's shares plus every team-wide one — you
+never ask for it, and there's nothing to configure. **A reader outside any
+repository, or in a repository with no remote, sees the entire board** —
+narrowing only ever happens for a reader who is themselves inside the
+matching repo, so nobody loses shares by working from a scratch directory.
+
+A scoped share says so, right on its line:
+
+```
+- id=shr_75c1350c76bb | BLOCKING | from Ann | 3 hours ago (Tuesday, 08-09-2026) | github.com/acme/api
+    Auth refactor lands Friday.
+```
+
+That's what tells a colleague on a different repository why they never saw
+it — not silence, but a project scope that plainly wasn't theirs.
+
+### Addressing a share to specific people
+
+Sometimes a note is for one person, not the whole team or even one
+repository — *"can you review PR #482 before EOD?"* doesn't belong in
+everyone's digest. Your assistant sets `recipients` only when you actually
+name someone; an unqualified "share this" is still team-wide, same as
+leaving `project` off. The two combine — a note for one person about one
+repo — but most shares use neither.
+
+They narrow differently, though. Scope (above) only ever narrows for a
+reader who is themselves inside the matching repo — everyone else still
+sees a scoped share. Addressing is stricter: once a share names people, it
+reaches **only** them, full stop, regardless of where anyone is working.
+
+Captured from a live server: one team lead (Ana) and three invited
+teammates — Priya, Sam, and Maya — each already connected once.
+
+**An unscoped share reaches all three.** Ana shares *"Standup moved to 10am
+starting Monday"* with neither `project` nor `recipients` set. Priya's,
+Sam's, and Maya's `unread` all show it.
+
+**A share scoped to one repository reaches only a reader in that repo.**
+Ana shares *"API auth middleware refactor lands Friday"* scoped to
+`github.com/acme/api`. Sam, narrowed to that same repo, sees it:
+
+```
+- [shr_ab410596cd6f] HEADS-UP from ana · just now (Tuesday, 08-09-2026) | github.com/acme/api: API auth middleware refactor lands Friday.
+```
+
+Maya, narrowed to a different repo (`github.com/acme/web`), doesn't — her
+digest has only the team-wide standup note.
+
+**An addressed share reaches only its recipient.** Ana addresses *"Can you
+review PR #482 before EOD?"* to Sam alone (`recipients:
+["sam@example.com"]`). Sam's digest marks it **to you** — never the
+recipient list itself, which is nobody else's business to see:
+
+```
+- [shr_ff6f1bd38b9d] HEADS-UP from ana · just now (Tuesday, 08-09-2026) | to you: Can you review PR #482 before EOD?
+```
+
+Priya, who wasn't named, doesn't see it at all — her digest still has only
+the team-wide and scoped notes. Nor can she reach it any other way: it isn't
+in her `list_shares`, and asking for it by id — or asking who it went to —
+gets her the same *"no share with id …"* that a completely made-up id gets.
+Being addressed isn't a delivery preference, it's who the share belongs to.
+
+**Receipts narrow the same way.** Asking "who's seen the PR share?" reports
+only the person it was actually addressed to:
+
+```
+0 viewed, 0 dismissed. Not yet seen by: sam@example.com (last seen just now).
+```
+
+**Every recipient must already be a connected teammate** — invited *and*
+having opened their assistant at least once against this server. An address
+that was never invited is refused outright, naming it:
+
+```
+not on this team: ghost@nowhere.com. Check the address — a typo here would
+address the share to nobody — or invite them (`teamshare invite <email>`)
+before addressing a share to them.
+```
+
+An address that **was** invited but hasn't connected yet gets a different
+answer, because the fix is different — there's nothing to check, they just
+need to show up once:
+
+```
+invited but not yet connected: newhire@example.com. They need to connect
+once (open their assistant so it authenticates against this server) before
+you can address a share to them directly — a team-wide share still reaches
+them in the meantime.
+```
+
 ### Taking something back
 
 Two ways, and they differ in what survives:
@@ -382,12 +490,23 @@ Personal token (input hidden):
 teamshare connect — result
 
   [written]       Cursor -> /Users/you/.cursor/mcp.json (backup: /Users/you/.cursor/mcp.json.teamshare-backup-1788099903701)
+                  + session digest and mid-session nudge -> /Users/you/.cursor/hooks.json
 
 1 assistant(s) configured automatically.
 Restart the affected assistant(s) to pick up the change.
 ```
 
 Restart whatever it configured. Done.
+
+**That second Cursor line.** MCP lets Cursor *ask* teamshare for shares. It does
+not put a teammate's "don't merge src/auth" in front of you when you never
+thought to ask — so on Cursor, connect also installs the same two hooks the
+Claude Code plugin ships: the unread digest as a session starts, and a one-line
+nudge mid-session when a teammate publishes something. They arrive as two files
+(`~/.teamshare/hooks/teamshare-hook.mjs` and your token in `~/.teamshare.json`,
+owner-only) plus an entry per event in `~/.cursor/hooks.json` — merged into
+whatever hooks you already have there, backed up first, and replaced rather than
+duplicated if you run connect again.
 
 **Want to see what it'll touch first?**
 

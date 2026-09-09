@@ -7,6 +7,7 @@ import {
   type Db, type TeamScope,
 } from './db.js';
 import { createShare } from './shares.js';
+import { normalizeProject } from './project.js';
 import { createApp, type AppOptions } from './app.js';
 import { authenticate } from './http.js';
 
@@ -169,6 +170,56 @@ describe('GET /unread', () => {
     const res = await fetch(`${base}/unread`, { headers: headers() });
     const body = await res.json();
     expect(body.team).toBe('default');
+  });
+});
+
+describe('GET /unread?project=', () => {
+  it("passes the caller's project through from the query string", async () => {
+    createShare(scope, 'adnan@team.com', { what: 'api thing', priority: 'fyi', project: 'github.com/acme/api' }, NOW);
+    createShare(scope, 'adnan@team.com', { what: 'web thing', priority: 'fyi', project: 'github.com/acme/web' }, NOW);
+    const res = await fetch(`${base}/unread?project=github.com/acme/api`, { headers: headers() });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.shares.map((s: { what: string }) => s.what)).toContain('api thing');
+    expect(body.shares.map((s: { what: string }) => s.what)).not.toContain('web thing');
+  });
+
+  // The loop closed end to end, at the only place a user ever felt it: the
+  // hook normalizes the remote, sends it here, and this route decides. When
+  // the two disagreed about a perfectly ordinary remote, the answer was 400
+  // on every session that machine would ever start, and that reader never saw
+  // another share. Each of these three was verified reachable by the
+  // whole-branch review; each used to be a 400.
+  it('accepts every key normalizeProject can actually mint, not a narrower subset of them', async () => {
+    createShare(scope, 'adnan@team.com', { what: 'gerrit thing', priority: 'fyi' }, NOW);
+    for (const remote of [
+      'https://gerrit.example.com/a/~sam/tools',
+      'https://gitlab.com/acme/caf\u00e9',
+      'https://github.com/acme/api?ref=main',
+    ]) {
+      const key = normalizeProject(remote);
+      expect(key, remote).not.toBeNull();
+      const res = await fetch(`${base}/unread?project=${encodeURIComponent(key as string)}`, {
+        headers: headers(),
+      });
+      expect(res.status, `${remote} -> ${key}`).toBe(200);
+    }
+  });
+
+  it('rejects a project key that is not one', async () => {
+    // A malformed key must not silently widen the digest back to everything.
+    const res = await fetch(`${base}/unread?project=${encodeURIComponent('../../etc')}`, {
+      headers: headers(),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('a reader with no project of their own is not narrowed at all', async () => {
+    createShare(scope, 'adnan@team.com', { what: 'api thing', priority: 'fyi', project: 'github.com/acme/api' }, NOW);
+    const res = await fetch(`${base}/unread`, { headers: headers() });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.shares.map((s: { what: string }) => s.what)).toContain('api thing');
   });
 });
 

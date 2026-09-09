@@ -27,7 +27,8 @@ import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, neutralizeFences, fetchUnread } from './shared.mjs';
+import { loadConfig, neutralizeFences, fetchUnread, resolveProject } from './shared.mjs';
+import { detectHost, normalizePayload, renderResponse } from './hosts.mjs';
 
 const FETCH_TIMEOUT_MS = 1200;
 const DEFAULT_POLL_SECONDS = 60;
@@ -104,9 +105,9 @@ export function selectNew({ shares, seenIds, seeding }) {
 }
 
 export function renderAnnouncement(shares) {
-  // A teammate controls sender_name and what, so the fence has to be something
-  // they cannot predict — otherwise they close it early and the rest of their
-  // share is read as instructions.
+  // A teammate controls sender_name, what and project, so the fence has to be
+  // something they cannot predict — otherwise they close it early and the rest
+  // of their share is read as instructions.
   const tag = randomBytes(6).toString('hex');
   const lines = shares.map((s) => {
     // Mid-session arrivals are minutes old, so the age is nearly always "just
@@ -114,8 +115,14 @@ export function renderAnnouncement(shares) {
     // teammate is typing this at you right now" and "this was waiting".
     const grade = s.relevance && s.relevance !== 'new' ? ` | ${s.relevance}` : '';
     const when = s.age && s.day ? `${s.age} (${s.day})` : s.day || s.created_at;
+    // Neutralised for the same reason as `what` — see session-start.mjs's
+    // identical line. `project` is author-supplied text and can forge a fence.
+    const scope = s.project ? ` | ${neutralizeFences(s.project)}` : '';
+    // "to you" rather than the recipient list — see session-start.mjs's
+    // identical comment.
+    const addressed = s.to_me ? ' | to you' : '';
     return (
-      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}\n` +
+      `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}${scope}${addressed}\n` +
       `    ${neutralizeFences(s.what)}`
     );
   });
@@ -142,7 +149,15 @@ export function renderAnnouncement(shares) {
 }
 
 export function renderSystemMessage(shares) {
-  const names = [...new Set(shares.map((s) => String(s.sender_name).trim()).filter(Boolean))];
+  // Neutralised too, though this line goes to the host's user-visible channel
+  // rather than into the model's context (renderResponse puts it in
+  // `systemMessage` on Claude Code and drops it entirely on Codex/Cursor).
+  // Every OTHER teammate-authored string either hook emits goes through
+  // neutralizeFences; leaving this one out made the rule "remember to call it"
+  // instead of "we always call it", and that is how the `project` hole above
+  // survived two reviews. No host is known to feed systemMessage back to the
+  // model, so this is consistency, not a demonstrated escape.
+  const names = [...new Set(shares.map((s) => neutralizeFences(String(s.sender_name)).trim()).filter(Boolean))];
   const who = names.length === 0 ? 'a teammate' : names.length <= 2 ? names.join(' and ') : `${names[0]} and ${names.length - 1} others`;
   const blocking = shares.some((s) => String(s.priority).toLowerCase() === 'blocking');
   return `teamshare: ${shares.length} new share${shares.length === 1 ? '' : 's'} from ${who}${blocking ? ' (blocking)' : ''}`;
@@ -165,7 +180,8 @@ async function main() {
   const cfg = loadConfig(process.env);
   if (!cfg) return;
 
-  const sessionId = typeof payload.session_id === 'string' ? payload.session_id : 'unknown';
+  const host = detectHost(payload, process.env);
+  const { sessionId, cwd } = normalizePayload(payload, host);
   const state = readPollState();
   const entry = state.servers[cfg.url];
   const nowMs = Date.now();
@@ -178,7 +194,8 @@ async function main() {
 
   let digest = null;
   try {
-    const res = await fetchUnread(cfg, FETCH_TIMEOUT_MS);
+    const project = resolveProject(cwd);
+    const res = await fetchUnread(cfg, FETCH_TIMEOUT_MS, project);
     // A rejected token is worth knowing about, but this is the wrong place to
     // say so — session start already reports it, and repeating it on every
     // prompt would be its own kind of broken. Stay quiet and let the poll
@@ -204,15 +221,13 @@ async function main() {
 
   if (announce.length === 0) return;
 
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'UserPromptSubmit',
-        additionalContext: renderAnnouncement(announce),
-      },
-      systemMessage: renderSystemMessage(announce),
-    }),
-  );
+  const out = renderResponse({
+    host,
+    event: 'prompt-submit',
+    context: renderAnnouncement(announce),
+    userMessage: renderSystemMessage(announce),
+  });
+  if (out) process.stdout.write(out);
 }
 
 main().then(

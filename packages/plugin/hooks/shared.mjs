@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 // Kept byte-identical to DEFAULT_SERVER_URL in packages/server/src/
 // teamshare-team.mjs and teamshare-connect.mjs. This one IS a hand-maintained
@@ -75,16 +76,84 @@ export function neutralizeFences(text) {
     .replace(TEAMSHARE_TAG, '[redacted fence marker]');
 }
 
-export async function fetchUnread(cfg, timeoutMs) {
+export async function fetchUnread(cfg, timeoutMs, project) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${cfg.url}/unread`, {
+    const url = new URL(`${cfg.url}/unread`);
+    if (project) url.searchParams.set('project', project);
+    const res = await fetch(url, {
       headers: { Authorization: `Bearer ${cfg.token}` },
       signal: controller.signal,
     });
     return { status: res.status, digest: res.ok ? await res.json() : null };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// A hand-maintained copy of PROJECT_KEY_SHAPE in
+// packages/server/src/project.ts, which carries the reasoning. In short: it is
+// the one definition of a project key's shape, and the server tests every
+// ?project= against it. A key this file mints that the server would reject is
+// a 400 on every session that machine ever starts — and a hook cannot show a
+// digest it never received. packages/plugin/tests/bin-sync.test.mjs asserts
+// the round trip: every key either copy produces is one this shape accepts.
+const PROJECT_KEY_SHAPE = /^[a-z0-9][a-z0-9.-]*\/[^\s\p{Cc}\p{Cf}]+$/u;
+
+// A hand-maintained copy of normalizeProject in packages/server/src/project.ts
+// — this file ships inside packages/plugin and is bundled into
+// standalone.mjs, so it cannot import from packages/server. Kept in sync by
+// packages/plugin/tests/bin-sync.test.mjs, which runs both against a shared
+// table of inputs (including the SCP-vs-URL-port distinction below) rather
+// than comparing source text, since this copy carries no TypeScript types.
+//
+// SCP syntax (`user@host:path`) has no `://` anywhere in it — that is the one
+// thing that tells it apart from a URL, and checking for a scheme FIRST is
+// what keeps an explicit port (`ssh://git@host:22/owner/repo`) from being
+// mistaken for the SCP host:path separator and folded to a different key
+// than the same repo's HTTPS form.
+export function normalizeProjectKey(remoteUrl) {
+  const raw = String(remoteUrl || '').trim();
+  if (!raw) return null;
+  let rest;
+  if (!raw.includes('://')) {
+    // git@host:owner/repo -> host/owner/repo
+    const scp = /^[^@\s]+@([^:\s]+):(.+)$/.exec(raw);
+    if (!scp) return null;
+    rest = `${scp[1]}/${scp[2]}`;
+  } else {
+    const m = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/]+)(\/.*)?$/i.exec(raw);
+    if (!m) return null;
+    // The host may carry an explicit port; strip it before folding.
+    const host = m[1].replace(/:\d+$/, '');
+    rest = host + (m[2] ?? '');
+  }
+  const key = rest.replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase();
+  // The shape above IS the guard, exactly as on the server: whatever comes
+  // back from here is a key /unread will accept.
+  return PROJECT_KEY_SHAPE.test(key) ? key : null;
+}
+
+// The reader's own repo, resolved once per hook run from the payload's
+// working directory — never process.cwd(), which need not agree with it.
+// Never a reason to fail a session: no git binary, no repo, no remote, or a
+// cwd that no longer exists all land here as "no project", and a reader with
+// no project sees the whole board rather than an error.
+export function resolveProject(cwd) {
+  if (!cwd) return undefined;
+  try {
+    const remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      cwd,
+      timeout: 800,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString('utf8')
+      .trim();
+    return normalizeProjectKey(remote) ?? undefined;
+  } catch {
+    // No git, no repo, no remote: the reader has no project and sees the
+    // whole board. Never a reason to fail a session start.
+    return undefined;
   }
 }

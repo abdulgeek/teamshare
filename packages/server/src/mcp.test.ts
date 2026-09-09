@@ -534,7 +534,7 @@ describe('mcp surface', () => {
       arguments: { what: 'forged as adnan', priority: 'blocking' },
     });
     const forgedShareId = JSON.parse(textOf(published)).id as string;
-    const forgedShare = getShare(scope, forgedShareId);
+    const forgedShare = getShare(scope, forgedShareId, 'priya@team.com');
     expect(forgedShare?.sender_email).toBe('priya@team.com');
     expect(forgedShare?.sender_email).not.toBe('adnan@team.com');
 
@@ -543,7 +543,7 @@ describe('mcp surface', () => {
     // a forged 'viewed' receipt would otherwise permanently suppress
     // delivery of the share to the real Adnan, who never actually saw it.
     await forger.callTool({ name: 'read_share', arguments: { id: shareId } });
-    const receipts = getReceipts(scope, shareId, NOW, 14)!;
+    const receipts = getReceipts(scope, shareId, 'sam@team.com', NOW, 14)!;
     expect(receipts.viewed).toContain('priya@team.com');
     expect(receipts.viewed).not.toContain('adnan@team.com');
 
@@ -557,5 +557,326 @@ describe('mcp surface', () => {
     const adnanRow = listMembers(scope).find((m) => m.email === 'adnan@team.com');
     expect(priyaRow?.last_seen).toBe(NOW);
     expect(adnanRow?.last_seen).toBe(T0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Project scoping (Task 6): the `share` tool accepts a raw git remote in any
+// form and normalizes it server-side — via the exact function a reader's own
+// hook uses to compute their project key — so an LLM caller never has to
+// replicate normalizeProject's folding rules by hand to land on a key that
+// will actually match. `unread` accepts the same and narrows on it.
+// ---------------------------------------------------------------------------
+describe('mcp surface: project scoping', () => {
+  it('normalizes a raw remote URL passed to `share` before storing it', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    const created = await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'api thing', priority: 'fyi', project: 'https://github.com/acme/api.git' },
+    });
+    await adnan.close();
+    const id = JSON.parse(textOf(created)).id as string;
+    expect(getShare(scope, id, 'adnan@team.com')?.project).toBe('github.com/acme/api');
+  });
+
+  it('rejects a `share` project that is not recognizable as a git remote, as an isError result', async () => {
+    const client = await connectWithToken(adnanToken);
+    const res = await client.callTool({
+      name: 'share',
+      arguments: { what: 'ok', priority: 'fyi', project: 'not a remote' },
+    });
+    expect(res.isError).toBe(true);
+    await client.close();
+  });
+
+  it('narrows `unread` to one repository plus team-wide shares, and shows the scope on the line', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'api thing', priority: 'fyi', project: 'github.com/acme/api' },
+    });
+    await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'web thing', priority: 'fyi', project: 'github.com/acme/web' },
+    });
+    await adnan.callTool({ name: 'share', arguments: { what: 'team-wide note', priority: 'fyi' } });
+    await adnan.close();
+
+    const priya = await connectWithToken(priyaToken);
+    const digest = textOf(
+      await priya.callTool({ name: 'unread', arguments: { project: 'github.com/acme/api' } }),
+    );
+    await priya.close();
+
+    expect(digest).toContain('api thing');
+    expect(digest).toContain('github.com/acme/api');
+    expect(digest).toContain('team-wide note');
+    expect(digest).not.toContain('web thing');
+  });
+
+  it('rejects an unread project that is not recognizable as a git remote, as an isError result', async () => {
+    const client = await connectWithToken(priyaToken);
+    const res = await client.callTool({ name: 'unread', arguments: { project: 'not a remote' } });
+    expect(res.isError).toBe(true);
+    await client.close();
+  });
+});
+
+// Task 8: surface Task 7's addressed shares through the `share`/`unread`
+// tools. Verbatim from the task-8 brief's own Step 1 tests, plus coverage
+// for the failure path the brief calls out explicitly: createShare THROWS on
+// a bad recipient list and this handler has to route that through fail()
+// itself, rather than let it surface as an MCP transport error.
+describe('mcp surface: addressed shares', () => {
+  it('lets one member address a share to another, and shows who it went to', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'PR is ready', priority: 'fyi', recipients: ['priya@team.com'] },
+    });
+    await adnan.close();
+
+    const priya = await connectWithToken(priyaToken);
+    const digest = textOf(await priya.callTool({ name: 'unread', arguments: {} }));
+    expect(digest).toContain('PR is ready');
+    expect(digest).toContain('to you');
+    await priya.close();
+
+    const sam = await connectWithToken(samToken);
+    expect(textOf(await sam.callTool({ name: 'unread', arguments: {} }))).toContain('No unread');
+    await sam.close();
+  });
+
+  it('refuses a recipient who is not on the team', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    const res = await adnan.callTool({
+      name: 'share', arguments: { what: 'x', priority: 'fyi', recipients: ['stranger@elsewhere.com'] },
+    });
+    // Silently dropping an unknown recipient would look like a delivered share
+    // that nobody ever receives.
+    expect(res.isError).toBeTruthy();
+    await adnan.close();
+  });
+
+  it('names the offending address in the isError result, not a generic failure', async () => {
+    // Pins down WHY the above isError test passes: the failure must be
+    // createShare's own message routed through fail(), not some other
+    // generic error that happens to also set isError.
+    const adnan = await connectWithToken(adnanToken);
+    const res = await adnan.callTool({
+      name: 'share', arguments: { what: 'x', priority: 'fyi', recipients: ['stranger@elsewhere.com'] },
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('stranger@elsewhere.com');
+    await adnan.close();
+  });
+
+  it('does not publish anything when the recipient list is rejected', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({
+      name: 'share', arguments: { what: 'never published', priority: 'fyi', recipients: ['stranger@elsewhere.com'] },
+    });
+    expect(textOf(await adnan.callTool({ name: 'list_shares', arguments: {} }))).toBe('No shares match.');
+    await adnan.close();
+  });
+
+  it('does not mark a team-wide share "to you", and does not print a recipient list at all', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({ name: 'share', arguments: { what: 'for everyone', priority: 'fyi' } });
+    await adnan.callTool({
+      name: 'share',
+      arguments: { what: 'for sam only', priority: 'fyi', recipients: ['sam@team.com'] },
+    });
+    await adnan.close();
+
+    const sam = await connectWithToken(samToken);
+    const digest = textOf(await sam.callTool({ name: 'unread', arguments: {} }));
+    await sam.close();
+
+    const wideLine = digest.split('\n').find((l) => l.includes('for everyone'));
+    const addressedLine = digest.split('\n').find((l) => l.includes('for sam only'));
+    expect(wideLine).not.toContain('to you');
+    expect(addressedLine).toContain('to you');
+    // The other recipient's own address is never printed to a bystander.
+    expect(digest).not.toContain('priya@team.com');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: an addressed share is confidential on EVERY surface, not only
+// in the digest. Before this, `unread` was the one place AND_RECIPIENT
+// applied — a delivery filter, not access control — so a non-recipient could
+// still list the share, read its full body (silently recording a `viewed`
+// receipt against the author's own data), and learn the recipient list from
+// `receipts`. These are the tool-level proofs, deliberately black-box: they
+// call the same tools an assistant calls, so they hold regardless of where
+// the gate ends up living.
+//
+// The ruling they encode: a share addressed to people you are not among is
+// INVISIBLE to you — the same "no share with id X" a foreign team's share
+// already gets, no third state. The author and the recipients can see it.
+// ---------------------------------------------------------------------------
+describe('mcp surface: an addressed share is confidential everywhere', () => {
+  const SECRET_WHAT = 'SECRET for sam only';
+  const SECRET_WHY = 'the body priya must never see';
+
+  // Adnan addresses a share to Sam. Priya is on the team and is NOT a
+  // recipient — she is the bystander every test below is about.
+  async function addressedToSam(): Promise<string> {
+    const adnan = await connectWithToken(adnanToken);
+    const res = await adnan.callTool({
+      name: 'share',
+      arguments: {
+        what: SECRET_WHAT,
+        why: SECRET_WHY,
+        priority: 'fyi',
+        recipients: ['sam@team.com'],
+      },
+    });
+    await adnan.close();
+    return JSON.parse(textOf(res)).id as string;
+  }
+
+  function receiptRowsFor(id: string): { member_email: string; status: string }[] {
+    // Read straight from the table rather than through getReceipts: an
+    // addressed share's receipt summary only ever reports its recipients, so
+    // a bogus row written for a non-recipient would be invisible there — the
+    // exact reason this leak also silently corrupted the author's data.
+    return db
+      .prepare('SELECT member_email, status FROM receipts WHERE share_id = ?')
+      .all(id) as { member_email: string; status: string }[];
+  }
+
+  it('read_share: a non-recipient is told there is no such share, and no receipt is recorded for her', async () => {
+    const id = await addressedToSam();
+
+    const priya = await connectWithToken(priyaToken);
+    const res = await priya.callTool({ name: 'read_share', arguments: { id } });
+    await priya.close();
+
+    expect(res.isError).toBe(true);
+    // Byte-for-byte the answer a foreign team's share id gets: no third state
+    // that would confirm the share exists.
+    expect(textOf(res)).toBe(`no share with id ${id}`);
+    expect(textOf(res)).not.toContain(SECRET_WHAT);
+    expect(textOf(res)).not.toContain(SECRET_WHY);
+    // A receipt for someone who cannot see the share both leaks and corrupts
+    // the author's receipt data.
+    expect(receiptRowsFor(id).map((r) => r.member_email)).not.toContain('priya@team.com');
+  });
+
+  it('read_share: the recipient and the author still get the full body', async () => {
+    const id = await addressedToSam();
+
+    const sam = await connectWithToken(samToken);
+    const asSam = textOf(await sam.callTool({ name: 'read_share', arguments: { id } }));
+    await sam.close();
+    expect(asSam).toContain(SECRET_WHAT);
+    expect(asSam).toContain(SECRET_WHY);
+
+    const adnan = await connectWithToken(adnanToken);
+    const asAuthor = textOf(await adnan.callTool({ name: 'read_share', arguments: { id } }));
+    await adnan.close();
+    expect(asAuthor).toContain(SECRET_WHAT);
+    expect(asAuthor).toContain(SECRET_WHY);
+
+    // Sam actually read it, so his receipt IS recorded — the gate must not
+    // cost the author the receipts they publish for.
+    expect(receiptRowsFor(id).map((r) => r.member_email)).toContain('sam@team.com');
+  });
+
+  it('list_shares: a non-recipient never sees an addressed share, not even its `what`', async () => {
+    const id = await addressedToSam();
+
+    const priya = await connectWithToken(priyaToken);
+    const listed = textOf(await priya.callTool({ name: 'list_shares', arguments: {} }));
+    await priya.close();
+
+    expect(listed).not.toContain(id);
+    expect(listed).not.toContain(SECRET_WHAT);
+    expect(listed).toBe('No shares match.');
+  });
+
+  it('list_shares: the author and the recipient still see it', async () => {
+    const id = await addressedToSam();
+
+    const sam = await connectWithToken(samToken);
+    const asSam = textOf(await sam.callTool({ name: 'list_shares', arguments: {} }));
+    await sam.close();
+    expect(asSam).toContain(id);
+    expect(asSam).toContain(SECRET_WHAT);
+
+    const adnan = await connectWithToken(adnanToken);
+    const asAuthor = textOf(await adnan.callTool({ name: 'list_shares', arguments: {} }));
+    await adnan.close();
+    expect(asAuthor).toContain(id);
+  });
+
+  it('list_shares: a team-wide share still reaches everyone', async () => {
+    // The gate must exclude shares addressed to OTHERS, never shares
+    // addressed to nobody — that is the whole team, and always was.
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({ name: 'share', arguments: { what: 'for everyone', priority: 'fyi' } });
+    await adnan.close();
+
+    const priya = await connectWithToken(priyaToken);
+    expect(textOf(await priya.callTool({ name: 'list_shares', arguments: {} }))).toContain('for everyone');
+    await priya.close();
+  });
+
+  it('receipts: a non-recipient cannot learn who a share was addressed to', async () => {
+    const id = await addressedToSam();
+
+    const priya = await connectWithToken(priyaToken);
+    const res = await priya.callTool({ name: 'receipts', arguments: { id } });
+    await priya.close();
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toBe(`no share with id ${id}`);
+    // The leak this closes: "Not yet seen by: sam@team.com" handed the
+    // recipient list to any team member, and list_shares handed them the id
+    // to ask about.
+    expect(textOf(res)).not.toContain('sam@team.com');
+  });
+
+  it('receipts: the author and the recipient still get the summary', async () => {
+    const id = await addressedToSam();
+
+    const adnan = await connectWithToken(adnanToken);
+    const asAuthor = textOf(await adnan.callTool({ name: 'receipts', arguments: { id } }));
+    await adnan.close();
+    expect(asAuthor).toContain('sam@team.com');
+    expect(asAuthor).toContain('0 viewed');
+
+    const sam = await connectWithToken(samToken);
+    const asSam = await sam.callTool({ name: 'receipts', arguments: { id } });
+    await sam.close();
+    expect(asSam.isError).toBeFalsy();
+  });
+
+  it('receipts on a team-wide share is unchanged: every member may ask', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    const created = await adnan.callTool({
+      name: 'share', arguments: { what: 'for everyone', priority: 'fyi' },
+    });
+    await adnan.close();
+    const id = JSON.parse(textOf(created)).id as string;
+
+    const priya = await connectWithToken(priyaToken);
+    const res = await priya.callTool({ name: 'receipts', arguments: { id } });
+    await priya.close();
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('Not yet seen by');
+  });
+
+  it('acknowledge: a non-recipient cannot record a dismissal against a share she cannot see', async () => {
+    const id = await addressedToSam();
+
+    const priya = await connectWithToken(priyaToken);
+    const res = await priya.callTool({ name: 'acknowledge', arguments: { id } });
+    await priya.close();
+
+    expect(res.isError).toBe(true);
+    expect(receiptRowsFor(id)).toEqual([]);
   });
 });

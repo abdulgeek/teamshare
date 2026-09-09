@@ -267,6 +267,16 @@ pure FYI), up to 5 tags (≤20 characters each), and a `priority` of `fyi`,
 `heads-up`, or `blocking`. Pick `blocking` only when a teammate doing normal
 work would actually break something or waste real time without knowing it.
 
+Two more fields narrow who a share reaches, both optional and both off by
+default (a share with neither is team-wide):
+
+- **`project`** scopes it to one repository. See [Schema and scoping
+  rules](#schema-and-scoping-rules) below for exactly how a git remote
+  becomes the key.
+- **`recipients`** addresses it to specific people (≤20 addresses). See
+  [Recipients](#recipients) below for the validation rules and the one real
+  restriction — every address has to belong to someone already connected.
+
 Noise is rejected before it ever reaches the team, not just discouraged: the
 caps above are enforced by the server itself, on every field, regardless of
 what the client sends. Go over one and the tool call fails outright — `Too
@@ -292,6 +302,104 @@ version: it stops showing up in `unread` for everyone, but stays in
 `list_shares` history and is still readable via `read_share`, labelled `no
 longer relevant`. Idempotent — marking an already-stale share again is a
 no-op.
+
+## Schema and scoping rules
+
+Two columns were added to the original schema, each as its own migration
+step (`schema_version` in `config`, applied automatically on `serve`):
+
+- **`schema_version` 5 — `shares.project TEXT`** (nullable, plain
+  `ALTER TABLE`; no existing row changes shape). Indexed as `(team_id,
+  project)`, since every `unread` query filters on both together.
+- **`schema_version` 6 — the `share_recipients` table**: `(team_id,
+  share_id, email)`, primary key on all three, `FOREIGN KEY (team_id,
+  share_id) REFERENCES shares(team_id, id) ON DELETE CASCADE` — the same
+  composite-FK pattern `receipts` uses, so retracting a share can never
+  leave an orphaned recipient row behind. Indexed on `(team_id, email)` for
+  the reverse lookup ("what is addressed to me").
+
+**The project-key rule.** A project is never a name you make up — it's your
+git remote (`git remote get-url origin`), folded to one canonical form so
+everyone on the team arrives at the same key regardless of how they cloned:
+`https://github.com/acme/api.git`, `git@github.com:acme/api.git`, and
+`ssh://git@github.com:22/acme/api` all normalize to `github.com/acme/api`
+(scheme and `.git` suffix stripped, host lowercased, an explicit port
+dropped before folding so it can't be mistaken for the SCP-style
+`host:path` separator). A value that doesn't fold to `host/owner/repo` —
+no remote, a local-only repo, a bare directory name — normalizes to
+nothing, which means "no project," never a scope nobody can ever match. The
+`share`/`unread` tools and the `GET /unread?project=` query parameter all
+accept either a raw remote (any form above) or an already-normalized key
+(what a client would see echoed back on an earlier digest line); either
+way, a value that isn't recognizable as one or the other is a hard failure,
+never a silent fallback to "no project" — that would widen the result back
+to the whole team exactly when a caller asked to see less of it.
+
+Reading is automatic and narrows only one way: a reader with no project of
+their own (not sitting in any repo) is never narrowed, and sees every
+team-wide and every scoped share. A reader inside a repo sees that repo's
+scoped shares plus every team-wide one — never another repo's.
+
+## Recipients
+
+`recipients` addresses a share to specific people instead of the whole
+team. The rules, enforced server-side regardless of what the client sends:
+
+- **Omitted or `[]` means the whole team** — the only two spellings of
+  "team-wide." A list that normalizes away to nothing (all blanks, or only
+  the sender once duplicates and the sender are removed) is an **error**,
+  never a silent fallback to team-wide — a list you actually wrote
+  collapsing to broadcast would be exactly backwards from what you asked
+  for.
+- **Every address is validated** the same way an invite email is
+  (`validateEmailAddress`): real shape, no placeholder, no control
+  characters, ≤254 characters. A blank entry is rejected outright rather
+  than filtered — filtering is what would let `['   ']` quietly become
+  "everyone."
+- **Up to 20 addresses per share.** Duplicates and case variants collapse
+  to one person; the sender is always dropped (a share never notifies its
+  own author), and `notified` counts people, not list entries.
+- **Every recipient must already be a connected member** — a row in
+  `members`, which is only ever written on that person's first successful
+  authentication. This is the one restriction worth knowing about before it
+  surprises you: inviting someone (`teamshare invite`) mints their
+  credential, but doesn't make them addressable until they've actually used
+  it once. A team-wide share still reaches an invited-but-unconnected
+  person in the meantime; only direct addressing is unavailable, and only
+  until they connect. The error names which case applies and what to do —
+  a genuinely unknown address says to check it or invite the person; an
+  invited-but-unconnected one says to connect once, not to double-check the
+  spelling, because there's nothing wrong with the address.
+- **All-or-nothing.** If any address in the list fails validation or isn't
+  a connected member, the whole share is rejected — never published
+  addressed to only the ones that resolved.
+
+An addressed share narrows harder than a scoped one, and it narrows on
+*every* surface, not just the digest — being addressed is access control,
+not a delivery preference. For anyone the share doesn't name:
+
+- `unread` never returns it, regardless of their own project;
+- `list_shares` never lists it — not with any tag, sender, limit, or
+  `include_irrelevant` combination;
+- `read_share` and `receipts` answer `no share with id <id>` — the exact
+  reply another team's share id gets. That sameness is deliberate: "you're
+  not allowed to read this" would confirm the share exists and who it
+  concerns, which is most of what an addressed share is trying not to say;
+- no receipt is ever recorded for them, so asking about a share they can't
+  see can't quietly pollute the author's receipt data either.
+
+The author and the named recipients are the people who can see it —
+`read_share`, `list_shares` and `receipts` all work normally for them, and
+`receipts`' expected-reader set narrows to the named recipients instead of
+the whole roster. On every surface that renders it (the `unread` tool, and
+both plugin hooks), it's marked **to you** rather than listing every
+recipient — the other names on the list are other people's business, and
+telling one reader who else got the same note adds nothing for them.
+
+The gate lives in the accessors themselves (`getShare`, `listShares`,
+`recordReceipt`), which require the caller's identity and have no
+"unfiltered" default, so a new tool inherits it rather than having to
+remember it.
 
 ## A worked example
 

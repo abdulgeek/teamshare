@@ -7,6 +7,7 @@ import {
   readFileSync,
   existsSync,
   readdirSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +31,11 @@ import {
   TEAM_VERBS,
   formatWrongToolMessage,
   looksLikeServerUrl,
+  installCursorHooks,
+  CURSOR_HOOK_EVENTS,
+  installCodexHooks,
+  CODEX_HOOK_EVENTS,
+  TEAMSHARE_HOOK_SOURCE,
   DEFAULT_SERVER_URL as CONNECT_DEFAULT_SERVER_URL,
   type GitIdentity,
 } from './connect.js';
@@ -1121,5 +1127,327 @@ describe('formatArgvTokenWarning: the note printed only when the token came from
     if (!result.ok) throw new Error('unreachable');
     expect(result.tokenSource).toBe('prompt');
     expect(result.tokenSource).not.toBe('argv');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cursor hooks
+//
+// An MCP entry lets Cursor ask teamshare for shares. It does not put a
+// teammate's "don't merge src/auth" in front of anyone who did not think to
+// ask — that is what the two hooks do, and Cursor has no plugin system to
+// install them from, so `connect` writes them as files.
+// ---------------------------------------------------------------------------
+
+describe('Cursor hooks', () => {
+  it('writes Cursor hooks, a credential file, and backs up what was there', async () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    writeFileSync(join(home, '.cursor', 'hooks.json'), JSON.stringify({ version: 1, hooks: {} }));
+
+    const result = installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    expect(result.status).toBe('written');
+
+    const cfg = JSON.parse(readFileSync(join(home, '.cursor', 'hooks.json'), 'utf8'));
+    expect(Object.keys(cfg.hooks)).toEqual(expect.arrayContaining(['sessionStart', 'beforeSubmitPrompt']));
+
+    // The hook file is self-contained: no relative imports, because nothing
+    // else is copied alongside it.
+    const hook = readFileSync(join(home, '.teamshare', 'hooks', 'teamshare-hook.mjs'), 'utf8');
+    expect(hook).not.toMatch(/from '\.\//);
+    expect(hook.startsWith('#!/usr/bin/env node')).toBe(true);
+
+    // The credential the hook reads, owner-only.
+    const creds = JSON.parse(readFileSync(join(home, '.teamshare.json'), 'utf8'));
+    expect(creds).toMatchObject({ url: 'https://ts.example.com', token: 'tsm_abc' });
+    expect(statSync(join(home, '.teamshare.json')).mode & 0o777).toBe(0o600);
+
+    // Never destroy an existing config without a copy of it.
+    expect(existsSync(result.backup!)).toBe(true);
+  });
+
+  it("leaves another tool's hooks alone when it adds its own", () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    writeFileSync(join(home, '.cursor', 'hooks.json'), JSON.stringify({
+      version: 1, hooks: { stop: [{ command: 'someone-elses-tool' }] },
+    }));
+    installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    const cfg = JSON.parse(readFileSync(join(home, '.cursor', 'hooks.json'), 'utf8'));
+    expect(cfg.hooks.stop).toEqual([{ command: 'someone-elses-tool' }]);
+  });
+
+  it('writes nothing on a dry run', () => {
+    const home = tmp();
+    const result = installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc', dryRun: true });
+    expect(result.status).toBe('skipped');
+    expect(existsSync(join(home, '.cursor', 'hooks.json'))).toBe(false);
+    expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
+  });
+
+  it('a second install replaces its own entry instead of stacking a duplicate', () => {
+    // Reinstalling is the normal case, not the exception: `connect` is what
+    // you run again after a token rotation. Appending each time would mean the
+    // digest fires N times per session.
+    const home = tmp();
+    installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_rotated' });
+    const cfg = JSON.parse(readFileSync(join(home, '.cursor', 'hooks.json'), 'utf8'));
+    for (const event of CURSOR_HOOK_EVENTS) {
+      expect(cfg.hooks[event]).toHaveLength(1);
+    }
+    // ...and the credential is refreshed rather than left pointing at the old token.
+    expect(JSON.parse(readFileSync(join(home, '.teamshare.json'), 'utf8')).token).toBe('tsm_rotated');
+  });
+
+  it('keeps keys it does not own in an existing ~/.teamshare.json', () => {
+    // This file is the documented credential for the hooks, so a self-hoster
+    // may well have written it by hand. Refreshing a token is not a licence to
+    // delete the rest of it — and unlike hooks.json nothing backs it up, so
+    // preserving is the only chance.
+    const home = tmp();
+    writeFileSync(
+      join(home, '.teamshare.json'),
+      JSON.stringify({ url: 'https://old.example.com', token: 'tsm_old', pollSeconds: 45 }),
+    );
+
+    installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+
+    const creds = JSON.parse(readFileSync(join(home, '.teamshare.json'), 'utf8'));
+    expect(creds).toEqual({ url: 'https://ts.example.com', token: 'tsm_abc', pollSeconds: 45 });
+    // Rewriting an existing file does not apply `mode`; the chmod after it does.
+    expect(statSync(join(home, '.teamshare.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('points every registered event at the one hook file, telling it which host and event it is', () => {
+    // One file holds both hooks, so the command has to say which one to run —
+    // and Cursor takes a different response shape than Claude Code, so it has
+    // to say that too. Neither is inferable from an empty payload.
+    const home = tmp();
+    const result = installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    const cfg = JSON.parse(readFileSync(join(home, '.cursor', 'hooks.json'), 'utf8'));
+    for (const event of CURSOR_HOOK_EVENTS) {
+      const command: string = cfg.hooks[event][0].command;
+      expect(command).toContain('TEAMSHARE_HOST=cursor');
+      expect(command).toContain(`TEAMSHARE_HOOK_EVENT=${event}`);
+      // Quoted: a home directory with a space in it is not exotic on macOS.
+      expect(command).toContain(`node "${result.hookPath}"`);
+    }
+  });
+
+  it('keeps an unparseable hooks.json rather than silently overwriting it', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    const cfgPath = join(home, '.cursor', 'hooks.json');
+    writeFileSync(cfgPath, '{ this is not json');
+
+    const result = installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc', now: FIXED_NOW });
+    expect(result.status).toBe('written');
+    // The original is not lost — it is in the backup, byte for byte.
+    expect(readFileSync(result.backup!, 'utf8')).toBe('{ this is not json');
+    expect(JSON.parse(readFileSync(cfgPath, 'utf8')).hooks.sessionStart).toHaveLength(1);
+  });
+
+  it('reports an error instead of throwing when the write fails', () => {
+    // A failed hook install must never take down the MCP write that already
+    // succeeded, so the failure is a value, not an exception.
+    const home = tmp();
+    const result = installCursorHooks({
+      home,
+      url: 'https://ts.example.com',
+      token: 'tsm_abc',
+      fs: {
+        mkdirSync: () => { throw new Error('read-only file system'); },
+      },
+    });
+    expect(result.status).toBe('error');
+    expect(result.reason).toContain('read-only file system');
+  });
+
+  it('the embedded hook source is the whole standalone hook, not a stub', () => {
+    // If the constant were ever emptied (a bad splice, a bad merge), every
+    // Cursor install would write a zero-byte hook and report success.
+    expect(TEAMSHARE_HOOK_SOURCE.startsWith('#!/usr/bin/env node')).toBe(true);
+    expect(TEAMSHARE_HOOK_SOURCE).toContain('additional_context');
+    expect(TEAMSHARE_HOOK_SOURCE.length).toBeGreaterThan(5000);
+  });
+});
+
+describe('Codex hooks', () => {
+  // Codex's hook contract was verified live, not assumed from Cursor's or
+  // from claude-mem's codex-hooks.json — see the "Codex" section of
+  // docs/superpowers/specs/2026-09-09-cursor-hook-contract.md. A real
+  // `codex exec` run against an isolated CODEX_HOME confirmed: the config file
+  // is $CODEX_HOME/hooks.json, the event names are Claude Code's own
+  // (SessionStart, UserPromptSubmit), and each entry is a Claude-Code-shaped
+  // matcher group rather than Cursor's flat `{ command }`.
+
+  it('installs Codex hooks without disturbing an existing config', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    writeFileSync(join(home, '.codex', 'hooks.json'), JSON.stringify({
+      hooks: { Stop: [{ type: 'command', command: 'someone-elses-tool' }] },
+    }));
+
+    const result = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    expect(result.status).toBe('written');
+
+    const cfg = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
+    expect(Object.keys(cfg.hooks)).toEqual(expect.arrayContaining(['SessionStart', 'UserPromptSubmit']));
+    expect(cfg.hooks.Stop).toEqual([{ type: 'command', command: 'someone-elses-tool' }]);
+
+    // The host override is what makes the shared hook render Codex's response
+    // shape instead of inferring Claude Code from a familiar event name.
+    expect(JSON.stringify(cfg.hooks.SessionStart)).toContain('TEAMSHARE_HOST=codex');
+
+    expect(statSync(join(home, '.teamshare.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('writes nothing on a dry run', () => {
+    const home = tmp();
+    const result = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc', dryRun: true });
+    expect(result.status).toBe('skipped');
+    expect(existsSync(join(home, '.codex', 'hooks.json'))).toBe(false);
+    expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
+  });
+
+  it('a second install replaces its own entry instead of stacking a duplicate', () => {
+    const home = tmp();
+    installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_rotated' });
+    const cfg = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
+    for (const event of CODEX_HOOK_EVENTS) {
+      expect(cfg.hooks[event]).toHaveLength(1);
+    }
+    expect(JSON.parse(readFileSync(join(home, '.teamshare.json'), 'utf8')).token).toBe('tsm_rotated');
+  });
+
+  it('points every registered event at the one shared hook file, telling it which host and event it is', () => {
+    const home = tmp();
+    const result = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    const cfg = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
+    for (const event of CODEX_HOOK_EVENTS) {
+      const entry = cfg.hooks[event][0];
+      // A Claude-Code-shaped matcher group, not Cursor's flat `{ command }` —
+      // confirmed live rather than assumed to match Cursor's shape.
+      const command: string = entry.hooks[0].command;
+      expect(entry.hooks[0].type).toBe('command');
+      expect(command).toContain('TEAMSHARE_HOST=codex');
+      expect(command).toContain(`TEAMSHARE_HOOK_EVENT=${event}`);
+      expect(command).toContain(`node "${result.hookPath}"`);
+    }
+  });
+
+  it('does not invent a version field Codex was never observed to use', () => {
+    // Cursor's hooks.json carries `version: 1`; Codex's was never observed to
+    // have or need one. Writing one anyway would be a guess this task's own
+    // brief warns against.
+    const home = tmp();
+    const result = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    const cfg = JSON.parse(readFileSync(result.path, 'utf8'));
+    expect(cfg.version).toBeUndefined();
+  });
+
+  it('reports an error instead of throwing when the write fails', () => {
+    const home = tmp();
+    const result = installCodexHooks({
+      home,
+      url: 'https://ts.example.com',
+      token: 'tsm_abc',
+      fs: {
+        mkdirSync: () => { throw new Error('read-only file system'); },
+      },
+    });
+    expect(result.status).toBe('error');
+    expect(result.reason).toContain('read-only file system');
+  });
+
+  it('shares the same standalone hook file Cursor writes', () => {
+    // One file on disk, host-agnostic; TEAMSHARE_HOST at invocation time is
+    // what tells it apart. Two copies of the same content would be a second
+    // thing to keep in sync for no benefit.
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    installCursorHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    const codexResult = installCodexHooks({ home, url: 'https://ts.example.com', token: 'tsm_abc' });
+    expect(codexResult.hookPath).toBe(join(home, '.teamshare', 'hooks', 'teamshare-hook.mjs'));
+  });
+});
+
+describe('connect installs the Cursor hooks alongside the MCP entry', () => {
+  it('writes them when Cursor is present', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['cursor'], now: FIXED_NOW });
+    expect(run.results[0].hooks?.status).toBe('written');
+    expect(existsSync(join(home, '.teamshare', 'hooks', 'teamshare-hook.mjs'))).toBe(true);
+    expect(formatConnectOutput(run)).toContain('session digest and mid-session nudge');
+  });
+
+  it('does not print the Codex trust-prompt notice — Cursor has no such gate', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['cursor'], now: FIXED_NOW });
+    expect(formatConnectOutput(run)).not.toContain('trust');
+  });
+
+  it('writes nothing hook-shaped on a machine without Cursor', () => {
+    // Including ~/.teamshare.json: a credential file is not something to leave
+    // on a machine that has nothing to read it.
+    const home = tmp();
+    const run = runConnect(url, token, { home, identity, only: ['cursor'], now: FIXED_NOW });
+    expect(run.results[0].status).toBe('not-installed');
+    expect(run.results[0].hooks).toBeUndefined();
+    expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
+  });
+
+  it('honours --dry-run', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.cursor'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['cursor'], dryRun: true, now: FIXED_NOW });
+    expect(run.results[0].hooks?.status).toBe('skipped');
+    expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
+    expect(existsSync(join(home, '.teamshare'))).toBe(false);
+  });
+});
+
+describe('connect installs the Codex hooks alongside the MCP entry', () => {
+  it('writes them when Codex is present', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['codex'], now: FIXED_NOW });
+    expect(run.results[0].hooks?.status).toBe('written');
+    expect(existsSync(join(home, '.teamshare', 'hooks', 'teamshare-hook.mjs'))).toBe(true);
+    expect(formatConnectOutput(run)).toContain('session digest and mid-session nudge');
+  });
+
+  it('warns that Codex will not run the hook until its own trust prompt is accepted', () => {
+    // Codex normally requires a persisted trust decision before it runs an
+    // enabled hook (the live test in the "Codex" section of
+    // docs/superpowers/specs/2026-09-09-cursor-hook-contract.md needed
+    // --dangerously-bypass-hook-trust to get past it). Without this notice,
+    // "written" here reads as "working" — the hook stays inert until the user
+    // clears a prompt nothing told them to expect.
+    const home = tmp();
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['codex'], now: FIXED_NOW });
+    expect(formatConnectOutput(run)).toContain('trust');
+  });
+
+  it('writes nothing hook-shaped on a machine without Codex', () => {
+    const home = tmp();
+    const run = runConnect(url, token, { home, identity, only: ['codex'], now: FIXED_NOW });
+    expect(run.results[0].status).toBe('not-installed');
+    expect(run.results[0].hooks).toBeUndefined();
+    expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
+  });
+
+  it('honours --dry-run', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    const run = runConnect(url, token, { home, identity, only: ['codex'], dryRun: true, now: FIXED_NOW });
+    expect(run.results[0].hooks?.status).toBe('skipped');
+    expect(existsSync(join(home, '.teamshare.json'))).toBe(false);
+    expect(existsSync(join(home, '.teamshare'))).toBe(false);
   });
 });

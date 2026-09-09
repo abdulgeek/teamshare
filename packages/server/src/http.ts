@@ -156,6 +156,29 @@ export function validateTeamName(input: unknown): TeamNameResult {
 }
 
 export type InviteEmailResult = { ok: true; value: string } | { ok: false; error: string };
+export type EmailResult = InviteEmailResult;
+
+/** Longest address any surface will accept. */
+export const MAX_EMAIL = 254;
+
+// THE email check for this codebase — shape, placeholder, control chars,
+// length — returning the normalised address. `label` names the thing being
+// checked so one implementation can serve every caller's error prose
+// (`email ...` for an invite, `recipient "sam@team.com" ...` for a share's
+// recipient list) without anyone hand-rolling a second regex. shares.ts
+// calls this for every addressed recipient; see validateShare there.
+export function validateEmailAddress(input: unknown, label = 'email'): EmailResult {
+  if (typeof input !== 'string') return { ok: false, error: `${label} is required and must be a string` };
+  const value = input.trim();
+  if (value.length === 0) return { ok: false, error: `${label} is required and cannot be empty` };
+  if (value.length > MAX_EMAIL) {
+    return { ok: false, error: `${label} is ${value.length} chars; cap is ${MAX_EMAIL}` };
+  }
+  if (PLACEHOLDER.test(value)) return { ok: false, error: `${label} contains an unsubstituted placeholder` };
+  if (hasControlChar(value)) return { ok: false, error: `${label} contains a control character` };
+  if (!EMAIL.test(value)) return { ok: false, error: `${label} is not a valid address` };
+  return { ok: true, value: normalizeEmail(value) };
+}
 
 // The email an admin gives POST /invites — this is the identity source the
 // design doc requires: bound by the lead, at mint time, never by the person
@@ -163,13 +186,7 @@ export type InviteEmailResult = { ok: true; value: string } | { ok: false; error
 // applied here instead since this is now the one place an email enters the
 // system as someone's asserted identity.
 export function validateInviteEmail(input: unknown): InviteEmailResult {
-  if (typeof input !== 'string') return { ok: false, error: 'email is required and must be a string' };
-  const value = input.trim();
-  if (value.length === 0) return { ok: false, error: 'email is required and cannot be empty' };
-  if (PLACEHOLDER.test(value)) return { ok: false, error: 'email contains an unsubstituted placeholder' };
-  if (hasControlChar(value)) return { ok: false, error: 'email contains a control character' };
-  if (!EMAIL.test(value)) return { ok: false, error: 'email is not a valid address' };
-  return { ok: true, value: normalizeEmail(value) };
+  return validateEmailAddress(input, 'email');
 }
 
 export type InviteNameResult = { ok: true; value: string | null } | { ok: false; error: string };

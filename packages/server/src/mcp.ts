@@ -10,6 +10,7 @@ import { CAPS, createShare, getShare, listShares, markStale, retractShare, valid
 import { getUnread, type Digest } from './unread.js';
 import { classifyRelevance, relevanceLabel, formatDay } from './relevance.js';
 import { getReceipts, recordReceipt } from './receipts.js';
+import { foldProjectKey, normalizeProject } from './project.js';
 
 // Stated with its safety limit intact wherever a connected agent is told it
 // may resolve a reference a share names. teamshare stores no Jira/GitHub/
@@ -98,6 +99,31 @@ function fail(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true };
 }
 
+// Accepts a project argument in EITHER shape an LLM caller might reasonably
+// send: a raw git remote (any form normalizeProject folds), or a key that is
+// already normalized (the same value the HTTP /unread route requires, and
+// what a caller would get by echoing back a project it saw on an earlier
+// digest line). Malformed input is a hard failure, never a silent fallback
+// to "no project" — that would widen the result back to the whole team
+// exactly when the caller asked, explicitly, to see less of it.
+//
+// The already-normalized branch is FOLDED (foldProjectKey), not waved through
+// on a shape test. PROJECT_KEY_SHAPE accepts `github.com/ACME/API`, which no
+// reader's normalizeProject ever mints, so passing it through meant `share`
+// scoped a note to a repository that does not exist and `unread` narrowed to
+// one — both silently, both with a key that looked right on the line.
+function resolveProjectArg(project: string | undefined): { ok: true; value?: string } | { ok: false; error: string } {
+  if (!project || !project.trim()) return { ok: true, value: undefined };
+  const trimmed = project.trim();
+  const normalized = normalizeProject(trimmed) ?? foldProjectKey(trimmed);
+  if (normalized) return { ok: true, value: normalized };
+  return {
+    ok: false,
+    error: `project "${project}" is not recognizable as a git remote — pass the output of ` +
+      '`git remote get-url origin`, or omit it for a team-wide share.',
+  };
+}
+
 // Human-readable "how long ago" for a member's last_seen, so `receipts` can
 // distinguish "hasn't read it yet" (recently seen, just hasn't answered)
 // from "hasn't connected in two weeks" (a member who may never see it).
@@ -129,7 +155,15 @@ function renderDigest(digest: Digest): string {
   }
   const lines = digest.shares.map((s) => {
     const grade = s.relevance === 'new' ? '' : ` [${s.relevance}]`;
-    return `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} · ${s.age}${grade} (${s.day}): ${s.what}`;
+    // A scoped share says so, right on the line — otherwise a reader has no
+    // way to tell "this never happened" from "this was never meant for you."
+    const scope = s.project ? ` | ${s.project}` : '';
+    // "to you" rather than the recipient list: the other names on an
+    // addressed share are other people's business, and to_me is true here
+    // exactly when this share was addressed to THIS reader (see
+    // unread.ts's DigestEntry.to_me).
+    const addressed = s.to_me ? ' | to you' : '';
+    return `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} · ${s.age}${grade} (${s.day})${scope}${addressed}: ${s.what}`;
   });
   const more =
     digest.total > digest.shares.length
@@ -166,14 +200,46 @@ export function buildMcpServer(ctx: {
         action: z.string().max(CAPS.action).optional().describe('What teammates should do.'),
         tags: z.array(z.string().max(CAPS.tagLength)).max(CAPS.tags).optional(),
         priority: z.enum(['fyi', 'heads-up', 'blocking']),
+        project: z
+          .string()
+          .max(CAPS.project)
+          .optional()
+          .describe(
+            'For a note about ONE repository, not the whole team — pass its git remote (any form: ' +
+              '`git remote get-url origin`\'s output, https, ssh, scp-style). Omitted (the default) ' +
+              'means the whole team; only set this when the note is genuinely repo-specific.',
+          ),
+        recipients: z
+          .array(z.string())
+          .max(CAPS.recipients)
+          .optional()
+          .describe(
+            'For a note meant for specific people, not the whole team — their email address(es), as ' +
+              'given on the roster. Every address must already belong to someone who has connected at ' +
+              'least once; an invited-but-unconnected teammate cannot be addressed yet, only reached by ' +
+              'a team-wide share. Omitted (the default) or an empty list means the whole team.',
+          ),
       },
     },
-    async ({ what, why, action, tags, priority }) => {
-      const input = { what, why, action, tags, priority };
+    async ({ what, why, action, tags, priority, project, recipients }) => {
+      const projectResult = resolveProjectArg(project);
+      if (!projectResult.ok) return fail(projectResult.error);
+      const input = { what, why, action, tags, priority, project: projectResult.value, recipients };
       const check = validateShare(input);
       if (!check.ok) return fail(check.error);
-      const { id, notified } = createShare(scope, identity.email, input, now());
-      return ok(JSON.stringify({ id, notified }));
+      // createShare throws on a recipient list that would resolve to nobody
+      // real — an address nobody invited, one invited but never connected, a
+      // list naming only the sender, and so on (see shares.ts's
+      // resolveRecipients). Uncaught, that surfaces as an MCP transport
+      // error instead of a message the caller can act on; routed through
+      // fail() it reaches the caller exactly as shares.ts wrote it, naming
+      // the offending address and what to do about it.
+      try {
+        const { id, notified } = createShare(scope, identity.email, input, now());
+        return ok(JSON.stringify({ id, notified }));
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
     },
   );
 
@@ -183,11 +249,20 @@ export function buildMcpServer(ctx: {
       title: 'Unread team shares',
       description:
         'Team shares this user has not viewed or dismissed. Shares past the relevance window are ' +
-        'held back and only counted; pass include_old to get them too.',
-      inputSchema: { include_old: z.boolean().optional() },
+        'held back and only counted; pass include_old to get them too. Pass project to narrow to one ' +
+        "repository's shares plus team-wide ones; omit it to see everything (the default).",
+      inputSchema: {
+        include_old: z.boolean().optional(),
+        project: z.string().optional().describe('A git remote for the repo to narrow to. Omit to see everything.'),
+      },
     },
-    async ({ include_old }) => {
-      const digest = getUnread(scope, identity.email, now(), expiryDays, { includeOld: include_old });
+    async ({ include_old, project }) => {
+      const projectResult = resolveProjectArg(project);
+      if (!projectResult.ok) return fail(projectResult.error);
+      const digest = getUnread(scope, identity.email, now(), expiryDays, {
+        includeOld: include_old,
+        project: projectResult.value,
+      });
       return ok(renderDigest(digest));
     },
   );
@@ -200,7 +275,10 @@ export function buildMcpServer(ctx: {
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      const share = getShare(scope, id);
+      // Viewer-gated in shares.ts: a share addressed to other people is
+      // undefined here, so it gets the identical "no share with id X" a
+      // foreign team's share does — no third state, and no receipt.
+      const share = getShare(scope, id, identity.email);
       if (!share) return fail(`no share with id ${id}`);
 
       // Withdrawn means withdrawn. The author said it no longer applies, so
@@ -256,7 +334,7 @@ export function buildMcpServer(ctx: {
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
-      if (!getShare(scope, id)) return fail(`no share with id ${id}`);
+      if (!getShare(scope, id, identity.email)) return fail(`no share with id ${id}`);
       recordReceipt(scope, id, identity.email, 'dismissed', now());
       return ok(`acknowledged ${id}`);
     },
@@ -278,7 +356,7 @@ export function buildMcpServer(ctx: {
       },
     },
     async ({ tag, sender, limit, include_irrelevant }) => {
-      const shares = listShares(scope, {
+      const shares = listShares(scope, identity.email, {
         tag,
         sender,
         limit,
@@ -313,7 +391,9 @@ export function buildMcpServer(ctx: {
     },
     async ({ id }) => {
       const nowIso = now();
-      const summary = getReceipts(scope, id, nowIso, expiryDays);
+      // Author or recipient only — for a team-wide share that is everyone,
+      // so this is unchanged there.
+      const summary = getReceipts(scope, id, identity.email, nowIso, expiryDays);
       if (!summary) return fail(`no share with id ${id}`);
       // The stale prefix wins over expired: staleness is the author's
       // deliberate act and the more informative fact when both are true.

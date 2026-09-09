@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   openDb, upsertMember, createTeam, hashToken, getOrCreateDefaultTeamId, makeTeamScope,
+  createMemberToken,
   type Db, type TeamScope,
 } from './db.js';
 import { validateShare, createShare, getShare, listShares, retractShare, markStale } from './shares.js';
+import { getUnread } from './unread.js';
 
 let db: Db;
 let scope: TeamScope;
@@ -70,6 +72,144 @@ describe('validateShare', () => {
       expect(r.value.action).toBeNull();
     }
   });
+
+  // project trusts the caller to have already run the value through
+  // normalizeProject (project.ts) — but that trust was harmless only while
+  // nothing could set the field. Once a client (the `share` tool) can put
+  // arbitrary text here, the shape has to be enforced, or a share could be
+  // scoped to a string no reader's own normalizeProject output will ever
+  // equal — silently unreachable rather than team-wide or correctly scoped.
+  it('accepts a project that already looks like a normalized git remote', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', project: 'github.com/acme/api' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.project).toBe('github.com/acme/api');
+  });
+
+  // Regression: PROJECT_KEY_SHAPE is a READER-side validator — "could this be
+  // a key" — and using it here made it the author-side one too, where the
+  // question is "is this the key a reader will mint". It is not the same
+  // question: the shape says yes to `github.com/ACME/API`, which
+  // normalizeProject can never produce, so the share was stored scoped to a
+  // repository that does not exist. Capitalised repo names are ordinary, so an
+  // agent echoing back `github.com/Netflix/Hystrix` published into the void.
+  it('folds an author-supplied project key into the one a reader would actually mint', () => {
+    const cases: [string, string][] = [
+      ['github.com/ACME/API', 'github.com/acme/api'],
+      ['github.com/Netflix/Hystrix', 'github.com/netflix/hystrix'],
+      ['GitHub.com/acme/api', 'github.com/acme/api'],
+      ['github.com/acme/api.git', 'github.com/acme/api'],
+      ['github.com/acme/api/', 'github.com/acme/api'],
+    ];
+    for (const [supplied, want] of cases) {
+      const r = validateShare({ what: 'ok', priority: 'fyi', project: supplied });
+      expect(r.ok, supplied).toBe(true);
+      if (r.ok) expect(r.value.project, supplied).toBe(want);
+    }
+  });
+
+  it('rejects a project that is not normalizeProject-shaped, e.g. a raw URL or a path-traversal string', () => {
+    for (const bad of ['https://github.com/acme/api.git', '../../etc', 'not a remote at all', 'github.com']) {
+      const r = validateShare({ what: 'ok', priority: 'fyi', project: bad });
+      expect(r, bad).toEqual({ ok: false, error: expect.stringContaining('project') });
+    }
+  });
+
+  it('rejects an oversize project and names the field and cap', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', project: `github.com/${'a'.repeat(201)}` });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain('project');
+      expect(r.error).toContain('200');
+    }
+  });
+
+  // The end the folding is for, asserted where it is actually observable: the
+  // reader. Storing the author's capitalisation verbatim meant the share was
+  // addressed to a repo nobody sits in — no digest line, and not even counted
+  // in `older`, so nothing anywhere said it had happened.
+  it('delivers a share whose author capitalised the repo to a reader sitting in that repo', () => {
+    createShare(
+      scope,
+      'adnan@team.com',
+      { what: 'api thing', priority: 'fyi', project: 'github.com/Netflix/Hystrix' },
+      NOW,
+    );
+    const reader = getUnread(scope, 'priya@team.com', NOW, 14, { project: 'github.com/netflix/hystrix' });
+    expect(reader.shares.map((s) => s.what)).toEqual(['api thing']);
+    expect(reader.shares[0].project).toBe('github.com/netflix/hystrix');
+    expect(reader.older).toBe(0);
+  });
+
+  it('treats an omitted or blank project as null, same as why/action', () => {
+    const omitted = validateShare({ what: 'ok', priority: 'fyi' });
+    expect(omitted.ok).toBe(true);
+    if (omitted.ok) expect(omitted.value.project).toBeNull();
+
+    const blank = validateShare({ what: 'ok', priority: 'fyi', project: '   ' });
+    expect(blank.ok).toBe(true);
+    if (blank.ok) expect(blank.value.project).toBeNull();
+  });
+});
+
+// Finding 4: recipients used to bypass validateShare entirely — no shape
+// check, no cap, no length limit, '<script>' stored verbatim — while every
+// other field was gated here. Unvalidated input is also what made the
+// fail-open cases below reachable, so the gate comes first.
+describe('validateShare: recipients', () => {
+  it('treats an omitted or empty list as no recipients at all — the whole team', () => {
+    const omitted = validateShare({ what: 'ok', priority: 'fyi' });
+    expect(omitted.ok).toBe(true);
+    if (omitted.ok) expect(omitted.value.recipients).toEqual([]);
+
+    const empty = validateShare({ what: 'ok', priority: 'fyi', recipients: [] });
+    expect(empty.ok).toBe(true);
+    if (empty.ok) expect(empty.value.recipients).toEqual([]);
+  });
+
+  it('normalises and deduplicates the addresses it accepts, like every other email', () => {
+    const r = validateShare({
+      what: 'ok', priority: 'fyi',
+      recipients: ['SAM@Team.com ', 'sam@team.com', 'Priya@team.com'],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.recipients).toEqual(['sam@team.com', 'priya@team.com']);
+  });
+
+  it('rejects an address that is not one, and names the offending entry', () => {
+    for (const bad of ['<script>', 'not an address', 'sam@team', '${TEAMMATE}', 'sam@team.com, priya@team.com']) {
+      const r = validateShare({ what: 'ok', priority: 'fyi', recipients: ['sam@team.com', bad] });
+      expect(r.ok, bad).toBe(false);
+      // The message must say WHICH one is wrong, not that one of them is.
+      if (!r.ok) expect(r.error, bad).toContain(bad);
+    }
+  });
+
+  it('rejects a blank entry rather than filtering it away', () => {
+    // Filtering is exactly what turned ['   '] into a team-wide broadcast.
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: ['   '] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('recipients');
+  });
+
+  it('rejects a non-string entry instead of throwing a TypeError on it', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: [null as unknown as string] });
+    expect(r.ok).toBe(false);
+  });
+
+  it('caps how many people one share can be addressed to, naming the cap', () => {
+    const many = Array.from({ length: 21 }, (_, i) => `p${i}@team.com`);
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: many });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain('recipients');
+      expect(r.error).toContain('20');
+    }
+  });
+
+  it('caps the length of a single address', () => {
+    const r = validateShare({ what: 'ok', priority: 'fyi', recipients: [`${'a'.repeat(300)}@team.com`] });
+    expect(r.ok).toBe(false);
+  });
 });
 
 describe('createShare', () => {
@@ -80,7 +220,7 @@ describe('createShare', () => {
       NOW,
     );
     expect(notified).toBe(2); // priya + sam, not adnan
-    const row = getShare(scope, id);
+    const row = getShare(scope, id, 'adnan@team.com');
     expect(row?.sender_email).toBe('adnan@team.com');
     expect(row?.tags).toEqual(['auth']);
     expect(row?.priority).toBe('blocking');
@@ -92,19 +232,261 @@ describe('createShare', () => {
   });
 });
 
+describe('createShare: recipients (Task 7)', () => {
+  it('defaults to an empty recipients list, meaning the whole team', () => {
+    const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
+    expect(getShare(scope, id, 'adnan@team.com')?.recipients).toEqual([]);
+  });
+
+  it('stores normalized, deduplicated recipient addresses and reports them back sorted', () => {
+    const { id } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'x', priority: 'fyi', recipients: ['SAM@Team.com ', 'priya@team.com', 'priya@team.com'] },
+      NOW,
+    );
+    expect(getShare(scope, id, 'adnan@team.com')?.recipients).toEqual(['priya@team.com', 'sam@team.com']);
+  });
+
+  it('never counts the sender as notified, even if they name themselves as a recipient', () => {
+    const { notified } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'x', priority: 'fyi', recipients: ['adnan@team.com', 'sam@team.com'] },
+      NOW,
+    );
+    expect(notified).toBe(1);
+  });
+
+  it('writes share_recipients rows scoped to the calling team only', () => {
+    const { id } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'x', priority: 'fyi', recipients: ['sam@team.com'] },
+      NOW,
+    );
+    const rows = db.prepare('SELECT team_id, email FROM share_recipients WHERE share_id = ?').all(id) as {
+      team_id: string;
+      email: string;
+    }[];
+    expect(rows).toEqual([{ team_id: scope.teamId, email: 'sam@team.com' }]);
+  });
+});
+
+// The fail-open cluster from the Task 7 review: three ways a share the author
+// addressed to one person could still reach the whole team. The shape of every
+// test here is the same, because the bug was: assert the write did not happen,
+// AND assert the bystander cannot see anything.
+describe('createShare: an addressed share never fails open (fix round 1)', () => {
+  const countShares = () =>
+    (db.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number }).n;
+  const countRecipientRows = () =>
+    (db.prepare('SELECT COUNT(*) AS n FROM share_recipients').get() as { n: number }).n;
+  /** The bystander's view: Priya was never addressed, so she must see nothing. */
+  const priyaSees = () => getUnread(scope, 'priya@team.com', NOW, 14).total;
+
+  // Finding 1: the share row used to commit BEFORE the recipient rows were
+  // written, so anything that threw in between left a committed share with
+  // zero recipient rows — which AND_RECIPIENT (unread.ts) reads as team-wide.
+  it('leaves no share behind when writing the recipient rows fails part-way', () => {
+    // A deterministic mid-write failure: the share INSERT succeeds, the first
+    // share_recipients INSERT aborts. Nothing about this is specific to how
+    // the recipient rows are built — it is the general "something failed
+    // between the two writes" case.
+    db.exec(`CREATE TRIGGER fail_recipient_write BEFORE INSERT ON share_recipients
+             BEGIN SELECT RAISE(ABORT, 'simulated failure'); END;`);
+
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'for sam only', priority: 'fyi', recipients: ['sam@team.com'] },
+        NOW,
+      ),
+    ).toThrow();
+
+    // Not "the share exists but is addressed to nobody" — the share does not
+    // exist at all.
+    expect(countShares()).toBe(0);
+    expect(countRecipientRows()).toBe(0);
+    expect(priyaSees()).toBe(0);
+  });
+
+  // Finding 1, the reviewer's own probe: recipients: [null] threw a TypeError
+  // out of normalisation, after the share had already committed.
+  it('leaves no share behind when a recipient entry cannot be normalised at all', () => {
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'for sam only', priority: 'fyi', recipients: [null as unknown as string] },
+        NOW,
+      ),
+    ).toThrow();
+
+    expect(countShares()).toBe(0);
+    expect(priyaSees()).toBe(0);
+  });
+
+  // Finding 2: a list the author actually wrote that normalises away to
+  // nothing must be an error. "Empty means the whole team" is about a list
+  // that was omitted or [], never about one that collapsed.
+  it('rejects a list of nothing but blanks rather than broadcasting it', () => {
+    expect(() =>
+      createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi', recipients: ['   '] }, NOW),
+    ).toThrow(/recipients/);
+
+    expect(countShares()).toBe(0);
+    expect(priyaSees()).toBe(0);
+  });
+
+  it('rejects a list that names only the sender rather than broadcasting it', () => {
+    // Mixed case on purpose: the sender is excluded after normalisation, so
+    // this is the same collapse as ['adnan@team.com'].
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['Adnan@Team.com '] },
+        NOW,
+      ),
+    ).toThrow(/only you/);
+
+    expect(countShares()).toBe(0);
+    expect(priyaSees()).toBe(0);
+  });
+
+  // The other half of Finding 2: the fix must not have made the genuine
+  // team-wide cases stricter. Omitted and [] still mean everyone.
+  it('still treats an omitted list and an empty list as the whole team', () => {
+    createShare(scope, 'adnan@team.com', { what: 'omitted', priority: 'fyi' }, NOW);
+    createShare(scope, 'adnan@team.com', { what: 'empty', priority: 'fyi', recipients: [] }, NOW);
+
+    expect(countRecipientRows()).toBe(0);
+    expect(priyaSees()).toBe(2);
+  });
+
+  // Finding 3: an address nobody on the team holds used to be counted as
+  // notified while reaching, and being expected to read, nobody. It is now an
+  // error that names the address — a typo is recoverable, a share published
+  // into the void is not.
+  it('rejects an address nobody on this team holds, and says which one', () => {
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['sma@team.com'] },
+        NOW,
+      ),
+    ).toThrow(/sma@team\.com/);
+
+    expect(countShares()).toBe(0);
+  });
+
+  // Task 8, controller ruling: "not a members row" used to lump together two
+  // different situations with two different remedies. These two tests pin
+  // each branch down on its own.
+  it('tells a never-invited address to check itself or invite the person (never-invited branch)', () => {
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['stranger@elsewhere.com'] },
+        NOW,
+      ),
+    ).toThrow(/not on this team: stranger@elsewhere\.com.*invite them/s);
+    expect(countShares()).toBe(0);
+  });
+
+  it('tells an invited-but-unconnected address to connect once, not that it is unknown (invited branch)', () => {
+    // Invited (a member_tokens row exists, from createMemberToken) but never
+    // authenticated — upsertMember, which is what actually creates a
+    // `members` row, is deliberately NOT called for this address.
+    createMemberToken(scope, 'newhire@team.com', 'New Hire', NOW);
+
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['newhire@team.com'] },
+        NOW,
+      ),
+    ).toThrow(/invited but not yet connected: newhire@team\.com.*connect once/s);
+    // And the never-invited wording must NOT appear for this address.
+    try {
+      createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi', recipients: ['newhire@team.com'] }, NOW);
+    } catch (e) {
+      expect((e as Error).message).not.toContain('not on this team');
+    }
+    expect(countShares()).toBe(0);
+  });
+
+  it('rejects the whole list when one address is unknown, never publishing it half-addressed', () => {
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['sam@team.com', 'sma@team.com'] },
+        NOW,
+      ),
+    ).toThrow(/sma@team\.com/);
+
+    // Not "published, addressed to Sam only" — not published at all.
+    expect(countShares()).toBe(0);
+    expect(countRecipientRows()).toBe(0);
+  });
+
+  it('is scoped: a member of ANOTHER team is not an address this team can use', () => {
+    const otherScope = makeTeamScope(db, createTeam(db, 'Other', hashToken('ts_other'), NOW));
+    upsertMember(otherScope, 'outsider@other.com', 'Outsider', NOW);
+
+    expect(() =>
+      createShare(
+        scope, 'adnan@team.com',
+        { what: 'x', priority: 'fyi', recipients: ['outsider@other.com'] },
+        NOW,
+      ),
+    ).toThrow(/outsider@other\.com/);
+    expect(countShares()).toBe(0);
+  });
+
+  it('reports every addressed person, and only real ones, as notified', () => {
+    const { notified } = createShare(
+      scope, 'adnan@team.com',
+      // Duplicated and differently-cased on purpose: notified counts people,
+      // not entries.
+      { what: 'x', priority: 'fyi', recipients: ['sam@team.com', 'SAM@team.com', 'priya@team.com'] },
+      NOW,
+    );
+    expect(notified).toBe(2);
+  });
+});
+
+describe('retractShare: recipients cascade', () => {
+  it('deletes share_recipients rows via ON DELETE CASCADE, same as receipts', () => {
+    const { id } = createShare(
+      scope, 'adnan@team.com',
+      { what: 'x', priority: 'fyi', recipients: ['sam@team.com'] },
+      NOW,
+    );
+    const before = db
+      .prepare('SELECT COUNT(*) AS n FROM share_recipients WHERE team_id = ? AND share_id = ?')
+      .get(scope.teamId, id) as { n: number };
+    expect(before.n).toBe(1);
+
+    const result = retractShare(scope, id, 'adnan@team.com');
+    expect(result.ok).toBe(true);
+
+    const after = db
+      .prepare('SELECT COUNT(*) AS n FROM share_recipients WHERE team_id = ? AND share_id = ?')
+      .get(scope.teamId, id) as { n: number };
+    expect(after.n).toBe(0);
+  });
+});
+
 describe('listShares', () => {
   it('returns newest first and filters by tag and sender', () => {
     createShare(scope, 'adnan@team.com', { what: 'first', priority: 'fyi', tags: ['auth'] }, '2026-08-01T00:00:00.000Z');
     createShare(scope, 'priya@team.com', { what: 'second', priority: 'fyi', tags: ['ui'] }, '2026-08-02T00:00:00.000Z');
-    expect(listShares(scope, {}).map(s => s.what)).toEqual(['second', 'first']);
-    expect(listShares(scope, { tag: 'auth' }).map(s => s.what)).toEqual(['first']);
-    expect(listShares(scope, { sender: 'Priya@Team.com' }).map(s => s.what)).toEqual(['second']);
-    expect(listShares(scope, { limit: 1 }).map(s => s.what)).toEqual(['second']);
+    expect(listShares(scope, 'adnan@team.com', {}).map(s => s.what)).toEqual(['second', 'first']);
+    expect(listShares(scope, 'adnan@team.com', { tag: 'auth' }).map(s => s.what)).toEqual(['first']);
+    expect(listShares(scope, 'adnan@team.com', { sender: 'Priya@Team.com' }).map(s => s.what)).toEqual(['second']);
+    expect(listShares(scope, 'adnan@team.com', { limit: 1 }).map(s => s.what)).toEqual(['second']);
   });
 
   it('a fresh share has a null stale_at', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
-    expect(getShare(scope, id)?.stale_at).toBeNull();
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBeNull();
   });
 });
 
@@ -118,8 +500,8 @@ describe('retractShare', () => {
     const result = retractShare(scope, id, 'adnan@team.com');
     expect(result.ok).toBe(true);
 
-    expect(getShare(scope, id)).toBeUndefined();
-    expect(listShares(scope, {}).map((s) => s.id)).not.toContain(id);
+    expect(getShare(scope, id, 'adnan@team.com')).toBeUndefined();
+    expect(listShares(scope, 'adnan@team.com', {}).map((s) => s.id)).not.toContain(id);
     const receipts = db.prepare('SELECT * FROM receipts WHERE team_id = ? AND share_id = ?').all(scope.teamId, id);
     expect(receipts).toHaveLength(0);
   });
@@ -129,14 +511,14 @@ describe('retractShare', () => {
     const result = retractShare(scope, id, 'priya@team.com');
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toBe('only the author can retract a share');
-    expect(getShare(scope, id)).toBeDefined();
+    expect(getShare(scope, id, 'adnan@team.com')).toBeDefined();
   });
 
   it('is case-insensitive when comparing the caller to the author', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     const result = retractShare(scope, id, 'Adnan@Team.com');
     expect(result.ok).toBe(true);
-    expect(getShare(scope, id)).toBeUndefined();
+    expect(getShare(scope, id, 'adnan@team.com')).toBeUndefined();
   });
 
   it('reports an unknown id as an error rather than throwing', () => {
@@ -151,14 +533,14 @@ describe('markStale', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     const result = markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
     expect(result.ok).toBe(true);
-    expect(getShare(scope, id)?.stale_at).toBe('2026-08-30T00:00:00.000Z');
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBe('2026-08-30T00:00:00.000Z');
   });
 
   it('rejects mark_stale by anyone other than the author', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     const result = markStale(scope, id, 'priya@team.com', '2026-08-30T00:00:00.000Z');
     expect(result.ok).toBe(false);
-    expect(getShare(scope, id)?.stale_at).toBeNull();
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBeNull();
   });
 
   it('is idempotent: marking an already-stale share does not change stale_at', () => {
@@ -166,7 +548,7 @@ describe('markStale', () => {
     markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
     const second = markStale(scope, id, 'adnan@team.com', '2026-09-15T00:00:00.000Z');
     expect(second.ok).toBe(true);
-    expect(getShare(scope, id)?.stale_at).toBe('2026-08-30T00:00:00.000Z');
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBe('2026-08-30T00:00:00.000Z');
   });
 
   it('reports an unknown id as an error rather than throwing', () => {
@@ -181,15 +563,15 @@ describe('markStale', () => {
     // the receipts stay auditable; that is the difference from retract.
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
-    expect(listShares(scope, {}).map((s) => s.id)).not.toContain(id);
+    expect(listShares(scope, 'adnan@team.com', {}).map((s) => s.id)).not.toContain(id);
   });
 
   it('is still findable by an explicit ask, so the mark is not a one-way door', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'x', priority: 'fyi' }, NOW);
     markStale(scope, id, 'adnan@team.com', '2026-08-30T00:00:00.000Z');
-    expect(listShares(scope, { includeIrrelevant: true }).map((s) => s.id)).toContain(id);
+    expect(listShares(scope, 'adnan@team.com', { includeIrrelevant: true }).map((s) => s.id)).toContain(id);
     // The row itself is untouched — only its visibility changed.
-    expect(getShare(scope, id)?.what).toBe('x');
+    expect(getShare(scope, id, 'adnan@team.com')?.what).toBe('x');
   });
 });
 
@@ -208,14 +590,14 @@ describe('cross-team isolation', () => {
     createShare(scope, 'adnan@team.com', { what: 'team A only', priority: 'fyi' }, NOW);
     createShare(otherScope, 'intruder@other.com', { what: 'team B only', priority: 'fyi' }, NOW);
 
-    expect(listShares(scope, {}).map((s) => s.what)).toEqual(['team A only']);
-    expect(listShares(otherScope, {}).map((s) => s.what)).toEqual(['team B only']);
+    expect(listShares(scope, 'adnan@team.com', {}).map((s) => s.what)).toEqual(['team A only']);
+    expect(listShares(otherScope, 'intruder@other.com', {}).map((s) => s.what)).toEqual(['team B only']);
   });
 
   it('getShare is scoped in SQL: another team cannot fetch a share by id', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'private to team A', priority: 'fyi' }, NOW);
-    expect(getShare(otherScope, id)).toBeUndefined();
-    expect(getShare(scope, id)).toBeDefined();
+    expect(getShare(otherScope, id, 'intruder@other.com')).toBeUndefined();
+    expect(getShare(scope, id, 'adnan@team.com')).toBeDefined();
   });
 
   it('no existence oracle: a foreign-team id and a truly nonexistent id produce the identical "no share" message, never the author-mismatch message', () => {
@@ -233,19 +615,83 @@ describe('cross-team isolation', () => {
     expect((foreignAttempt as { ok: false; error: string }).error).not.toContain('only the author');
 
     // And the original share must be untouched by the foreign attempt.
-    expect(getShare(scope, id)).toBeDefined();
+    expect(getShare(scope, id, 'adnan@team.com')).toBeDefined();
   });
 
   it('markStale is likewise unreachable for another team\'s share', () => {
     const { id } = createShare(scope, 'adnan@team.com', { what: 'team A plan', priority: 'fyi' }, NOW);
     const result = markStale(otherScope, id, 'intruder@other.com', NOW);
     expect(result).toEqual({ ok: false, error: `no share with id ${id}` });
-    expect(getShare(scope, id)?.stale_at).toBeNull();
+    expect(getShare(scope, id, 'adnan@team.com')?.stale_at).toBeNull();
   });
 
   it('createShare\'s notified count only counts the calling team\'s members', () => {
     upsertMember(otherScope, 'second@other.com', 'Second', NOW);
     const { notified } = createShare(otherScope, 'intruder@other.com', { what: 'x', priority: 'fyi' }, NOW);
     expect(notified).toBe(1); // second@other.com only — never team A's 3 members
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: visibility is a property of the ACCESSOR, not of one tool.
+// Task 7 put AND_RECIPIENT in unread.ts only — a delivery filter — so every
+// other read path handed an addressed share to the whole team. These pin the
+// gate where it now lives, so a future caller of getShare/listShares cannot
+// reintroduce the leak by forgetting to filter.
+// ---------------------------------------------------------------------------
+describe('addressed shares are invisible to a bystander', () => {
+  function addressedToSam(): string {
+    return createShare(
+      scope, 'adnan@team.com',
+      { what: 'for sam only', priority: 'fyi', recipients: ['sam@team.com'] },
+      NOW,
+    ).id;
+  }
+
+  it('getShare: a non-recipient gets undefined — the same answer a foreign team gets', () => {
+    const id = addressedToSam();
+    expect(getShare(scope, id, 'priya@team.com')).toBeUndefined();
+  });
+
+  it('getShare: the author and the recipient still get the row', () => {
+    const id = addressedToSam();
+    expect(getShare(scope, id, 'adnan@team.com')?.what).toBe('for sam only');
+    expect(getShare(scope, id, 'sam@team.com')?.what).toBe('for sam only');
+    // Case-folded like every other address comparison in this codebase.
+    expect(getShare(scope, id, 'Sam@Team.com')?.what).toBe('for sam only');
+  });
+
+  it('listShares: excludes a share addressed to someone else', () => {
+    const id = addressedToSam();
+    expect(listShares(scope, 'priya@team.com', {}).map((s) => s.id)).not.toContain(id);
+    expect(listShares(scope, 'sam@team.com', {}).map((s) => s.id)).toContain(id);
+    expect(listShares(scope, 'adnan@team.com', {}).map((s) => s.id)).toContain(id);
+  });
+
+  it('listShares: no filter combination reveals it — not includeIrrelevant, not a sender filter', () => {
+    const id = addressedToSam();
+    expect(
+      listShares(scope, 'priya@team.com', {
+        includeIrrelevant: true,
+        sender: 'adnan@team.com',
+        limit: 200,
+      }).map((s) => s.id),
+    ).not.toContain(id);
+  });
+
+  it('a team-wide share is still visible to the whole team — no recipient rows means everyone', () => {
+    const { id } = createShare(scope, 'adnan@team.com', { what: 'for everyone', priority: 'fyi' }, NOW);
+    expect(getShare(scope, id, 'priya@team.com')).toBeDefined();
+    expect(listShares(scope, 'priya@team.com', {}).map((s) => s.id)).toContain(id);
+  });
+
+  it('cross-team isolation is unaffected: a recipient address does not cross a team boundary', () => {
+    const otherTeamId = createTeam(db, 'isolation team', hashToken('ts_iso'), NOW);
+    const otherScope = makeTeamScope(db, otherTeamId);
+    upsertMember(otherScope, 'sam@team.com', 'Sam Elsewhere', NOW);
+    const id = addressedToSam();
+    // Same address, different team — the share still does not exist for them.
+    expect(getShare(otherScope, id, 'sam@team.com')).toBeUndefined();
+    expect(listShares(otherScope, 'sam@team.com', {}).map((s) => s.id)).not.toContain(id);
   });
 });
