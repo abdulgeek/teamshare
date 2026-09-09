@@ -9,6 +9,13 @@ their next session, and asks if they want the details. Saying yes **or** no
 counts as read — so you can always ask *"who's seen this?"* and get a real
 answer.
 
+It also works the other way round. Name a ticket — *"let's pick up
+EN-2022"* — and if a teammate has already published something about it,
+you're told **before** Claude opens the ticket and starts reading your
+codebase. Even if you read that note last week and forgot. And if someone
+is stuck behind work you're doing, naming the ticket offers to send them a
+status back.
+
 A server is already running. You never need its address. Everything below is
 either a slash command or a single copy-paste line.
 
@@ -179,6 +186,10 @@ cap is why people keep reading them.
 
 Their assistant asks if they want details. Yes shows the full note; no skips
 it. Either way it's marked read and won't nag them again.
+
+That's the *arrival* half. The other half fires when someone names a ticket
+key later on, long after the note stopped being unread — see
+[Before you start on a ticket](#before-you-start-on-a-ticket).
 
 ### How old is it, and does it still matter?
 
@@ -651,6 +662,16 @@ Code commands are this same file with a nicer front door.
 | `/teamshare:status`                 | Am I actually connected?                                                   |
 | `/teamshare:connect`                | Set up your other AI assistants                                            |
 | `/teamshare:setup`                  | Repair a broken config (rarely needed)                                     |
+
+
+**No command needed** — these happen on their own:
+
+
+| When                                     | What happens                                                       |
+| ---------------------------------------- | ------------------------------------------------------------------ |
+| A session starts                         | Unread shares, blocking first then newest                          |
+| A teammate publishes mid-session         | A one-line nudge before your next message                          |
+| You name a ticket key or `owner/repo#N`  | What the team already published about it, plus an offer to reply   |
 
 
 **Terminal** — `node teamshare-team.mjs <command>` after the `curl` above.

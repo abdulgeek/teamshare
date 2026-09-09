@@ -1,11 +1,11 @@
 {
   "name": "teamshare",
-  "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start.",
+  "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start — and get warned about a ticket before they start work on it.",
   "version": "0.11.0",
   "author": {
     "name": "teamshare"
   },
-  "keywords": ["team", "context", "memory", "collaboration"],
+  "keywords": ["team", "context", "memory", "collaboration", "tickets"],
   "userConfig": {
     "TEAMSHARE_TOKEN": {
       "type": "string",

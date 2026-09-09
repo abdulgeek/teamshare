@@ -1,13 +1,13 @@
 {
   "name": "teamshare",
-  "description": "Shared team context for coding agents — one engineer publishes a short note, every teammate's next session surfaces it",
+  "description": "Shared team context for coding agents — one engineer publishes a short note, every teammate's next session surfaces it, and naming a ticket key surfaces what was already said about it",
   "owner": {
     "name": "teamshare"
   },
   "plugins": [
     {
       "name": "teamshare",
-      "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start.",
+      "description": "Shared team context for Claude Code: publish a short note, teammates see it at their next session start — and get warned about a ticket before they start work on it.",
       "version": "0.11.0",
       "source": "./packages/plugin"
     }
