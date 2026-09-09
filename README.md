@@ -278,6 +278,47 @@ name someone; an unqualified "share this" is still team-wide, same as
 leaving `project` off. The two combine — a note for one person about one
 repo — but most shares use neither.
 
+**Just say their name.** You never need to look up an email. The roster has
+carried a name since you invited them, so all of these reach the same
+person:
+
+```
+tell Sam I'm on EN-2022, doing the middleware refactor first
+@Sam I pushed the branch
+let Sam Okafor know before you merge
+```
+
+Two people called Priya? It refuses and names both, rather than guessing:
+
+```
+"Priya" matches 2 people on this team: Priya Raman <priya@acme.com>, Priya
+Nair <priyan@acme.com>. Ask which one they mean and pass that address — a
+private note sent to the wrong person is silent, so this will not guess.
+```
+
+A name that matches nobody is refused too, and never falls back to telling
+everyone. That fallback is the one failure worth designing against: a note
+meant for one person, broadcast to the team.
+
+**Teach it a nickname** once and it sticks, privately to you:
+
+```
+Pri is priyan@acme.com — remember that
+```
+
+```
+Saved: "pri" means priyan@acme.com.
+```
+
+From then on *"tell Pri it's ready for review"* just works, and your name
+for someone never affects what your teammates' names resolve to. Ask *"who's
+on the team?"* any time to see the roster, saved names, and anyone invited
+who hasn't connected yet.
+
+**Someone not on your team can't be reached at all**, by name or by address.
+A share is delivered by being readable to that person's token, and a
+stranger holds none. Invite them and everything above works.
+
 They narrow differently, though. Scope (above) only ever narrows for a
 reader who is themselves inside the matching repo — everyone else still
 sees a scoped share. Addressing is stricter: once a share names people, it

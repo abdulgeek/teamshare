@@ -403,6 +403,43 @@ scoped shares plus every team-wide one — never another repo's.
 
 ## Recipients
 
+**An entry is a name or an address.** `Sam`, `@Sam`, `Sam Okafor`,
+`Sam Okafor <sam@acme.com>` and `sam@acme.com` all resolve to the same
+person. Resolution runs server-side, where the roster is, and in this order:
+anything containing an `@` (other than a leading one) is taken literally as
+an address; then the writer's own saved names; then the roster's names.
+
+Roster matching has two tiers, and the first that matches anything wins.
+The strong tier is a whole name or a first name, together — they compete,
+because both are how a person is actually referred to. The weak tier is any
+other word in the name (a surname) or a prefix, and it is consulted only
+when the strong tier matched nothing at all. That is what lets an exact
+`Sam` beat a `Samantha` who merely starts the same, while still treating
+`Priya` and `Priya Nair` as the genuine question they are.
+
+**Two failures, both hard errors, neither a fallback.** A term matching
+several people returns them all, with addresses, so the caller can ask. A
+term matching nobody lists the team. Neither ever drops the recipient and
+publishes team-wide — that would broadcast a note meant for one person, and
+it is the failure this whole path is shaped to avoid.
+
+**`remember_name`** stores what one member calls an address, keyed on the
+owner as well as the team (`member_aliases`, schema 7). It is private to
+that member and beats the roster spelling for them alone; one shared
+namespace would mean whoever saved "Adnan" first decided who that meant for
+everybody. An address nobody has invited is stored rather than refused, with
+a warning, since the user is recording who they mean and losing the input is
+worse than saying what is still needed.
+
+**`teammates`** returns the roster to a member session, marking the caller
+and anyone invited who has never connected. It exists so an assistant never
+has to ask for the email of a teammate the user just named.
+
+**Cross-team is not possible**, by name or address. Delivery is "this
+person's token can read it"; someone on another team, or on no team, holds
+no such token, and team isolation is enforced structurally. `invite` is the
+only path.
+
 `recipients` addresses a share to specific people instead of the whole
 team. The rules, enforced server-side regardless of what the client sends:
 

@@ -327,12 +327,36 @@ function migrateAddShareRecipients(db: Db, _nowIso: string, probe: MigrationProb
   probe('5->6:version');
 }
 
+// v7: the personal address book behind "tell Adnan".
+//
+// Keyed on the OWNER as well as the team, because what you call someone is
+// yours. One shared namespace would mean whoever saved "Adnan" first decided
+// who that name meant for the whole team — which is exactly the silent
+// mis-delivery this feature has to avoid.
+function migrateAddMemberAliases(db: Db, _nowIso: string, probe: MigrationProbe): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS member_aliases (
+      team_id      TEXT NOT NULL,
+      owner_email  TEXT NOT NULL,
+      alias        TEXT NOT NULL,
+      target_email TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      PRIMARY KEY (team_id, owner_email, alias)
+    );
+  `);
+  probe('6->7:member_aliases-table');
+
+  setConfig(db, 'schema_version', '7');
+  probe('6->7:version');
+}
+
 const MIGRATIONS: Migration[] = [
   { to: 2, run: migrateAddStaleAt },
   { to: 3, run: migrateAddMultiTeam },
   { to: 4, run: migrateAddMemberTokens },
   { to: 5, run: migrateAddProject },
   { to: 6, run: migrateAddShareRecipients },
+  { to: 7, run: migrateAddMemberAliases },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].to;
