@@ -157,3 +157,79 @@ export function resolveProject(cwd) {
     return undefined;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Mention lookup: "has anyone said anything about EN-2022?"
+//
+// Extraction runs here, in the hook, and only extracted identifiers ever leave
+// the machine — never the prompt text itself. That is a promise the README
+// makes on this feature's behalf, and it is kept by this file being the only
+// place the prompt is read.
+// ---------------------------------------------------------------------------
+
+export const MAX_MENTION_KEYS = 5;
+
+// A hand-maintained counterpart to MENTION_KEY_SHAPE in
+// packages/server/src/mentions.ts, in the same way normalizeProjectKey above
+// mirrors normalizeProject: this file ships inside packages/plugin and is
+// bundled into standalone.mjs, so it cannot import from packages/server.
+// packages/plugin/tests/bin-sync.test.mjs asserts the round trip — every key
+// extractKeys mints is one /mentions accepts — because a key the server 400s
+// on is a lookup that silently never happens.
+const TICKET_KEY = /(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]{1,9}-\d{1,6}(?![A-Za-z0-9])/g;
+const REPO_REF = /(?<![A-Za-z0-9._-])[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*#\d{1,6}(?![A-Za-z0-9])/g;
+
+// LETTERS-DIGITS is also the shape of half the vocabulary of software. None of
+// these are ticket keys, and a lookup for one is a request that can only ever
+// come back empty. The list is short on purpose: a false positive here costs
+// one silent round trip, so it is not worth chasing every last one, and a term
+// that genuinely appears in a teammate's share is arguably worth surfacing
+// anyway.
+const NOT_A_TICKET = new Set([
+  'UTF', 'SHA', 'MD', 'RFC', 'ISO', 'IEEE', 'ANSI', 'ASCII', 'CVE', 'CWE', 'COVID',
+  'HTTP', 'HTTPS', 'TLS', 'SSL', 'AES', 'RSA', 'JWT', 'SAML', 'OAUTH',
+  'UTC', 'GMT', 'PEP', 'WCAG', 'SOC', 'FIPS', 'NIST', 'PCI', 'GDPR',
+  'IPV4', 'IPV6', 'BASE', 'GPT', 'DDR', 'USB', 'ES', 'X86', 'ARM', 'AVX', 'SSE',
+  'MP', 'AVC', 'HEVC', 'VP', 'AV', 'CSS', 'ECMA', 'WCAG2',
+]);
+
+/**
+ * Ticket keys and repo references named in the user's prompt, normalised the
+ * way the server matches them (ticket keys upper-case, repo references
+ * lower-case), deduplicated and capped.
+ *
+ * Narrow on purpose. A fuzzy search over prompt text would fire on nearly
+ * every message, and a warning that fires constantly is one nobody reads —
+ * so this matches identifiers or it stays silent.
+ */
+export function extractKeys(text) {
+  const source = String(text ?? '');
+  if (!source) return [];
+  const out = [];
+  const push = (key) => {
+    if (!out.includes(key) && out.length < MAX_MENTION_KEYS) out.push(key);
+  };
+  for (const m of source.matchAll(REPO_REF)) push(m[0].toLowerCase());
+  for (const m of source.matchAll(TICKET_KEY)) {
+    const key = m[0].toUpperCase();
+    if (NOT_A_TICKET.has(key.slice(0, key.indexOf('-')))) continue;
+    push(key);
+  }
+  return out;
+}
+
+export async function fetchMentions(cfg, timeoutMs, keys) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const url = new URL(`${cfg.url}/mentions`);
+    url.searchParams.set('keys', keys.join(','));
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${cfg.token}` },
+      signal: controller.signal,
+    });
+    return { status: res.status, matches: res.ok ? ((await res.json()).matches ?? []) : [] };
+  } finally {
+    clearTimeout(timer);
+  }
+}

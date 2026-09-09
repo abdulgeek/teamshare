@@ -333,6 +333,62 @@ you can address a share to them directly — a team-wide share still reaches
 them in the meantime.
 ```
 
+### Before you start on a ticket
+
+The digest answers *"what haven't I seen?"* — so once you've read something,
+it's gone from it for good. That's usually right, and occasionally very
+wrong:
+
+> Monday afternoon, Ravi shares *"EN-2022 is blocked on my auth refactor,
+> done end of day."* You see it, say "not now", and get on with your
+> evening.
+>
+> Tuesday morning you say **"let's pick up EN-2022."** Claude opens the
+> ticket, reads the comments, greps the repo, opens six files — and twenty
+> thousand tokens later you rediscover what Ravi told you yesterday.
+
+So teamshare also watches for **ticket keys and pull-request references in
+what you type**. When you name one, it asks the server whether anybody has
+published anything about it — read or unread, recent or not, whatever repo
+you're in — before Claude answers you:
+
+```
+teamshare: EN-2022 — Ravi is blocked on this (blocking, since yesterday).
+He expects to land the auth refactor end of day. Want me to tell him
+you've picked it up?
+
+Meanwhile, here's what EN-2022 involves…
+```
+
+**It works in the other direction too.** If you're the one doing the work
+and a teammate has published that they're stuck behind you, naming the
+ticket surfaces that — and offers to publish a status back to them, so they
+learn where it stands without asking. It never publishes anything without
+you saying yes.
+
+If you've already shared something about that ticket yourself, it says so
+and doesn't ask you to do it again. And if nobody has published anything, it
+stays completely silent — which is most of the time, and is the point.
+
+**What it triggers on**, deliberately narrowly: ticket keys like `EN-2022`
+or `PROJ-14`, and repo references like `acme/api#412`. Not free text. A
+warning that fires on every other message is a warning nobody reads, so it
+fires on identifiers or not at all. Things shaped like ticket keys but
+aren't — `UTF-8`, `SHA-256`, `GPT-4` — are ignored.
+
+**What leaves your machine.** Only the identifiers themselves. The hook
+reads your prompt to pull `EN-2022` out of it; the prompt text never goes
+anywhere. `"pick up EN-2022, the customer is furious"` sends exactly
+`EN-2022`.
+
+Two more things worth knowing. Seeing a warning **doesn't mark anything as
+read** — you never chose to read it, so it stays in your digest and its
+author still sees you as not having answered. And it's never a blocker:
+you may be picking the ticket up deliberately, or taking it over. It tells
+you, then gets out of the way.
+
+You can also just ask, any time: *"has anyone said anything about EN-2022?"*
+
 ### Taking something back
 
 Two ways, and they differ in what survives:
@@ -544,14 +600,20 @@ No slash commands here — just ask:
 | "show me shr_ddd81b0b4b92"                                | Full note, marks it read |
 | "share with the team that the auth refactor lands Friday" | Publishes it             |
 | "who's seen my auth share?"                               | Read receipts            |
+| "has anyone said anything about EN-2022?"                  | What the team published about that ticket |
 | "retract that share"                                      | Deletes it everywhere    |
 
 
-**One difference, honestly:** Claude Code gets the automatic start-of-session
-digest, the mid-session nudge when something new lands, and
-`/teamshare:share`. Those are plugin features. Everywhere else you ask for your
-unread shares instead of being told. Publishing, reading, receipts and
-retracting all work identically.
+**Cursor and Codex get the automatic parts too.** `teamshare connect` installs
+the same hooks there, so you get the start-of-session digest, the mid-session
+nudge when something new lands, and the ticket warning described in
+[Before you start on a ticket](#before-you-start-on-a-ticket). Everywhere else
+— VS Code, Windsurf, Zed, Gemini CLI, Continue — you ask for your unread shares
+instead of being told, and you can ask about a ticket by name. Publishing,
+reading, receipts and retracting work identically everywhere.
+
+**One difference, honestly:** the slash commands (`/teamshare:share` and the
+rest) are Claude Code plugin features and exist only there.
 
 ## Step 3 · Running a team from here
 

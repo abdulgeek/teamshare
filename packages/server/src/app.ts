@@ -20,6 +20,7 @@ import {
   verifySignupSecret,
 } from './http.js';
 import { getUnread } from './unread.js';
+import { findMentions, MAX_KEYS, MENTION_KEY_SHAPE } from './mentions.js';
 import { registerMcpRoute } from './mcp.js';
 import { PROJECT_KEY_SHAPE } from './project.js';
 
@@ -136,6 +137,44 @@ export function createApp(opts: AppOptions): express.Express {
       ...getUnread(auth.scope, auth.identity.email, nowIso, expiryDays, { project }),
       team: auth.teamName,
     });
+  });
+
+  // Fast door for the UserPromptSubmit hook's mention lookup: "has anyone said
+  // anything about EN-2022?", asked before the reader spends a token on it.
+  // Same auth and identity as /unread, and no MCP handshake, for the same
+  // reason — the hook stays a dependency-free script.
+  app.get('/mentions', (req, res) => {
+    const nowIso = now();
+    const auth = authenticate(db, req, nowIso);
+    if (!auth.ok) {
+      res.status(auth.status).json({ error: auth.message });
+      return;
+    }
+
+    // `keys` is the only input, and it is checked hard. A malformed key is a
+    // 400, never a dropped term: silently discarding one would turn "nobody
+    // said anything about EN-2022" into an answer the caller never actually
+    // asked for, and this feature's whole value is that its silence is
+    // trustworthy.
+    const rawKeys = req.query.keys;
+    if (typeof rawKeys !== 'string' || !rawKeys.trim()) {
+      res.status(400).json({ error: 'keys is required, e.g. keys=EN-2022,acme/api%23412' });
+      return;
+    }
+    const parts = rawKeys.split(',').map((k) => k.trim()).filter(Boolean);
+    if (parts.length > MAX_KEYS) {
+      res.status(400).json({ error: `at most ${MAX_KEYS} keys per request` });
+      return;
+    }
+    const bad = parts.find((k) => !MENTION_KEY_SHAPE.test(k.includes('#') ? k.toLowerCase() : k.toUpperCase()));
+    if (bad !== undefined) {
+      res.status(400).json({ error: `"${bad}" is not a ticket key or repo reference` });
+      return;
+    }
+
+    touchMember(auth.scope, auth.identity, nowIso);
+    const matches = findMentions(auth.scope, auth.identity.email, parts, nowIso, expiryDays);
+    res.json({ matches });
   });
 
   // §Creating a team. Gated by the instance signup secret in

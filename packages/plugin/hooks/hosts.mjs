@@ -35,7 +35,12 @@ export function normalizePayload(payload = {}, host = 'claude-code') {
   const cwd = Array.isArray(payload.workspace_roots)
     ? payload.workspace_roots[0]
     : payload.cwd;
-  return { sessionId: String(sessionId), event: String(payload.hook_event_name || ''), cwd };
+  // All three hosts call it `prompt` — Claude Code's UserPromptSubmit, Codex's
+  // (see the contract doc's Codex payload capture), and Cursor's
+  // beforeSubmitPrompt. Exposed so the mention lookup can pull ticket keys out
+  // of it; nothing else reads it, and the text itself never leaves the machine.
+  const prompt = typeof payload.prompt === 'string' ? payload.prompt : '';
+  return { sessionId: String(sessionId), event: String(payload.hook_event_name || ''), cwd, prompt };
 }
 
 export function renderResponse({ host, event, context, userMessage }) {

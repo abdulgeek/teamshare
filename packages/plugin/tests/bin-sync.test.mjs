@@ -16,7 +16,8 @@ import { createServer } from 'node:http';
 import { buildStandaloneHook, spliceHookSource } from '../../../scripts/sync-plugin-bin.mjs';
 import { TEAMSHARE_HOOK_SOURCE } from '../../server/src/teamshare-connect.mjs';
 import { normalizeProject, PROJECT_KEY_SHAPE } from '../../server/src/project.ts';
-import { normalizeProjectKey } from '../hooks/shared.mjs';
+import { MENTION_KEY_SHAPE, normalizeKeys } from '../../server/src/mentions.ts';
+import { normalizeProjectKey, extractKeys } from '../hooks/shared.mjs';
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 // tests/ deliberately, not bin/: a directory Claude Code puts on PATH should
@@ -391,6 +392,34 @@ describe('the standalone hook, actually run', () => {
       expect(out).toBe('');
     } finally {
       rmSync(bare, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('extractKeys (plugin) mints only keys /mentions accepts (server)', () => {
+  // Same contract as normalizeProjectKey above, and the same failure if it
+  // breaks: a key the server 400s on is a lookup that silently never happens,
+  // and a silent mention lookup is indistinguishable from "nobody has said
+  // anything about this ticket" — which is the one thing this feature must
+  // never get wrong.
+  const prompts = [
+    'pick up EN-2022',
+    'EN-1 and PROJ-14 and ABCDEFGHIJ-999999',
+    'land ACME/API#412 and my_org.name/some-repo#7',
+    'en-2022, Acme/Api#1',
+    'GEN-2022 EN-20221 A-1 X-11',
+    'UTF-8 SHA-256 RFC-2119 GPT-4',
+    'no identifiers here at all',
+    '',
+  ];
+
+  it('every extracted key survives the server shape unchanged', () => {
+    for (const prompt of prompts) {
+      for (const key of extractKeys(prompt)) {
+        expect(MENTION_KEY_SHAPE.test(key), `${key} (from "${prompt}")`).toBe(true);
+        // And the server does not re-fold it into something else.
+        expect(normalizeKeys([key])).toEqual([key]);
+      }
     }
   });
 });
