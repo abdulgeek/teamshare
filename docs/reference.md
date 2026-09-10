@@ -364,6 +364,42 @@ records the attempt, so a server that is down cannot cost 1.2s on every
 prompt naming a ticket. State lives beside the poll state in
 `~/.teamshare/poll.json`, under `mentioned`, and resets with the session.
 
+## Reading it back: `history`
+
+`list_shares` is a flat inventory, newest first, one line per row, raw
+addresses — right for finding a thing and wrong for catching up. `history`
+renders the same rows the way the exchange actually happened.
+
+- **`with` omitted** — the team feed: notes with no recipients, i.e. what went
+  to everybody.
+- **`with <name or address>`** — everything the reader and that person
+  addressed to each other, in both directions. Resolved by the same
+  `resolveRecipientTerm` that `share` uses, so a name, a `@mention`, a saved
+  nickname or an address all work, and an ambiguous name is the same refusal
+  naming both candidates.
+
+The two never mix. A team-wide note is not part of a one-to-one thread, since
+folding it in would make a broadcast look like something said to one person;
+and an addressed note is not part of the team feed, since that is somebody's
+private conversation and the feed is a view a reader may well read aloud.
+
+**Ordering** is newest-N in SQL, then reversed, so a long thread shows its
+recent end rather than its beginning. The tiebreak within a timestamp is
+`rowid`, not `id`: two notes written in the same millisecond come back in the
+order they were written, where random hex ids would shuffle a rapid
+back-and-forth into an order nobody spoke it in.
+
+**Rendering happens on the server**, not in the model, and the tool's own
+description tells the caller to print the result verbatim. A transcript an
+assistant paraphrases is not a transcript. The whole block still goes inside
+the untrusted fence, because every line of it is teammate-authored; here the
+standing "only relay it to the user" rule is exactly the desired behaviour.
+
+Withdrawn notes are excluded, expired ones are not — this is history, and the
+expiry window is about what gets pushed at people, not what happened.
+`visibleToClause` applies throughout, so a thread the reader was not part of
+is empty rather than hidden.
+
 ## Schema and scoping rules
 
 Two columns were added to the original schema, each as its own migration

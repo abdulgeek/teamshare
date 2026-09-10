@@ -198,9 +198,9 @@ That's the *arrival* half. The other half fires when someone names a ticket
 key later on, long after the note stopped being unread — see
 [Before you start on a ticket](#before-you-start-on-a-ticket).
 
-### Two things worth learning first
+### Three things worth learning first
 
-Everything above is the team-wide case. These two are what you'll actually
+Everything above is the team-wide case. These three are what you'll actually
 reach for day to day. Both are captured from a running server — type the
 left-hand thing, see the right-hand thing.
 
@@ -284,6 +284,48 @@ Not free text, and not lookalikes such as `UTF-8` or `GPT-4`.
 
 More detail, including what leaves your machine:
 [Before you start on a ticket](#before-you-start-on-a-ticket).
+
+#### 3. Read it back like a chat
+
+Shares are notes, but a run of them between two people is a conversation, and
+`/teamshare:history` reads it as one:
+
+```bash
+/teamshare:history Priya
+```
+
+```
+Conversation with Priya Nair <priya@acme.com> — 4 note(s), oldest first. Times are UTC.
+
+Tuesday, 08-09-2026
+  09:14  you         Starting EN-2022, middleware refactor first [heads-up]
+                     why: Auth work depends on it landing
+  14:02  Priya Nair  Got it, holding off on the auth work
+
+Wednesday, 09-09-2026
+  10:31  Priya Nair  Any ETA? I am blocked behind this now [blocking]
+
+Thursday, 10-09-2026
+  08:05  you         Landed it this morning, you are unblocked [heads-up]
+                     do:  Rebase onto main before you start
+```
+
+Oldest first, grouped by day, and each of you sees yourself as **you** — Priya
+running the same command sees her own lines that way instead.
+
+Leave the name off for everything that went to the whole team:
+
+```bash
+/teamshare:history
+```
+
+Team-wide notes and private threads never mix. The team feed shows only what
+went to everybody, and a one-to-one thread shows only what the two of you sent
+each other, so a broadcast never looks like something said just to you. You
+can also just ask, without the command: *"show me my chat with Priya"*.
+
+It reads the most recent notes and says how many older ones it left out. Ask
+for more and it fetches further back.
 
 #### When does it reach them?
 
@@ -762,6 +804,8 @@ No slash commands here — just ask:
 | "tell Sam I'm on EN-2022"                                  | A note only Sam sees     |
 | "who's on the team?"                                       | Names and addresses      |
 | "Pri is priyan@acme.com, remember that"                    | Saves your name for them |
+| "show me my chat with Priya"                               | The thread, as a conversation |
+| "catch me up on the team"                                  | The team feed, oldest first |
 | "retract that share"                                      | Deletes it everywhere    |
 
 
@@ -804,6 +848,7 @@ Code commands are this same file with a nicer front door.
 | Command                             | Does                                                                       |
 | ----------------------------------- | -------------------------------------------------------------------------- |
 | `/teamshare:share <message>`        | Publish a note to the team                                                 |
+| `/teamshare:history [person]`       | Read the notes as a conversation, or one person's thread                   |
 | `/teamshare:generate-secret`        | Recover the live signup secret (optional; not required before create-team) |
 | `/teamshare:create-team <org-name>` | Create a team, save its admin token                                        |
 | `/teamshare:invite <email> [name]`  | One person's token + the message to send them                              |
