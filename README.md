@@ -46,6 +46,25 @@ prompted, and restart Claude Code.
 If your team already uses teamshare, ask whoever set it up to run
 `/teamshare:invite your@email.com` and send you the result. That's Step 2B.
 
+### Keeping it up to date
+
+teamshare does **not** update itself. New commands and hook behaviour arrive
+only when you pull them:
+
+```bash
+claude plugin marketplace update teamshare && claude plugin update teamshare
+```
+
+Then restart Claude Code. `claude plugin list` shows the version you're on.
+
+You can also do it from `/plugin` inside a session, which is where the
+per-marketplace auto-update toggle lives if you'd rather not think about it
+again.
+
+**Server-side changes need none of this.** Anything the server does — how a
+digest is built, what a tool returns — reaches everyone the moment it deploys.
+Only the slash commands and the hooks ship inside the plugin.
+
 ---
 
 
