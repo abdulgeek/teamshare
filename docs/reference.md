@@ -364,6 +364,42 @@ records the attempt, so a server that is down cannot cost 1.2s on every
 prompt naming a ticket. State lives beside the poll state in
 `~/.teamshare/poll.json`, under `mentioned`, and resets with the session.
 
+## Reading it back: `history`
+
+`list_shares` is a flat inventory, newest first, one line per row, raw
+addresses — right for finding a thing and wrong for catching up. `history`
+renders the same rows the way the exchange actually happened.
+
+- **`with` omitted** — the team feed: notes with no recipients, i.e. what went
+  to everybody.
+- **`with <name or address>`** — everything the reader and that person
+  addressed to each other, in both directions. Resolved by the same
+  `resolveRecipientTerm` that `share` uses, so a name, a `@mention`, a saved
+  nickname or an address all work, and an ambiguous name is the same refusal
+  naming both candidates.
+
+The two never mix. A team-wide note is not part of a one-to-one thread, since
+folding it in would make a broadcast look like something said to one person;
+and an addressed note is not part of the team feed, since that is somebody's
+private conversation and the feed is a view a reader may well read aloud.
+
+**Ordering** is newest-N in SQL, then reversed, so a long thread shows its
+recent end rather than its beginning. The tiebreak within a timestamp is
+`rowid`, not `id`: two notes written in the same millisecond come back in the
+order they were written, where random hex ids would shuffle a rapid
+back-and-forth into an order nobody spoke it in.
+
+**Rendering happens on the server**, not in the model, and the tool's own
+description tells the caller to print the result verbatim. A transcript an
+assistant paraphrases is not a transcript. The whole block still goes inside
+the untrusted fence, because every line of it is teammate-authored; here the
+standing "only relay it to the user" rule is exactly the desired behaviour.
+
+Withdrawn notes are excluded, expired ones are not — this is history, and the
+expiry window is about what gets pushed at people, not what happened.
+`visibleToClause` applies throughout, so a thread the reader was not part of
+is empty rather than hidden.
+
 ## Schema and scoping rules
 
 Two columns were added to the original schema, each as its own migration
@@ -498,6 +534,103 @@ The gate lives in the accessors themselves (`getShare`, `listShares`,
 `recordReceipt`), which require the caller's identity and have no
 "unfiltered" default, so a new tool inherits it rather than having to
 remember it.
+
+## How old is it, and does it still matter?
+
+Every share carries **when it was published** — as a relative age *and* a
+readable date: `3 hours ago (Tuesday, 08-09-2026)`. Your assistant can tell you
+when something was shared without guessing, because the server computes both
+rather than leaving Claude to do date maths against a clock it can't see.
+
+No ISO timestamps anywhere. `2026-09-08T11:57:15.607Z` is precise, unreadable,
+and nobody deciding whether a note still matters wants milliseconds. Dates
+render in UTC — the server can't know your timezone, and the relative age
+resolves any near-midnight ambiguity.
+
+Each one also carries a **relevance grade**, and it decides what gets pushed at
+you:
+
+| Grade | Age | Surfaced unprompted? |
+| --- | --- | --- |
+| *(none)* | under a day | yes |
+| `recent` | 1–3 days | yes |
+| `ageing` | 3–7 days | yes |
+| `old` | over 7 days | **no** — held back and counted |
+| `irrelevant` | author withdrew it | **no** — hidden from the team entirely |
+| `expired` | over 14 days | no |
+
+So a session doesn't open with a week-old note about a deadline that has
+already passed. Two deliberate exceptions:
+
+- **`blocking` shares keep showing past 7 days.** That label means "you must
+  not miss this", and quietly dropping one while it's still unread would break
+  the promise it makes. It gets labelled `still blocking, but old` instead.
+- **Nothing is ever silently hidden.** The digest says how many it held back,
+  and *"show me the older shares"* returns them. `list_shares` never hides
+  anything.
+
+The grade shows up in the summary line and in the full detail, so you can skip
+something without opening it:
+
+```
+Share shr_b699466a1071 from ann@x.com, shared 2 days ago (Sunday, 06-09-2026):
+WHAT:   Design review moved to Thursday.
+PRIORITY: fyi
+SHARED: 2 days ago — Sunday, 06-09-2026
+RELEVANCE: recent
+```
+
+## Taking something back: retract and mark irrelevant
+
+Two ways, and they differ in what survives:
+
+**"Mark it irrelevant"** withdraws it from the team. It leaves the digest, it
+leaves `list_shares`, and anyone who asks for it by id gets the fact of the
+withdrawal and nothing else:
+
+```
+Share shr_9f6543d277a5 from ann@x.com is marked IRRELEVANT — its author
+withdrew it on Tuesday, 08-09-2026. Its contents are no longer shown to the team.
+```
+
+You can still see your own, so a mis-click isn't a one-way door. Read receipts
+survive too, which is the point of not deleting it.
+
+**"Retract it"** is the hard delete — the share and every receipt for it are
+gone, as if it had never been sent. For a share that leaked something.
+
+Only the author can do either.
+
+**And if they're already mid-session**, they don't have to wait until tomorrow.
+Anyone with Claude Code open gets told on their next message:
+
+```
+teamshare: 1 new share from Priya (blocking)
+```
+
+Their assistant mentions it in one line at the top of its reply and then
+carries on with whatever they actually asked — it won't hijack what they were
+doing. Details on request.
+
+That check is throttled to once a minute, capped at 1.2 seconds, and silent on
+failure, so it costs about 25ms on a typical message and never blocks you.
+Change the interval with `TEAMSHARE_POLL_SECONDS` (`0` polls every message).
+
+**Everything else is plain English:**
+
+
+| Say this                     | Get this                                                |
+| ---------------------------- | ------------------------------------------------------- |
+| "what's unread?"             | Your waiting shares                                     |
+| "show me the auth one"       | Full note, marks it read                                |
+| "who's seen the auth share?" | `1 viewed, 0 dismissed. Not yet seen by: ada@acme.com…` |
+| "retract my auth share"      | Deleted everywhere                                      |
+| "mark it stale"              | Stops showing as unread, stays in history               |
+
+
+Only the author can retract. Shares expire on their own after 14 days.
+
+---
 
 ## A worked example
 

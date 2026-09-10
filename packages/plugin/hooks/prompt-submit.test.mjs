@@ -150,7 +150,7 @@ describe('mid-session share announcements', () => {
     // it must not hijack whatever the user was actually doing.
     expect(ctx.toLowerCase()).toContain('do not derail');
     expect(ctx.toLowerCase()).toContain('answer what they');
-    expect(ctx.toLowerCase()).toContain('one short line');
+    expect(ctx.toLowerCase()).toContain('couple of lines');
   });
 
   it('wraps teammate text in an unpredictable fence and neutralises a forged one', async () => {
@@ -307,7 +307,7 @@ describe('when the new share was published', () => {
     expect(ctx).toContain('just now');
     expect(ctx).toContain('Sunday, 31-08-2026');
     expect(ctx).not.toContain('2026-08-31T09:00:00.000Z');
-    expect(ctx.toLowerCase()).toContain('say who shared it and');
+    expect(ctx.toLowerCase()).toContain('who shared it, when');
   });
 
   it('renders without the new fields, for a server that predates them', async () => {

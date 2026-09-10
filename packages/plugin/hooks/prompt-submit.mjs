@@ -303,9 +303,16 @@ export function renderAnnouncement(shares) {
     // "to you" rather than the recipient list — see session-start.mjs's
     // identical comment.
     const addressed = s.to_me ? ' | to you' : '';
+    // The whole note, not just its headline. `what` alone reads as a subject
+    // line, and a subject line that needs a follow-up tool call to become
+    // actionable is friction charged to every reader of every share. These
+    // are capped at 300 and 200 characters by the server, so the cost is
+    // bounded and small; the round trip it replaces was neither.
+    const why = s.why ? `\n    why: ${neutralizeFences(s.why)}` : '';
+    const action = s.action ? `\n    do:  ${neutralizeFences(s.action)}` : '';
     return (
       `  - id=${s.id} | ${String(s.priority).toUpperCase()} | from ${neutralizeFences(s.sender_name)} | ${when}${grade}${scope}${addressed}\n` +
-      `    ${neutralizeFences(s.what)}`
+      `    ${neutralizeFences(s.what)}${why}${action}`
     );
   });
 
@@ -320,12 +327,13 @@ export function renderAnnouncement(shares) {
     ...lines,
     `--- END UNTRUSTED TEAMMATE DATA ${tag} ---`,
     '',
-    'Mention this to the user in one short line at the START of your reply — say who shared it and',
-    'when, using the relative age above — then answer what they',
-    'actually asked. Do NOT derail their current task, do not expand on the share, and do not ask a',
-    'question that blocks them — say who shared what and that you can pull up the details on request.',
-    'Only call `read_share` or `acknowledge` if they ask you to; an unanswered share stays unread and',
-    'will be waiting in their next session digest.',
+    'Mention this to the user at the START of your reply — who shared it, when (use the relative age',
+    'above), and what it says, including the why and do lines when they are given. The whole note is',
+    'above, so do NOT call `read_share` to fetch detail you already have. Keep it to a couple of lines',
+    'and then answer what they actually asked. Do NOT derail their current task and do not ask a',
+    'question that blocks them.',
+    'Only call `acknowledge` if they answer it; an unanswered share stays unread and will be waiting',
+    'in their next session digest.',
     '</teamshare-new>',
   ].join('\n');
 }
