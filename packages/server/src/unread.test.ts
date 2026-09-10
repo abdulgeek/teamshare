@@ -532,3 +532,33 @@ describe('getUnread: recipients', () => {
     expect(getShare(scope, hers, 'sam@team.com')).toBeUndefined();
   });
 });
+
+// The headline alone reads as a subject line, and a subject line that needs a
+// second tool call to become actionable charges friction to every reader of
+// every share. "Don't merge src/auth" means nothing without "the refactor
+// lands Friday" beside it.
+describe('the digest carries the whole note', () => {
+  it('returns why and action, not just what', () => {
+    createShare(
+      scope, 'adnan@team.com',
+      {
+        what: 'Auth middleware refactor lands Friday',
+        why: 'Session validation moves into middleware/auth.ts',
+        action: "Don't merge anything touching src/auth",
+        priority: 'blocking',
+      },
+      NOW,
+    );
+    const [s] = getUnread(scope, 'priya@team.com', NOW, 14).shares;
+    expect(s.what).toBe('Auth middleware refactor lands Friday');
+    expect(s.why).toBe('Session validation moves into middleware/auth.ts');
+    expect(s.action).toBe("Don't merge anything touching src/auth");
+  });
+
+  it('leaves them null when the author wrote none', () => {
+    createShare(scope, 'adnan@team.com', { what: 'standup moved to 10am', priority: 'fyi' }, NOW);
+    const [s] = getUnread(scope, 'priya@team.com', NOW, 14).shares;
+    expect(s.why).toBeNull();
+    expect(s.action).toBeNull();
+  });
+});

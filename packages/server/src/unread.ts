@@ -11,6 +11,20 @@ export interface DigestEntry {
   created_at: string;
   priority: Priority;
   what: string;
+  /**
+   * The rest of the note, carried on the digest line itself rather than left
+   * behind a `read_share` call.
+   *
+   * It used to cost a second round trip to learn WHY a teammate said
+   * something — the digest showed the headline and nothing else, so the
+   * reader had to ask, and the assistant had to make another tool call, to
+   * see three hundred characters that were already sitting in the database.
+   * "Don't merge src/auth" is not actionable without the "because the
+   * refactor lands Friday" beside it, and paying a round trip for the half
+   * that makes the other half mean something is the wrong default.
+   */
+  why: string | null;
+  action: string | null;
   /** "3 hours ago" — computed here so no client does date maths against a clock it cannot see. */
   age: string;
   /** "Monday, 08-09-2026" — the calendar day, for readers who want the date rather than the gap. */
@@ -196,7 +210,7 @@ export function getUnread(
 
   const rows = scope.db
     .prepare(
-      `SELECT s.id, s.sender_email, s.priority, s.what, s.created_at, s.stale_at, s.project,
+      `SELECT s.id, s.sender_email, s.priority, s.what, s.why, s.action, s.created_at, s.stale_at, s.project,
               COALESCE(m.name, s.sender_email) AS sender_name,
               EXISTS (
                 SELECT 1 FROM share_recipients sr WHERE sr.team_id = s.team_id AND sr.share_id = s.id
@@ -231,6 +245,8 @@ export function getUnread(
         created_at,
         priority,
         what: r.what as string,
+        why: (r.why as string | null) ?? null,
+        action: (r.action as string | null) ?? null,
         age: freshness.age,
         day: freshness.day,
         relevance: freshness.relevance,

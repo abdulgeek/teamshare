@@ -36,8 +36,8 @@ export const REFERENCE_RESOLUTION_RULE = [
 export const SERVER_INSTRUCTIONS = [
   'teamshare holds context your teammates published for the whole team.',
   'At the start of a conversation, call `unread` and surface anything it returns to the user.',
-  'If the user wants the detail of a share, call `read_share`; if they decline, call `acknowledge`.',
-  'Record a receipt only for shares the user explicitly answered.',
+  'The digest carries the WHOLE note — what, why and what to do — so relay all of it and never call `read_share` for detail you already have.',
+  'When the user answers a share, call `acknowledge` with status "viewed" or "dismissed". Record a receipt only for shares they explicitly answered.',
   'An author can retract (hard delete) or mark_stale (withdraw it from the team as irrelevant) their own shares.',
   'To reach one person rather than the team, pass their NAME or address in `share`\'s `recipients` — never ask the user for an email they already named someone by; `teammates` lists who is on the team.',
   'When the user names a ticket key (EN-2022) or a repo reference (acme/api#412), call `mentions` on it before starting work: a teammate may have already said it is blocked, and that is cheaper to learn now than after reading the ticket.',
@@ -167,7 +167,14 @@ function renderDigest(digest: Digest): string {
     // exactly when this share was addressed to THIS reader (see
     // unread.ts's DigestEntry.to_me).
     const addressed = s.to_me ? ' | to you' : '';
-    return `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} · ${s.age}${grade} (${s.day})${scope}${addressed}: ${s.what}`;
+    // The whole note. See DigestEntry.why in unread.ts for why the headline
+    // alone was the wrong default.
+    const why = s.why ? `\n    why: ${s.why}` : '';
+    const action = s.action ? `\n    do:  ${s.action}` : '';
+    return (
+      `- [${s.id}] ${s.priority.toUpperCase()} from ${s.sender_name} · ${s.age}${grade} (${s.day})${scope}${addressed}: ${s.what}` +
+      `${why}${action}`
+    );
   });
   const more =
     digest.total > digest.shares.length
@@ -386,14 +393,29 @@ export function buildMcpServer(ctx: {
   server.registerTool(
     'acknowledge',
     {
-      title: 'Acknowledge a share without reading it',
-      description: 'Marks a share read (dismissed) when the user declines the detail.',
-      inputSchema: { id: z.string() },
+      title: 'Record that the user answered a share',
+      description:
+        'Marks a share read once the user has responded to it. Pass status "viewed" when they engaged ' +
+        'with it and "dismissed" when they waved it off. Since the digest now carries the whole note, ' +
+        'this is the normal way a share gets marked read — `read_share` is for fetching one the user ' +
+        'names later by id.',
+      inputSchema: {
+        id: z.string(),
+        status: z
+          .enum(['viewed', 'dismissed'])
+          .optional()
+          .describe('Default "dismissed". Use "viewed" when the user actually took the note in.'),
+      },
     },
-    async ({ id }) => {
+    async ({ id, status }) => {
       if (!getShare(scope, id, identity.email)) return fail(`no share with id ${id}`);
-      recordReceipt(scope, id, identity.email, 'dismissed', now());
-      return ok(`acknowledged ${id}`);
+      // Defaults to `dismissed`, which is what this tool has always recorded —
+      // an older client that sends no status keeps its exact previous
+      // behaviour. `viewed` exists because the digest now shows the whole
+      // note: a reader who has read it and says "noted" genuinely viewed it,
+      // and recording that as a dismissal would misreport them to the author.
+      recordReceipt(scope, id, identity.email, status ?? 'dismissed', now());
+      return ok(`acknowledged ${id} as ${status ?? 'dismissed'}`);
     },
   );
 

@@ -1052,3 +1052,51 @@ describe('addressing by name', () => {
     expect(await say(adnan, 'forget_name', { name: 'Boss' })).toContain('no saved name');
   });
 });
+
+describe('the digest shows the whole note, so nobody pays a round trip for it', () => {
+  const say = async (client: Client, name: string, args: Record<string, unknown> = {}) =>
+    textOf(await client.callTool({ name, arguments: args }) as { content: unknown });
+
+  it('puts why and action on the unread line', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({ name: 'share', arguments: {
+      what: 'Auth middleware refactor lands Friday',
+      why: 'Session validation moves into middleware/auth.ts',
+      action: "Don't merge anything touching src/auth",
+      priority: 'blocking',
+    }});
+    const out = await say(await connectWithToken(priyaToken), 'unread');
+    expect(out).toContain('Auth middleware refactor lands Friday');
+    expect(out).toContain('why: Session validation moves into middleware/auth.ts');
+    expect(out).toContain("do:  Don't merge anything touching src/auth");
+  });
+
+  it('says nothing extra for a share with no why or action', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({ name: 'share', arguments: { what: 'standup moved to 10am', priority: 'fyi' } });
+    const out = await say(await connectWithToken(priyaToken), 'unread');
+    expect(out).toContain('standup moved to 10am');
+    expect(out).not.toContain('why:');
+    expect(out).not.toContain('do:');
+  });
+
+  // Reading the whole note in the digest and saying "noted" is a view, not a
+  // dismissal — reporting it as one would misinform the author.
+  it('lets acknowledge record a view rather than only a dismissal', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({ name: 'share', arguments: { what: 'x', priority: 'fyi' } });
+    const priya = await connectWithToken(priyaToken);
+    const id = /\[(shr_[a-z0-9]+)\]/.exec(await say(priya, 'unread'))![1];
+    expect(await say(priya, 'acknowledge', { id, status: 'viewed' })).toContain('as viewed');
+    expect(await say(adnan, 'receipts', { id })).toContain('1 viewed, 0 dismissed');
+  });
+
+  it('still defaults to dismissed, so an older client is unchanged', async () => {
+    const adnan = await connectWithToken(adnanToken);
+    await adnan.callTool({ name: 'share', arguments: { what: 'y', priority: 'fyi' } });
+    const priya = await connectWithToken(priyaToken);
+    const id = /\[(shr_[a-z0-9]+)\]/.exec(await say(priya, 'unread'))![1];
+    await say(priya, 'acknowledge', { id });
+    expect(await say(adnan, 'receipts', { id })).toContain('0 viewed, 1 dismissed');
+  });
+});

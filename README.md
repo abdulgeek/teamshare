@@ -175,7 +175,9 @@ cap is why people keep reading them.
 ```
 3 unread team share(s) published by teammates.
   - id=shr_75c1350c76bb | BLOCKING | from Ann | 3 hours ago (Tuesday, 08-09-2026)
-    Auth refactor lands Friday.
+    Auth middleware refactor lands Friday.
+    why: Session validation moves into middleware/auth.ts
+    do:  Don't merge anything touching src/auth
   - id=shr_6e02cc993393 | BLOCKING | from Ann | 10 days ago (Saturday, 29-08-2026) | old
     Ancient blocking note nobody closed.
   - id=shr_b699466a1071 | FYI | from Ann | 2 days ago (Sunday, 06-09-2026) | recent
@@ -184,8 +186,13 @@ cap is why people keep reading them.
   (1 older unread share(s) held back — ask for the backlog if you want them.)
 ```
 
-Their assistant asks if they want details. Yes shows the full note; no skips
-it. Either way it's marked read and won't nag them again.
+**That's the whole note, not a headline.** The why and the do-this lines are
+right there, so nobody has to ask a follow-up question and spend another round
+trip to find out what a share actually means. "Don't merge src/auth" is not
+useful without "the refactor lands Friday" beside it.
+
+Once they answer — "ok", "noted", "not now" — it's marked read and won't nag
+them again. Anything they ignore stays unread and comes back next session.
 
 That's the *arrival* half. The other half fires when someone names a ticket
 key later on, long after the note stopped being unread — see
