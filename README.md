@@ -4,17 +4,15 @@ Your whole team uses AI coding assistants. None of them know what the others
 have been told.
 
 teamshare fixes that. One person says *"share with the team that the auth
-refactor lands Friday"*. Everyone else's assistant tells them at the start of
-their next session, and asks if they want the details. Saying yes **or** no
-counts as read — so you can always ask *"who's seen this?"* and get a real
+refactor lands Friday"*. Everyone else's assistant tells them the whole note
+at the start of their next session, before they type anything. Once they
+answer it counts as read, so you can ask *"who's seen this?"* and get a real
 answer.
 
-It also works the other way round. Name a ticket — *"let's pick up
-EN-2022"* — and if a teammate has already published something about it,
-you're told **before** Claude opens the ticket and starts reading your
-codebase. Even if you read that note last week and forgot. And if someone
-is stuck behind work you're doing, naming the ticket offers to send them a
-status back.
+It works the other way round too. Name a ticket — *"let's pick up EN-2022"* —
+and if a teammate already published something about it, you're told **before**
+Claude opens the ticket and starts reading your codebase. Even if you read
+that note last week and forgot.
 
 A server is already running. You never need its address. Everything below is
 either a slash command or a single copy-paste line.
@@ -195,14 +193,12 @@ Once they answer — "ok", "noted", "not now" — it's marked read and won't nag
 them again. Anything they ignore stays unread and comes back next session.
 
 That's the *arrival* half. The other half fires when someone names a ticket
-key later on, long after the note stopped being unread — see
-[Before you start on a ticket](#before-you-start-on-a-ticket).
+key later on, long after the note stopped being unread.
 
 ### Three things worth learning first
 
-Everything above is the team-wide case. These three are what you'll actually
-reach for day to day. Both are captured from a running server — type the
-left-hand thing, see the right-hand thing.
+Everything above is the team-wide case. These three are what you'll reach for
+day to day. Type the left-hand thing, see the right-hand thing.
 
 #### 1. Say something to one person
 
@@ -213,47 +209,33 @@ tell Sam I'm on EN-2022, doing the middleware refactor first,
 so don't start the auth work until I land it
 ```
 
-Your assistant publishes it addressed to Sam, and tells you it reached
-exactly one person:
-
-```json
-{ "id": "shr_3f850f4feac7", "notified": 1 }
-```
-
-**Sam sees it, marked `to you`:**
+`notified: 1` is the tell — a team-wide note would name however many
+teammates you have. Sam sees it marked `to you`:
 
 ```
-- [shr_3f850f4feac7] HEADS-UP from Abdul Sagheer · just now (Wednesday, 09-09-2026) | to you: Reviewing EN-2022 now, middleware refactor first
+- [shr_3f850f4feac7] HEADS-UP from Abdul Sagheer · just now (Wednesday, 10-09-2026) | to you: On EN-2022, middleware refactor first
+    do:  Don't start the auth work until I land it
 ```
 
 **Nobody else does.** Not in their digest, and not by asking for that id
 either — they get the same *"no share with id …"* a made-up id gets.
 
-`Sam`, `@Sam`, `Sam Okafor` and `sam@acme.com` all work. If two people
-match, it stops and asks rather than guessing:
+`Sam`, `@Sam`, `Sam Okafor` and `sam@acme.com` all work. Two people match and
+it asks rather than guessing:
 
 ```
 "Priya" matches 2 people on this team: Priya Raman <priya@acme.com>, Priya
 Nair <priyan@acme.com>. Ask which one they mean and pass that address.
 ```
 
-Teach it your own name for someone, once:
-
-```
-Pri is priyan@acme.com — remember that
-```
-
-```
-Saved: "pri" means priyan@acme.com.
-```
-
-That's stored on the server against your account, so it follows you to your
-other machines and survives restarts. It's private to you — your "Pri" never
-changes who a teammate's "Pri" means. Ask *"who's on the team?"* any time to
-see everyone's names.
+Teach it your own name for someone once — *"Pri is priyan@acme.com, remember
+that"* — and it sticks. That's kept on the server against your account, so it
+follows you to your other machines, and it's private to you: your "Pri" never
+changes who a teammate's "Pri" means. Ask *"who's on the team?"* to see
+everyone's names.
 
 More detail, including who can and can't be addressed:
-[Addressing a share to specific people](#addressing-a-share-to-specific-people).
+[Recipients](docs/reference.md#recipients).
 
 #### 2. Get warned before you start on a ticket
 
@@ -283,7 +265,7 @@ Only ticket keys (`EN-2022`) and repo references (`acme/api#412`) trigger it.
 Not free text, and not lookalikes such as `UTF-8` or `GPT-4`.
 
 More detail, including what leaves your machine:
-[Before you start on a ticket](#before-you-start-on-a-ticket).
+[Mentions](docs/reference.md#mentions-retrieval-not-arrival).
 
 #### 3. Read it back like a chat
 
@@ -339,309 +321,20 @@ You don't have to tell anyone to restart anything.
 It won't say the same thing twice — if the session-start digest just showed
 it, the mid-session check stays quiet.
 
-### How old is it, and does it still matter?
-
-Every share carries **when it was published** — as a relative age *and* a
-readable date: `3 hours ago (Tuesday, 08-09-2026)`. Your assistant can tell you
-when something was shared without guessing, because the server computes both
-rather than leaving Claude to do date maths against a clock it can't see.
-
-No ISO timestamps anywhere. `2026-09-08T11:57:15.607Z` is precise, unreadable,
-and nobody deciding whether a note still matters wants milliseconds. Dates
-render in UTC — the server can't know your timezone, and the relative age
-resolves any near-midnight ambiguity.
-
-Each one also carries a **relevance grade**, and it decides what gets pushed at
-you:
-
-| Grade | Age | Surfaced unprompted? |
-| --- | --- | --- |
-| *(none)* | under a day | yes |
-| `recent` | 1–3 days | yes |
-| `ageing` | 3–7 days | yes |
-| `old` | over 7 days | **no** — held back and counted |
-| `irrelevant` | author withdrew it | **no** — hidden from the team entirely |
-| `expired` | over 14 days | no |
-
-So a session doesn't open with a week-old note about a deadline that has
-already passed. Two deliberate exceptions:
-
-- **`blocking` shares keep showing past 7 days.** That label means "you must
-  not miss this", and quietly dropping one while it's still unread would break
-  the promise it makes. It gets labelled `still blocking, but old` instead.
-- **Nothing is ever silently hidden.** The digest says how many it held back,
-  and *"show me the older shares"* returns them. `list_shares` never hides
-  anything.
-
-The grade shows up in the summary line and in the full detail, so you can skip
-something without opening it:
-
-```
-Share shr_b699466a1071 from ann@x.com, shared 2 days ago (Sunday, 06-09-2026):
-WHAT:   Design review moved to Thursday.
-PRIORITY: fyi
-SHARED: 2 days ago — Sunday, 06-09-2026
-RELEVANCE: recent
-```
-
-### Scoping a share to one repository
-
-Most shares are for the whole team. Some aren't — a backend deploy note
-shouldn't reach a frontend engineer's session, and a note about one service
-shouldn't reach someone working on an unrelated one. Publishing is opt-in:
-your assistant sets a project scope only when the note is genuinely about one
-repository, never just because you happened to be sitting in it — "I'm out
-sick today" published from inside a repo is still team-wide.
-
-The scope key is your git remote (`git remote get-url origin`), folded to one
-form regardless of how it's written — `https://github.com/acme/api.git`,
-`git@github.com:acme/api.git`, and every other spelling of the same remote
-all resolve to `github.com/acme/api`. There's no separate ID to set up or
-remember; it's the one thing about a repository that's already the same for
-everyone on the team.
-
-Reading is automatic. Each session resolves its own remote the same way and
-narrows the digest to that repository's shares plus every team-wide one — you
-never ask for it, and there's nothing to configure. **A reader outside any
-repository, or in a repository with no remote, sees the entire board** —
-narrowing only ever happens for a reader who is themselves inside the
-matching repo, so nobody loses shares by working from a scratch directory.
-
-A scoped share says so, right on its line:
-
-```
-- id=shr_75c1350c76bb | BLOCKING | from Ann | 3 hours ago (Tuesday, 08-09-2026) | github.com/acme/api
-    Auth refactor lands Friday.
-```
-
-That's what tells a colleague on a different repository why they never saw
-it — not silence, but a project scope that plainly wasn't theirs.
-
-### Addressing a share to specific people
-
-Sometimes a note is for one person, not the whole team or even one
-repository — *"can you review PR #482 before EOD?"* doesn't belong in
-everyone's digest. Your assistant sets `recipients` only when you actually
-name someone; an unqualified "share this" is still team-wide, same as
-leaving `project` off. The two combine — a note for one person about one
-repo — but most shares use neither.
-
-**Just say their name.** You never need to look up an email. The roster has
-carried a name since you invited them, so all of these reach the same
-person:
-
-```
-tell Sam I'm on EN-2022, doing the middleware refactor first
-@Sam I pushed the branch
-let Sam Okafor know before you merge
-```
-
-Two people called Priya? It refuses and names both, rather than guessing:
-
-```
-"Priya" matches 2 people on this team: Priya Raman <priya@acme.com>, Priya
-Nair <priyan@acme.com>. Ask which one they mean and pass that address — a
-private note sent to the wrong person is silent, so this will not guess.
-```
-
-A name that matches nobody is refused too, and never falls back to telling
-everyone. That fallback is the one failure worth designing against: a note
-meant for one person, broadcast to the team.
-
-**Teach it a nickname** once and it sticks, privately to you:
-
-```
-Pri is priyan@acme.com — remember that
-```
-
-```
-Saved: "pri" means priyan@acme.com.
-```
-
-From then on *"tell Pri it's ready for review"* just works, and your name
-for someone never affects what your teammates' names resolve to. Ask *"who's
-on the team?"* any time to see the roster, saved names, and anyone invited
-who hasn't connected yet.
-
-**Someone not on your team can't be reached at all**, by name or by address.
-A share is delivered by being readable to that person's token, and a
-stranger holds none. Invite them and everything above works.
-
-They narrow differently, though. Scope (above) only ever narrows for a
-reader who is themselves inside the matching repo — everyone else still
-sees a scoped share. Addressing is stricter: once a share names people, it
-reaches **only** them, full stop, regardless of where anyone is working.
-
-Captured from a live server: one team lead (Ana) and three invited
-teammates — Priya, Sam, and Maya — each already connected once.
-
-**An unscoped share reaches all three.** Ana shares *"Standup moved to 10am
-starting Monday"* with neither `project` nor `recipients` set. Priya's,
-Sam's, and Maya's `unread` all show it.
-
-**A share scoped to one repository reaches only a reader in that repo.**
-Ana shares *"API auth middleware refactor lands Friday"* scoped to
-`github.com/acme/api`. Sam, narrowed to that same repo, sees it:
-
-```
-- [shr_ab410596cd6f] HEADS-UP from ana · just now (Tuesday, 08-09-2026) | github.com/acme/api: API auth middleware refactor lands Friday.
-```
-
-Maya, narrowed to a different repo (`github.com/acme/web`), doesn't — her
-digest has only the team-wide standup note.
-
-**An addressed share reaches only its recipient.** Ana addresses *"Can you
-review PR #482 before EOD?"* to Sam alone (`recipients:
-["sam@example.com"]`). Sam's digest marks it **to you** — never the
-recipient list itself, which is nobody else's business to see:
-
-```
-- [shr_ff6f1bd38b9d] HEADS-UP from ana · just now (Tuesday, 08-09-2026) | to you: Can you review PR #482 before EOD?
-```
-
-Priya, who wasn't named, doesn't see it at all — her digest still has only
-the team-wide and scoped notes. Nor can she reach it any other way: it isn't
-in her `list_shares`, and asking for it by id — or asking who it went to —
-gets her the same *"no share with id …"* that a completely made-up id gets.
-Being addressed isn't a delivery preference, it's who the share belongs to.
-
-**Receipts narrow the same way.** Asking "who's seen the PR share?" reports
-only the person it was actually addressed to:
-
-```
-0 viewed, 0 dismissed. Not yet seen by: sam@example.com (last seen just now).
-```
-
-**Every recipient must already be a connected teammate** — invited *and*
-having opened their assistant at least once against this server. An address
-that was never invited is refused outright, naming it:
-
-```
-not on this team: ghost@nowhere.com. Check the address — a typo here would
-address the share to nobody — or invite them (`teamshare invite <email>`)
-before addressing a share to them.
-```
-
-An address that **was** invited but hasn't connected yet gets a different
-answer, because the fix is different — there's nothing to check, they just
-need to show up once:
-
-```
-invited but not yet connected: newhire@example.com. They need to connect
-once (open their assistant so it authenticates against this server) before
-you can address a share to them directly — a team-wide share still reaches
-them in the meantime.
-```
-
-### Before you start on a ticket
-
-The digest answers *"what haven't I seen?"* — so once you've read something,
-it's gone from it for good. That's usually right, and occasionally very
-wrong:
-
-> Monday afternoon, Ravi shares *"EN-2022 is blocked on my auth refactor,
-> done end of day."* You see it, say "not now", and get on with your
-> evening.
->
-> Tuesday morning you say **"let's pick up EN-2022."** Claude opens the
-> ticket, reads the comments, greps the repo, opens six files — and twenty
-> thousand tokens later you rediscover what Ravi told you yesterday.
-
-So teamshare also watches for **ticket keys and pull-request references in
-what you type**. When you name one, it asks the server whether anybody has
-published anything about it — read or unread, recent or not, whatever repo
-you're in — before Claude answers you:
-
-```
-teamshare: EN-2022 — Ravi is blocked on this (blocking, since yesterday).
-He expects to land the auth refactor end of day. Want me to tell him
-you've picked it up?
-
-Meanwhile, here's what EN-2022 involves…
-```
-
-**It works in the other direction too.** If you're the one doing the work
-and a teammate has published that they're stuck behind you, naming the
-ticket surfaces that — and offers to publish a status back to them, so they
-learn where it stands without asking. It never publishes anything without
-you saying yes.
-
-If you've already shared something about that ticket yourself, it says so
-and doesn't ask you to do it again. And if nobody has published anything, it
-stays completely silent — which is most of the time, and is the point.
-
-**What it triggers on**, deliberately narrowly: ticket keys like `EN-2022`
-or `PROJ-14`, and repo references like `acme/api#412`. Not free text. A
-warning that fires on every other message is a warning nobody reads, so it
-fires on identifiers or not at all. Things shaped like ticket keys but
-aren't — `UTF-8`, `SHA-256`, `GPT-4` — are ignored.
-
-**What leaves your machine.** Only the identifiers themselves. The hook
-reads your prompt to pull `EN-2022` out of it; the prompt text never goes
-anywhere. `"pick up EN-2022, the customer is furious"` sends exactly
-`EN-2022`.
-
-Two more things worth knowing. Seeing a warning **doesn't mark anything as
-read** — you never chose to read it, so it stays in your digest and its
-author still sees you as not having answered. And it's never a blocker:
-you may be picking the ticket up deliberately, or taking it over. It tells
-you, then gets out of the way.
-
-You can also just ask, any time: *"has anyone said anything about EN-2022?"*
-
-### Taking something back
-
-Two ways, and they differ in what survives:
-
-**"Mark it irrelevant"** withdraws it from the team. It leaves the digest, it
-leaves `list_shares`, and anyone who asks for it by id gets the fact of the
-withdrawal and nothing else:
-
-```
-Share shr_9f6543d277a5 from ann@x.com is marked IRRELEVANT — its author
-withdrew it on Tuesday, 08-09-2026. Its contents are no longer shown to the team.
-```
-
-You can still see your own, so a mis-click isn't a one-way door. Read receipts
-survive too, which is the point of not deleting it.
-
-**"Retract it"** is the hard delete — the share and every receipt for it are
-gone, as if it had never been sent. For a share that leaked something.
-
-Only the author can do either.
-
-**And if they're already mid-session**, they don't have to wait until tomorrow.
-Anyone with Claude Code open gets told on their next message:
-
-```
-teamshare: 1 new share from Priya (blocking)
-```
-
-Their assistant mentions it in one line at the top of its reply and then
-carries on with whatever they actually asked — it won't hijack what they were
-doing. Details on request.
-
-That check is throttled to once a minute, capped at 1.2 seconds, and silent on
-failure, so it costs about 25ms on a typical message and never blocks you.
-Change the interval with `TEAMSHARE_POLL_SECONDS` (`0` polls every message).
-
-**Everything else is plain English:**
-
-
-| Say this                     | Get this                                                |
-| ---------------------------- | ------------------------------------------------------- |
-| "what's unread?"             | Your waiting shares                                     |
-| "show me the auth one"       | Full note, marks it read                                |
-| "who's seen the auth share?" | `1 viewed, 0 dismissed. Not yet seen by: ada@acme.com…` |
-| "retract my auth share"      | Deleted everywhere                                      |
-| "mark it stale"              | Stops showing as unread, stays in history               |
-
-
-Only the author can retract. Shares expire on their own after 14 days.
-
----
-
-
+### The details, when you need them
+
+The three things above are what you use daily. Everything else has a fuller
+write-up in **[docs/reference.md](docs/reference.md)**, so this page stays a
+guide rather than a manual:
+
+| If you want to know | See |
+| --- | --- |
+| Exactly who can be addressed, and every error you might hit | [Recipients](docs/reference.md#recipients) |
+| What triggers a ticket warning, and what leaves your machine | [Mentions](docs/reference.md#mentions-retrieval-not-arrival) |
+| Scoping a note to one repository, and how a git remote becomes a key | [Schema and scoping rules](docs/reference.md#schema-and-scoping-rules) |
+| Ageing, relevance, and when a note stops being surfaced | [How old is it](docs/reference.md#how-old-is-it-and-does-it-still-matter) |
+| Retracting a note, or marking it no longer relevant | [Taking something back](docs/reference.md#taking-something-back-retract-and-mark-irrelevant) |
+| Who can see what, and why | [Trust model](docs/reference.md#trust-model) |
 
 ## Step 4 · Managing the team
 
@@ -811,8 +504,8 @@ No slash commands here — just ask:
 
 **Cursor and Codex get the automatic parts too.** `teamshare connect` installs
 the same hooks there, so you get the start-of-session digest, the mid-session
-nudge when something new lands, and the ticket warning described in
-[Before you start on a ticket](#before-you-start-on-a-ticket). Everywhere else
+nudge when something new lands, and the ticket warning described above.
+Everywhere else
 — VS Code, Windsurf, Zed, Gemini CLI, Continue — you ask for your unread shares
 instead of being told, and you can ask about a ticket by name. Publishing,
 reading, receipts and retracting work identically everywhere.

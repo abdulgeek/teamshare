@@ -535,6 +535,103 @@ The gate lives in the accessors themselves (`getShare`, `listShares`,
 "unfiltered" default, so a new tool inherits it rather than having to
 remember it.
 
+## How old is it, and does it still matter?
+
+Every share carries **when it was published** — as a relative age *and* a
+readable date: `3 hours ago (Tuesday, 08-09-2026)`. Your assistant can tell you
+when something was shared without guessing, because the server computes both
+rather than leaving Claude to do date maths against a clock it can't see.
+
+No ISO timestamps anywhere. `2026-09-08T11:57:15.607Z` is precise, unreadable,
+and nobody deciding whether a note still matters wants milliseconds. Dates
+render in UTC — the server can't know your timezone, and the relative age
+resolves any near-midnight ambiguity.
+
+Each one also carries a **relevance grade**, and it decides what gets pushed at
+you:
+
+| Grade | Age | Surfaced unprompted? |
+| --- | --- | --- |
+| *(none)* | under a day | yes |
+| `recent` | 1–3 days | yes |
+| `ageing` | 3–7 days | yes |
+| `old` | over 7 days | **no** — held back and counted |
+| `irrelevant` | author withdrew it | **no** — hidden from the team entirely |
+| `expired` | over 14 days | no |
+
+So a session doesn't open with a week-old note about a deadline that has
+already passed. Two deliberate exceptions:
+
+- **`blocking` shares keep showing past 7 days.** That label means "you must
+  not miss this", and quietly dropping one while it's still unread would break
+  the promise it makes. It gets labelled `still blocking, but old` instead.
+- **Nothing is ever silently hidden.** The digest says how many it held back,
+  and *"show me the older shares"* returns them. `list_shares` never hides
+  anything.
+
+The grade shows up in the summary line and in the full detail, so you can skip
+something without opening it:
+
+```
+Share shr_b699466a1071 from ann@x.com, shared 2 days ago (Sunday, 06-09-2026):
+WHAT:   Design review moved to Thursday.
+PRIORITY: fyi
+SHARED: 2 days ago — Sunday, 06-09-2026
+RELEVANCE: recent
+```
+
+## Taking something back: retract and mark irrelevant
+
+Two ways, and they differ in what survives:
+
+**"Mark it irrelevant"** withdraws it from the team. It leaves the digest, it
+leaves `list_shares`, and anyone who asks for it by id gets the fact of the
+withdrawal and nothing else:
+
+```
+Share shr_9f6543d277a5 from ann@x.com is marked IRRELEVANT — its author
+withdrew it on Tuesday, 08-09-2026. Its contents are no longer shown to the team.
+```
+
+You can still see your own, so a mis-click isn't a one-way door. Read receipts
+survive too, which is the point of not deleting it.
+
+**"Retract it"** is the hard delete — the share and every receipt for it are
+gone, as if it had never been sent. For a share that leaked something.
+
+Only the author can do either.
+
+**And if they're already mid-session**, they don't have to wait until tomorrow.
+Anyone with Claude Code open gets told on their next message:
+
+```
+teamshare: 1 new share from Priya (blocking)
+```
+
+Their assistant mentions it in one line at the top of its reply and then
+carries on with whatever they actually asked — it won't hijack what they were
+doing. Details on request.
+
+That check is throttled to once a minute, capped at 1.2 seconds, and silent on
+failure, so it costs about 25ms on a typical message and never blocks you.
+Change the interval with `TEAMSHARE_POLL_SECONDS` (`0` polls every message).
+
+**Everything else is plain English:**
+
+
+| Say this                     | Get this                                                |
+| ---------------------------- | ------------------------------------------------------- |
+| "what's unread?"             | Your waiting shares                                     |
+| "show me the auth one"       | Full note, marks it read                                |
+| "who's seen the auth share?" | `1 viewed, 0 dismissed. Not yet seen by: ada@acme.com…` |
+| "retract my auth share"      | Deleted everywhere                                      |
+| "mark it stale"              | Stops showing as unread, stays in history               |
+
+
+Only the author can retract. Shares expire on their own after 14 days.
+
+---
+
 ## A worked example
 
 **Priya** just got her org's signup secret from the operator. She runs
