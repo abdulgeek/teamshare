@@ -812,3 +812,78 @@ describe('GET /mentions', () => {
     expect(digest.total).toBe(1);
   });
 });
+
+// A 401 with no WWW-Authenticate does not say HOW to authenticate, so an MCP
+// client assumes the modern default (OAuth), finds no metadata here, and
+// reports "couldn't start sign in" — a complaint about a mechanism teamshare
+// has never implemented, shown to someone whose real problem is no token.
+describe('the 401 says which scheme to use', () => {
+  const routes: [string, RequestInit | undefined][] = [
+    ['/unread', undefined],
+    ['/members', undefined],
+    ['/mentions?keys=EN-2022', undefined],
+    ['/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }],
+    ['/invites', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }],
+    ['/revoke', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }],
+    ['/teams/rotate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }],
+  ];
+
+  it('challenges every authenticated route, not just the ones anyone remembered', async () => {
+    for (const [path, init] of routes) {
+      const res = await fetch(`${base}${path}`, init);
+      expect(res.status, path).toBe(401);
+      expect(res.headers.get('www-authenticate'), path).toContain('Bearer realm="teamshare"');
+      // The client must not go looking for an authorization server.
+      expect(res.headers.get('www-authenticate'), path).toContain('no OAuth sign-in flow');
+    }
+  });
+
+  // RFC 6750 §3.1: a request that presented nothing has not erred yet, so no
+  // error code. One that presented a bad credential gets invalid_token, which
+  // is what stops a client retrying the same value forever.
+  it('omits an error code when no credential was sent', async () => {
+    const res = await fetch(`${base}/unread`);
+    expect(res.headers.get('www-authenticate')).not.toContain('error="invalid_token"');
+  });
+
+  it('says invalid_token when one was sent and refused', async () => {
+    const res = await fetch(`${base}/unread`, { headers: { Authorization: 'Bearer tsm_nope' } });
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toContain('error="invalid_token"');
+  });
+
+  it('challenges a malformed Authorization header too', async () => {
+    const res = await fetch(`${base}/unread`, { headers: { Authorization: 'Basic abc' } });
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toContain('error="invalid_token"');
+  });
+
+  it('keeps the body explaining the remedy, which the header cannot', async () => {
+    const body = (await (await fetch(`${base}/unread`)).json()) as { error: string };
+    expect(body.error).toContain('teamshare invite');
+  });
+
+  // Not Bearer auth at all: it wants X-Teamshare-Signup-Secret, and telling a
+  // client to retry with a bearer token would send it somewhere useless.
+  it('does not put a bearer challenge on the signup-secret refusal', async () => {
+    const app2 = createApp({ db, expiryDays: 14, now: () => NOW, signupSecret: 'sekrit' });
+    const srv = await new Promise<Server>((r) => { const s = app2.listen(0, () => r(s)); });
+    const addr = srv.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    const res = await fetch(`http://127.0.0.1:${port}/teams`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'T' }),
+    });
+    await new Promise<void>((r) => srv.close(() => r()));
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toBeNull();
+  });
+
+  it('never emits a header value a quoted-string cannot carry', async () => {
+    const v = (await fetch(`${base}/unread`, { headers: { Authorization: 'Bearer x' } })).headers.get('www-authenticate')!;
+    // A stray quote or control character would corrupt the header for every client.
+    expect(v.match(/"/g)!.length % 2).toBe(0);
+    expect(/[\x00-\x1f\x7f]/.test(v)).toBe(false);
+  });
+});

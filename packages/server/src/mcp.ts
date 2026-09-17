@@ -5,7 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { AppOptions } from './app.js';
 import type { TeamScope } from './db.js';
-import { authenticate, touchMember, type Identity } from './http.js';
+import { authenticate, sendAuthFailure, touchMember, type Identity } from './http.js';
 import { CAPS, createShare, getShare, listShares, markStale, retractShare, validateShare } from './shares.js';
 import { getUnread, type Digest } from './unread.js';
 import { findMentions, MAX_KEYS, MENTION_KEY_SHAPE, type MentionMatch } from './mentions.js';
@@ -685,7 +685,9 @@ export function registerMcpRoute(app: express.Express, opts: AppOptions): void {
     const nowIso = now();
     const auth = authenticate(db, req, nowIso);
     if (!auth.ok) {
-      res.status(auth.status).json({ error: auth.message });
+      // The header matters most here: this is the endpoint an MCP client
+      // probes, and a bare 401 is what it mistakes for an OAuth server.
+      sendAuthFailure(res, auth);
       return;
     }
     // authenticate() resolved the caller's identity and team from their

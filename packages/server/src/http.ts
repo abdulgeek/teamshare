@@ -1,4 +1,4 @@
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { timingSafeEqual } from 'node:crypto';
 import {
   findMemberByTokenHash,
@@ -23,13 +23,73 @@ export interface Identity {
 // scope from this result rather than resolving a team id and building one of
 // its own; that is what makes "pass the wrong team's scope" impossible to
 // write by accident on the authenticated surfaces.
+// ---------------------------------------------------------------------------
+// The 401 challenge
+//
+// A 401 with no WWW-Authenticate header does not say HOW to authenticate, and
+// an MCP client that cannot tell is entitled to assume the modern default:
+// OAuth. It then goes looking for authorization-server metadata, finds
+// nothing here (this server has no OAuth and never has), and reports the
+// failure as "couldn't start sign in" — a message about a mechanism teamshare
+// does not implement, shown to someone whose actual problem is that they have
+// no token. That is what this header fixes: it names the scheme, so the
+// client's complaint matches the truth.
+//
+// Shapes per RFC 6750 §3.1. A request that sent NO credential gets a bare
+// challenge: nothing went wrong yet, the client simply has to present one.
+// A request that sent one and was refused gets `error="invalid_token"`, which
+// is what tells a client to stop retrying the same value.
+//
+// This distinction leaks nothing. It reflects only what the CALLER sent,
+// which the caller already knows — unlike the message bodies below, which
+// deliberately give one answer for "no such team", "wrong token" and
+// "revoked", so that none of them is an existence oracle.
+// ---------------------------------------------------------------------------
+
+export const BEARER_REALM = 'teamshare';
+
+// No `"` and no control characters: this is interpolated into a header value,
+// and a quoted-string cannot carry either.
+const NO_OAUTH_HINT =
+  'Pass a personal teamshare token as a bearer credential. This server has no OAuth sign-in flow.';
+
+export function bearerChallenge(credentialSent: boolean): string {
+  return credentialSent
+    ? `Bearer realm="${BEARER_REALM}", error="invalid_token", error_description="${NO_OAUTH_HINT}"`
+    : `Bearer realm="${BEARER_REALM}", error_description="${NO_OAUTH_HINT}"`;
+}
+
+export interface AuthFailure {
+  ok: false;
+  status: 401;
+  message: string;
+  /** The exact WWW-Authenticate value this refusal must be sent with. */
+  challenge: string;
+}
+
+/**
+ * The ONE way a bearer 401 leaves this server. Routes call this instead of
+ * `res.status(...).json(...)` so that no future route can emit a 401 that
+ * forgets the challenge header — the same reasoning as visibleToClause living
+ * in the accessor rather than in each caller.
+ */
+export function sendAuthFailure(res: Response, failure: AuthFailure): void {
+  res.setHeader('WWW-Authenticate', failure.challenge);
+  res.status(failure.status).json({ error: failure.message });
+}
+
+/** True when the caller sent an Authorization header at all, malformed or not. */
+function sentCredential(req: Request): boolean {
+  return headerValue(req, 'authorization').length > 0;
+}
+
 export type AuthResult =
   | { ok: true; identity: Identity; scope: TeamScope; teamName: string }
-  | { ok: false; status: 401; message: string };
+  | AuthFailure;
 
 export type TeamAuthResult =
   | { ok: true; scope: TeamScope; teamName: string }
-  | { ok: false; status: 401; message: string };
+  | AuthFailure;
 
 // Claude Code sends the literal "${VAR}" text when a variable is unset, so a
 // placeholder must be rejected rather than stored as a member.
@@ -91,7 +151,9 @@ function bearerToken(req: Request): string | undefined {
 export function authenticateAdmin(db: Db, req: Request): TeamAuthResult {
   const token = bearerToken(req);
   const team = token ? findTeamByTokenHash(db, hashToken(token)) : undefined;
-  if (!team) return { ok: false, status: 401, message: INVALID_ADMIN_TOKEN_MESSAGE };
+  if (!team) {
+    return { ok: false, status: 401, message: INVALID_ADMIN_TOKEN_MESSAGE, challenge: bearerChallenge(sentCredential(req)) };
+  }
   return { ok: true, scope: makeTeamScope(db, team.id), teamName: team.name };
 }
 
@@ -107,13 +169,17 @@ export function authenticate(db: Db, req: Request, nowIso: string = new Date().t
   const token = bearerToken(req);
   const tokenHash = token ? hashToken(token) : undefined;
   const member = tokenHash ? findMemberByTokenHash(db, tokenHash) : undefined;
-  if (!member || !tokenHash) return { ok: false, status: 401, message: INVALID_MEMBER_TOKEN_MESSAGE };
+  if (!member || !tokenHash) {
+    return { ok: false, status: 401, message: INVALID_MEMBER_TOKEN_MESSAGE, challenge: bearerChallenge(sentCredential(req)) };
+  }
 
   const team = findTeamById(db, member.teamId);
   // A member token whose team has since vanished should never happen (teams
   // are never deleted today), but fail the same closed 401 rather than throw
   // if it ever does — no different information leaked either way.
-  if (!team) return { ok: false, status: 401, message: INVALID_MEMBER_TOKEN_MESSAGE };
+  if (!team) {
+    return { ok: false, status: 401, message: INVALID_MEMBER_TOKEN_MESSAGE, challenge: bearerChallenge(sentCredential(req)) };
+  }
 
   touchMemberTokenUsage(db, tokenHash, nowIso);
 

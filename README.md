@@ -429,6 +429,29 @@ missing, check `/mcp` and make sure you trusted the workspace.
 Broken config from an old setup? `/teamshare:setup` repairs it. You shouldn't
 need it otherwise.
 
+### "Couldn't start sign in for teamshare"
+
+You tried to connect it from the connectors or plugins page on claude.ai.
+That page authenticates a server by starting a sign-in flow, and **teamshare
+has no sign-in** — it authenticates on a personal token you paste, and nothing
+else. So the flow fails before it begins. Nothing is misconfigured.
+
+Set it up locally instead, which is the flow in [Step 1](#step-1--install):
+
+```bash
+/plugin marketplace add abdulgeek/teamshare
+```
+
+```bash
+/plugin install teamshare
+```
+
+It asks for your token and you paste it. That prompt is the step the claude.ai
+page has no way to show you, which is the whole difference.
+
+No token on that machine? Whoever set the team up runs
+`/teamshare:invite your@email.com` and sends you the result.
+
 ---
 
 
