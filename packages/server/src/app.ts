@@ -13,6 +13,7 @@ import {
 import {
   authenticate,
   authenticateAdmin,
+  sendAuthFailure,
   touchMember,
   validateInviteEmail,
   validateInviteName,
@@ -110,7 +111,7 @@ export function createApp(opts: AppOptions): express.Express {
     const nowIso = now();
     const auth = authenticate(db, req, nowIso);
     if (!auth.ok) {
-      res.status(auth.status).json({ error: auth.message });
+      sendAuthFailure(res, auth);
       return;
     }
 
@@ -147,7 +148,7 @@ export function createApp(opts: AppOptions): express.Express {
     const nowIso = now();
     const auth = authenticate(db, req, nowIso);
     if (!auth.ok) {
-      res.status(auth.status).json({ error: auth.message });
+      sendAuthFailure(res, auth);
       return;
     }
 
@@ -233,7 +234,7 @@ export function createApp(opts: AppOptions): express.Express {
   app.post('/teams/rotate', (req, res) => {
     const auth = authenticateAdmin(db, req);
     if (!auth.ok) {
-      res.status(auth.status).json({ error: auth.message });
+      sendAuthFailure(res, auth);
       return;
     }
     const token = rotateTeamToken(db, auth.scope.teamId);
@@ -254,7 +255,7 @@ export function createApp(opts: AppOptions): express.Express {
 
     const auth = authenticateAdmin(db, req);
     if (!auth.ok) {
-      res.status(auth.status).json({ error: auth.message });
+      sendAuthFailure(res, auth);
       return;
     }
 
@@ -285,7 +286,7 @@ export function createApp(opts: AppOptions): express.Express {
   app.post('/revoke', (req, res) => {
     const auth = authenticateAdmin(db, req);
     if (!auth.ok) {
-      res.status(auth.status).json({ error: auth.message });
+      sendAuthFailure(res, auth);
       return;
     }
 
@@ -314,7 +315,7 @@ export function createApp(opts: AppOptions): express.Express {
     }
     const memberAuth = authenticate(db, req, now());
     if (!memberAuth.ok) {
-      res.status(memberAuth.status).json({ error: memberAuth.message });
+      sendAuthFailure(res, memberAuth);
       return;
     }
     res.json({ team: memberAuth.teamName, members: listRoster(memberAuth.scope) });
