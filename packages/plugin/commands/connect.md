@@ -53,11 +53,22 @@ Use it when the user says something like "set this up in Cursor too".
 
 ## What the other assistants get, and do not get
 
-Be accurate about this: they get the teamshare **tools** — publishing a share,
-reading unread ones, receipts, retracting. They do **not** get the automatic
-session-start digest or `/teamshare:share`; those are Claude Code plugin features. In
-another assistant the user asks for their unread shares in plain language
-instead.
+Be accurate about this, and note it differs by assistant.
+
+**Cursor and Codex get the automatic parts too.** This installs the standalone
+hook and the credential it reads, plus their own hook config, so they get the
+start-of-session digest, the mid-session nudge when something new lands, and
+the ticket warning when a prompt names a key. Say so — it used to be untrue and
+this file said so for a while after it stopped being.
+
+**Everywhere else** (VS Code, Windsurf, Gemini CLI, Cline, Zed, Continue) gets
+the teamshare **tools** only: publishing, unread, the conversation transcript,
+receipts, retracting, addressing someone by name. The user asks for their
+unread shares in plain language rather than being told.
+
+**Nowhere else gets the slash commands.** `/teamshare:share`, `/teamshare:history`
+and the rest are Claude Code plugin features. The underlying tools are all
+reachable by asking in plain words.
 
 ## Rules
 
